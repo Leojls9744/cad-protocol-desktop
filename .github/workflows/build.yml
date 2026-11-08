@@ -4,7 +4,8 @@ name: Build Windows installer
 # installer is kept with the run for 30 days. A version tag (v1.0.0 and so
 # on), or running this by hand with "draft release" ticked, also makes a
 # draft release with the installer and its SHA-256, which a maintainer
-# publishes after looking it over.
+# publishes after looking it over. If that version's release is already
+# published, the installer and SHA-256 are added to it instead.
 
 on:
   push:
@@ -14,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       draft_release:
-        description: "Also make a draft release for the version in package.json"
+        description: "Also release the version in package.json: a draft, or the files added to it if already published"
         type: boolean
         default: false
 
@@ -93,5 +94,12 @@ jobs:
             cat dist/SHA256SUMS.txt
             echo '```'
           } > notes.md
-          gh release create "$tag" dist/CAD-Protocol-Setup.exe dist/SHA256SUMS.txt \
-            --draft --target "$GITHUB_SHA" --title "CAD Protocol for Windows $tag" --notes-file notes.md
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id >/dev/null 2>&1; then
+            # Already published (for instance by hand on GitHub): attach the
+            # files to it, replacing any old ones, and refresh its notes.
+            gh release upload "$tag" dist/CAD-Protocol-Setup.exe dist/SHA256SUMS.txt --clobber
+            gh release edit "$tag" --notes-file notes.md
+          else
+            gh release create "$tag" dist/CAD-Protocol-Setup.exe dist/SHA256SUMS.txt \
+              --draft --target "$GITHUB_SHA" --title "CAD Protocol for Windows $tag" --notes-file notes.md
+          fi
