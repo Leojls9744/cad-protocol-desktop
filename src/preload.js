@@ -2,8 +2,9 @@
 // Runs before the app's page in each window, in its own sandboxed world.
 // It gives the CAD Protocol app, and only the app, a small window.cadpDesktop
 // object: that it is running in the desktop app, its version, the pointer
-// speed setting, and Sign in with your browser. Nothing else of the computer
-// is reachable.
+// speed setting, Sign in with your browser, whether a newer installer is out,
+// and a say before the window closes. Nothing else of the computer is
+// reachable.
 
 const { contextBridge, ipcRenderer } = require("electron");
 
@@ -29,6 +30,27 @@ if (appOrigin && window.location.origin === appOrigin) {
       /** Opens the app in the person's browser to sign in; resolves with { chain, principal }. */
       withBrowser: (publicKeyHex) => ipcRenderer.invoke("cadp:sign-in:browser", publicKeyHex),
       cancel: () => ipcRenderer.invoke("cadp:sign-in:cancel"),
+    },
+    /** 1.2: { current, latest, newer, url } from GitHub, at most every 6 hours. */
+    update: {
+      get: () => ipcRenderer.invoke("cadp:update:get"),
+    },
+    /**
+     * 1.2: `handler` runs when the window is about to close (it may save and
+     * sign out); the window closes when its promise settles, or after a minute.
+     * A new handler replaces the last.
+     */
+    onClosing: (handler) => {
+      ipcRenderer.removeAllListeners("cadp:closing");
+      ipcRenderer.on("cadp:closing", async (_event, id) => {
+        ipcRenderer.send("cadp:close-started", id);
+        try {
+          await handler();
+        } catch {
+          // Closing goes ahead whatever the page did.
+        }
+        ipcRenderer.send("cadp:close-done", id);
+      });
     },
   });
 }

@@ -9,7 +9,9 @@
 //   put back the moment it isn't;
 // - links to other sites open in the person's own browser;
 // - "Sign in with your browser", since Google won't sign anyone in inside an
-//   app's own window (see browser-sign-in.js).
+//   app's own window (see browser-sign-in.js);
+// - 1.2: asking the app before its window closes, so it can save and sign
+//   out (close-guard.js), and whether a newer installer is out (updates.js).
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -17,11 +19,13 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, screen, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, net, powerMonitor, screen, session, shell } = require("electron");
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
+const { createCloseGuard } = require("./close-guard");
+const { createUpdateCheck } = require("./updates");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
@@ -75,6 +79,17 @@ function start() {
   const store = createStore(path.join(data, "desktop-settings.json"), log);
   let pointer = null;
   let mainWindow = null;
+  const updates = createUpdateCheck({
+    current: app.getVersion(),
+    fetchJson: async (url) => {
+      const res = await net.fetch(url, {
+        headers: { Accept: "application/vnd.github+json", "User-Agent": `CAD-Protocol-Desktop/${app.getVersion()}` },
+      });
+      if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+      return res.json();
+    },
+    log,
+  });
   const browserSignIn = createBrowserSignIn({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
@@ -221,7 +236,21 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       browserSignIn.cancel();
     });
+    ipcMain.handle("cadp:update:get", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return updates.get();
+    });
+    // The page's answers to "the window is closing" (close-guard.js).
+    ipcMain.on("cadp:close-started", (event, id) => {
+      if (fromApp(event) && closeGuard) closeGuard.started(id);
+    });
+    ipcMain.on("cadp:close-done", (event, id) => {
+      if (fromApp(event) && closeGuard) closeGuard.done(id);
+    });
   }
+
+  /** The main window's close handshake, made with the window. */
+  let closeGuard = null;
 
   function createMainWindow() {
     const saved = store.get("window", null);
@@ -266,6 +295,7 @@ function start() {
         detail: "Leave anyway? The unsaved changes will be lost.",
       });
       if (choice === 0) event.preventDefault();
+      else if (closeGuard) closeGuard.reset();
     });
 
     contents.on("render-process-gone", (_event, details) => {
@@ -273,7 +303,20 @@ function start() {
       if (details.reason !== "clean-exit") contents.reload();
     });
 
-    win.on("close", () => {
+    closeGuard = createCloseGuard({
+      ask: (id) => win.webContents.send("cadp:closing", id),
+      close: () => {
+        if (!win.isDestroyed()) win.close();
+      },
+    });
+    win.on("close", (event) => {
+      // Asked first, unless the page isn't the app (the offline page) or it's
+      // already been asked and answered.
+      const onApp = config.isAppUrl(win.webContents.getURL());
+      if (onApp && closeGuard && closeGuard.request()) {
+        event.preventDefault();
+        return;
+      }
       store.set("window", { maximized: win.isMaximized(), bounds: win.getNormalBounds() });
     });
     win.on("closed", () => {

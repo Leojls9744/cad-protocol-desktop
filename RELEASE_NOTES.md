@@ -1,5 +1,7 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.2: signing out on its own, and new versions.** With the app's newest web build, closing the window saves your open drawings to your vault and signs you out, unless you turn that off in Settings › Account and security. Every sign-in also signs out after a time without activity (10 minutes unless you change it), with a minute's warning, and a desktop sign-in lasts 8 hours unless you change it. The app now checks GitHub for a newer installer and says so once per version. Install 1.2 over 1.1; your settings stay.
+
 **New in 1.1: Sign in with your browser.** Google doesn't allow its sign-in inside an app's own window ("This browser or app may not be secure"), so the sign-in card now has **Sign in with your browser**. It opens CAD Protocol in your own browser, where you sign in as usual and press **Continue**. Internet Identity opens once more; pick the same identity. Your browser tab then says you're signed in, and the desktop app comes to the front, signed in to the same account with a session of its own. A passkey (Windows Hello) still works in the desktop app directly: **Sign in here with a passkey**. Installing 1.1 over 1.0 keeps your settings.
 
 What the desktop app adds:
