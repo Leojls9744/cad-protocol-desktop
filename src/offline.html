@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'unsafe-inline'" />
+    <title>CAD Protocol</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: #000;
+        color: #e8e8ea;
+        font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
+        display: grid;
+        place-items: center;
+      }
+      main { max-width: 26rem; padding: 0 1.5rem; }
+      h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.5rem; }
+      p { margin: 0 0 1.25rem; color: #a9a9b2; }
+      a.button {
+        display: inline-block;
+        padding: 0.55rem 1.1rem;
+        border-radius: 6px;
+        background: #2f8bff;
+        color: #fff;
+        text-decoration: none;
+        font-weight: 600;
+      }
+      a.button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+      small { display: block; margin-top: 1.25rem; color: #6f6f78; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Can't reach CAD Protocol</h1>
+      <p>The desktop app opens CAD Protocol on the Internet Computer, so it needs an internet connection. Check you're online, then try again.</p>
+      <a class="button" id="retry" href="https://cad-dza.caffeine.xyz/">Try again</a>
+      <small id="reason"></small>
+    </main>
+    <script>
+      const reason = new URLSearchParams(location.search).get("reason");
+      if (reason) document.getElementById("reason").textContent = `Details: ${reason}`;
+      // Try again by itself every 15 seconds.
+      setTimeout(() => document.getElementById("retry").click(), 15000);
+    </script>
+  </body>
+</html>

@@ -1,0 +1,75 @@
+{
+  "name": "cad-protocol-desktop",
+  "productName": "CAD Protocol",
+  "version": "1.0.0",
+  "description": "CAD Protocol for Windows: the live CAD Protocol app in its own window, with a faster pointer while you draft.",
+  "main": "src/main.js",
+  "private": true,
+  "author": "leojls9744",
+  "license": "MIT",
+  "homepage": "https://github.com/leojls9744/cad-protocol-desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/leojls9744/cad-protocol-desktop.git"
+  },
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test \"test/*.test.js\"",
+    "dist": "electron-builder --win nsis --x64 --publish never"
+  },
+  "dependencies": {
+    "koffi": "3.3.7"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "com.cadprotocol.desktop",
+    "productName": "CAD Protocol",
+    "copyright": "Copyright © 2026 leojls9744",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/@koromix/**"
+    ],
+    "npmRebuild": false,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "onlyLoadAppFromAsar": true,
+      "grantFileProtocolExtraPrivileges": false
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "CAD-Protocol-Setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "CAD Protocol",
+      "uninstallDisplayName": "CAD Protocol",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
+    }
+  }
+}

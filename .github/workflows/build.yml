@@ -1,0 +1,86 @@
+name: Build Windows installer
+
+# Every push builds the installer and checks it on real Windows; the
+# installer is kept with the run for 30 days. A version tag (v1.0.0 and so
+# on) also makes a draft release with the installer and its SHA-256, which a
+# maintainer publishes after looking it over.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build the installer
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: Check the packaged app on Windows
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1
+          $out = Join-Path $env:RUNNER_TEMP "smoke.json"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test=$out" -PassThru
+          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "The app didn't finish its check in 90 seconds." }
+          if (Test-Path "$out.log") { Get-Content "$out.log" }
+          if (-not (Test-Path $out)) { throw "The app didn't write its check." }
+          Get-Content $out
+          $r = Get-Content $out -Raw | ConvertFrom-Json
+          if ($r.error) { throw "The check failed: $($r.error)" }
+          if (-not $r.supported) { throw "Pointer speed isn't available in the packaged app." }
+          if ($r.during -ne $r.target) { throw "Setting the pointer speed didn't take." }
+          if ($r.after -ne $r.before) { throw "The pointer speed wasn't put back." }
+          if ($r.config.signIn -ne "signin") { throw "Internet Identity windows aren't recognised." }
+
+      - name: SHA-256
+        shell: bash
+        run: |
+          cd dist
+          sha256sum CAD-Protocol-Setup.exe | sed 's/ \*/  /' | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CAD-Protocol-Setup
+          retention-days: 30
+          path: |
+            dist/CAD-Protocol-Setup.exe
+            dist/SHA256SUMS.txt
+
+      - name: Draft a release for the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            cat RELEASE_NOTES.md
+            echo
+            echo "SHA-256 of CAD-Protocol-Setup.exe:"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/CAD-Protocol-Setup.exe dist/SHA256SUMS.txt \
+            --draft --title "CAD Protocol for Windows $GITHUB_REF_NAME" --notes-file notes.md
