@@ -20,6 +20,12 @@ Each installer is built by GitHub Actions from the code in this repository ([the
   - **When yours comes back:** the moment you switch to another program, minimise, lock the screen or quit.
   - **Never saved:** the change is never written to your Windows settings, so signing out always resets it. If the app is ever stopped mid-session, the next launch puts your speed back.
   - **Changing it:** in the app, under Settings › Desktop app, pick a speed from 1 to 20, Automatic, or Off.
+- **Sign in with your browser.** Google doesn't allow its sign-in inside an app's own window, so the desktop app signs in through your browser instead, the way native apps are meant to ([RFC 8252](https://www.rfc-editor.org/rfc/rfc8252)):
+  - **Your key stays here:** the app's page makes a session key, which never leaves the desktop app.
+  - **One listener, this computer only:** [`src/browser-sign-in.js`](src/browser-sign-in.js) listens once on `127.0.0.1` with a random state, for up to 10 minutes.
+  - **You sign in as usual:** it opens CAD Protocol's `/desktop-sign-in` page in your browser. You sign in there (Google works) and press Continue.
+  - **A session of its own:** the page starts a separate Internet Identity session for the same account and delegates it to the desktop app's key. It hands that back to `127.0.0.1`, where the state is checked, and the desktop app is signed in. Signing out in one leaves the other signed in.
+  - **A passkey still works directly in the desktop app.**
 - **Every key goes to the drawing.** There's no menu bar, so no browser shortcuts get in the way.
 - **More room.** No tabs or address bar, and its own window and taskbar icon.
 - **Unsaved drawings are protected.** It asks before closing with unsaved changes, as the browser does.
@@ -32,7 +38,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 - **The main window stays on the app.** It only shows pages from `https://cad-dza.caffeine.xyz`. Any other link opens in your own browser.
 - **Sign-in.** Internet Identity (`id.ai`) opens in its own small window, so sign-in works as it does in the browser.
 - **Report windows.** The app's own printable reports open in their own window.
-- **One thing to the computer:** the app's page can reach the pointer-speed setting. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
+- **Two things to the computer:** the app's page can reach the pointer-speed setting, and it can start Sign in with your browser. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
 - **Permissions:** only clipboard, full screen, pointer lock and notifications are allowed, and only to the app. The camera, microphone and location are refused.
 - **Settings kept on the computer:** only the window's size and place, the pointer setting, and a short log, all in `%APPDATA%\CAD Protocol`. Drawings and files stay in your encrypted vault.
 - **Hardened Electron options:** "run as Node" and debugging flags are switched off in the executable.
@@ -43,6 +49,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 | --- | --- |
 | [`src/main.js`](src/main.js) | The window, links, permissions, focus and the Windows build's check |
 | [`src/config.js`](src/config.js) | The app's address and which pages may open where |
+| [`src/browser-sign-in.js`](src/browser-sign-in.js) | Sign in with your browser: the one-use listener on `127.0.0.1` |
 | [`src/pointer-speed.js`](src/pointer-speed.js) | Reading and setting the pointer speed (Windows' `SystemParametersInfo`, through [koffi](https://koffi.dev)) |
 | [`src/preload.js`](src/preload.js) | The small `window.cadpDesktop` object the app sees |
 | [`src/store.js`](src/store.js) | The settings file and log |
@@ -67,6 +74,8 @@ if (window.cadpDesktop) {
   const status = await window.cadpDesktop.pointerSpeed.get();
   // { supported, chosen, automatic, off, own, inUse, defaultSpeed, min, max }
   await window.cadpDesktop.pointerSpeed.set(16); // null = automatic, 0 = off
+  // 1.1 on: { chain, principal } once the browser hands the sign-in back
+  const { chain, principal } = await window.cadpDesktop.signIn.withBrowser(publicKeyHex);
 }
 ```
 

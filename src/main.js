@@ -7,7 +7,9 @@
 // - its own window and taskbar icon, with no browser bars or tabs;
 // - a faster pointer while CAD Protocol is in front (see pointer-speed.js),
 //   put back the moment it isn't;
-// - links to other sites open in the person's own browser.
+// - links to other sites open in the person's own browser;
+// - "Sign in with your browser", since Google won't sign anyone in inside an
+//   app's own window (see browser-sign-in.js).
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -19,6 +21,7 @@ const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, screen, session
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
+const { createBrowserSignIn } = require("./browser-sign-in");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
@@ -72,6 +75,12 @@ function start() {
   const store = createStore(path.join(data, "desktop-settings.json"), log);
   let pointer = null;
   let mainWindow = null;
+  const browserSignIn = createBrowserSignIn({
+    appUrl: config.APP_URL,
+    openExternal: (url) => shell.openExternal(url),
+    focusApp: () => bringToFront(),
+    log,
+  });
 
   /** Which kind each window is: "main", "signin" or "report" (see config.js). */
   const kinds = new WeakMap();
@@ -142,7 +151,10 @@ function start() {
     powerMonitor.on("suspend", () => pointer.blur());
   });
 
-  app.on("before-quit", () => pointer && pointer.blur());
+  app.on("before-quit", () => {
+    browserSignIn.cancel();
+    if (pointer) pointer.blur();
+  });
   app.on("will-quit", () => pointer && pointer.blur());
   process.on("exit", () => pointer && pointer.blur());
   app.on("window-all-closed", () => app.quit());
@@ -178,7 +190,19 @@ function start() {
     );
   }
 
-  /** The two questions the app's page may ask: the pointer speed, and to change it. */
+  /** Brings the app's window to the front, as far as Windows allows. */
+  function bringToFront() {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.focus();
+    mainWindow.setAlwaysOnTop(false);
+    mainWindow.flashFrame(true);
+    setTimeout(() => mainWindow && mainWindow.flashFrame(false), 3000);
+  }
+
+  /** What the app's page may ask: the pointer speed, to change it, and to sign in through the browser. */
   function answerTheApp() {
     const fromApp = (event) => config.isAppUrl(event.senderFrame ? event.senderFrame.url : "");
     ipcMain.handle("cadp:pointer-speed:get", (event) => {
@@ -188,6 +212,14 @@ function start() {
     ipcMain.handle("cadp:pointer-speed:set", (event, value) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return pointer.choose(value === undefined ? null : value);
+    });
+    ipcMain.handle("cadp:sign-in:browser", (event, publicKeyHex) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return browserSignIn.start(publicKeyHex);
+    });
+    ipcMain.handle("cadp:sign-in:cancel", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      browserSignIn.cancel();
     });
   }
 
