@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>CAD Protocol</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: grid;
+        place-items: center;
+        background: #000;
+        color: #e8e8ea;
+        font: 15px/1.5 "Segoe UI", system-ui, sans-serif;
+      }
+      main { width: min(26rem, calc(100vw - 3rem)); text-align: center; }
+      svg { width: 56px; height: 56px; margin-bottom: 14px; }
+      h1 { margin: 0 0 6px; font-size: 1.15rem; font-weight: 600; }
+      p { margin: 0; color: #a9a9b2; }
+      .bar { height: 6px; margin: 18px 0 8px; border-radius: 3px; background: #1d1f27; overflow: hidden; }
+      .bar span { display: block; height: 100%; width: 0; background: #3b00b9; transition: width 0.2s ease; }
+      .bar[hidden] { display: none; }
+      small { color: #6f6f78; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <svg viewBox="0 0 64 64" aria-hidden="true" fill="none" stroke="#fff" stroke-width="3">
+        <rect x="22" y="22" width="20" height="20" rx="2" />
+        <path d="M32 6v16M32 42v16M6 32h16M42 32h16" />
+        <circle cx="32" cy="6" r="3" fill="#fff" />
+        <circle cx="32" cy="58" r="3" fill="#fff" />
+        <circle cx="6" cy="32" r="3" fill="#fff" />
+        <circle cx="58" cy="32" r="3" fill="#fff" />
+      </svg>
+      <h1 id="title">Checking for updates…</h1>
+      <p id="detail">CAD Protocol for Windows</p>
+      <div class="bar" id="bar" hidden><span id="fill"></span></div>
+      <small id="note"></small>
+    </main>
+    <script>
+      // The main process fills these in (main.js, updateScreen).
+      window.showUpdate = (title, detail, percent, note) => {
+        document.getElementById("title").textContent = title;
+        document.getElementById("detail").textContent = detail || "";
+        const bar = document.getElementById("bar");
+        bar.hidden = typeof percent !== "number";
+        if (typeof percent === "number") document.getElementById("fill").style.width = `${percent}%`;
+        document.getElementById("note").textContent = note || "";
+      };
+    </script>
+  </body>
+</html>

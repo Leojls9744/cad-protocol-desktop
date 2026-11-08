@@ -11,7 +11,9 @@
 // - "Sign in with your browser", since Google won't sign anyone in inside an
 //   app's own window (see browser-sign-in.js);
 // - 1.2: asking the app before its window closes, so it can save and sign
-//   out (close-guard.js), and whether a newer installer is out (updates.js).
+//   out (close-guard.js);
+// - 1.3: it updates itself (auto-update.js): checked on the update screen at
+//   launch and every 6 hours, installed without running the installer again.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -19,16 +21,17 @@
 const path = require("node:path");
 const fs = require("node:fs");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, dialog, ipcMain, Menu, net, powerMonitor, screen, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, screen, session, shell } = require("electron");
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
 const { createCloseGuard } = require("./close-guard");
-const { createUpdateCheck } = require("./updates");
+const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
+const UPDATE_FILE = path.join(__dirname, "update.html");
 
 // ---------------------------------------------------------------------------
 // --smoke-test=<file>: used by the build on GitHub to check, on real Windows,
@@ -79,17 +82,21 @@ function start() {
   const store = createStore(path.join(data, "desktop-settings.json"), log);
   let pointer = null;
   let mainWindow = null;
-  const updates = createUpdateCheck({
-    current: app.getVersion(),
-    fetchJson: async (url) => {
-      const res = await net.fetch(url, {
-        headers: { Accept: "application/vnd.github+json", "User-Agent": `CAD-Protocol-Desktop/${app.getVersion()}` },
-      });
-      if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
-      return res.json();
-    },
-    log,
-  });
+  // Updates: only the installed app has them (electron-updater needs the
+  // packaged app's app-update.yml); `npm start` runs without.
+  let updates = null;
+  if (app.isPackaged) {
+    const { autoUpdater } = require("electron-updater");
+    autoUpdater.logger = { info: () => {}, warn: (m) => log(`update: ${m}`), error: (m) => log(`update: ${m}`), debug: () => {} };
+    updates = createAutoUpdate({
+      updater: autoUpdater,
+      current: app.getVersion(),
+      log,
+      onChange: (state) => updateScreen(state),
+    });
+  }
+  /** While the update screen shows: what it says. */
+  let onUpdateScreen = false;
   const browserSignIn = createBrowserSignIn({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
@@ -154,6 +161,7 @@ function start() {
     guardPermissions();
     answerTheApp();
     mainWindow = createMainWindow();
+    void openApp(mainWindow);
 
     app.on("browser-window-focus", () => pointer.focus());
     app.on("browser-window-blur", () => {
@@ -238,7 +246,11 @@ function start() {
     });
     ipcMain.handle("cadp:update:get", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
-      return updates.get();
+      return updates ? updates.state : { current: app.getVersion(), latest: null, newer: false, url: "", phase: "off", percent: 0 };
+    });
+    ipcMain.handle("cadp:update:restart", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return updates ? updates.installNow() : false;
     });
     // The page's answers to "the window is closing" (close-guard.js).
     ipcMain.on("cadp:close-started", (event, id) => {
@@ -323,8 +335,51 @@ function start() {
       if (mainWindow === win) mainWindow = null;
     });
 
-    win.loadURL(config.APP_URL);
     return win;
+  }
+
+  /**
+   * The launch: the update screen checks first (at most 8 s). A new version
+   * is installed there and the app restarts into it; otherwise the app opens.
+   * Then a check every 6 hours: downloaded quietly, the badge says so, and it
+   * installs on the next restart or close.
+   */
+  async function openApp(win) {
+    if (!updates) {
+      win.loadURL(config.APP_URL);
+      return;
+    }
+    onUpdateScreen = true;
+    await win.loadFile(UPDATE_FILE).catch(() => undefined);
+    setInterval(() => void updates.check(), EVERY_MS).unref();
+    const decision = await launchDecision(updates);
+    if (decision === "update") {
+      updateScreen(updates.state);
+      return; // installNow() runs when the download is in (updateScreen)
+    }
+    onUpdateScreen = false;
+    win.loadURL(config.APP_URL);
+  }
+
+  function updateScreen(state) {
+    if (!onUpdateScreen || !mainWindow || mainWindow.isDestroyed()) return;
+    const say = (title, detail, percent, note) =>
+      mainWindow.webContents
+        .executeJavaScript(`window.showUpdate(${JSON.stringify(title)}, ${JSON.stringify(detail)}, ${percent === null ? "null" : percent}, ${JSON.stringify(note)})`)
+        .catch(() => undefined);
+    if (state.phase === "downloading") {
+      say(`Updating to ${state.latest || "the newest version"}…`, `You have ${state.current}. CAD Protocol restarts by itself when it's done.`, state.percent, "");
+    } else if (state.phase === "ready") {
+      say("Installing the update…", "CAD Protocol restarts by itself in a moment.", 100, "");
+      setTimeout(() => updates.installNow(), 800);
+    } else if (state.phase === "error" && state.newer) {
+      // The update couldn't finish: open the app as it is; the next launch tries again.
+      say("Couldn't update right now", "Opening CAD Protocol; it tries again next time.", null, "");
+      setTimeout(() => {
+        onUpdateScreen = false;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(config.APP_URL);
+      }, 1500);
+    }
   }
 
   /** The saved size and place, if it still fits on one of the screens. */

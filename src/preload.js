@@ -2,8 +2,8 @@
 // Runs before the app's page in each window, in its own sandboxed world.
 // It gives the CAD Protocol app, and only the app, a small window.cadpDesktop
 // object: that it is running in the desktop app, its version, the pointer
-// speed setting, Sign in with your browser, whether a newer installer is out,
-// and a say before the window closes. Nothing else of the computer is
+// speed setting, Sign in with your browser, its update state and a restart
+// into a downloaded update, and a say before the window closes. Nothing else of the computer is
 // reachable.
 
 const { contextBridge, ipcRenderer } = require("electron");
@@ -31,9 +31,14 @@ if (appOrigin && window.location.origin === appOrigin) {
       withBrowser: (publicKeyHex) => ipcRenderer.invoke("cadp:sign-in:browser", publicKeyHex),
       cancel: () => ipcRenderer.invoke("cadp:sign-in:cancel"),
     },
-    /** 1.2: { current, latest, newer, url } from GitHub, at most every 6 hours. */
+    /**
+     * 1.3: { current, latest, newer, url, phase, percent }, phase being
+     * checking, up-to-date, downloading, ready, error or off; restart() puts
+     * a downloaded update in now.
+     */
     update: {
       get: () => ipcRenderer.invoke("cadp:update:get"),
+      restart: () => ipcRenderer.invoke("cadp:update:restart"),
     },
     /**
      * 1.2: `handler` runs when the window is about to close (it may save and

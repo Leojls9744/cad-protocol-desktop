@@ -27,7 +27,7 @@ Each installer is built by GitHub Actions from the code in this repository ([the
   - **A session of its own:** the page starts a separate Internet Identity session for the same account and delegates it to the desktop app's key. It hands that back to `127.0.0.1`, where the state is checked, and the desktop app is signed in. Signing out in one leaves the other signed in.
   - **A passkey still works directly in the desktop app.**
 - **Signing out on its own (1.2).** Before the window closes, the app gets a minute to save open drawings to your vault and sign you out, if your setting says so ([`src/close-guard.js`](src/close-guard.js)). The app also signs out after a time without activity, and a desktop sign-in lasts 8 hours unless you change it. Both are in Settings › Account and security.
-- **New versions (1.2).** The app checks GitHub for a newer installer at most every 6 hours ([`src/updates.js`](src/updates.js)), and the app says so once per new version. Nothing else is sent.
+- **It updates itself (1.3).** [electron-updater](https://www.electron.build/auto-update) reads `latest.yml` from the newest published release here (never a draft), downloads the new installer, checks it against the SHA-512 in that file, and installs it silently. At launch an update screen checks first and installs any new version before the app opens; while the app is open it checks every 6 hours and installs on the next restart or close ([`src/auto-update.js`](src/auto-update.js)). The app's top bar shows "Up to date" or "Update ready – Restart".
 - **Every key goes to the drawing.** There's no menu bar, so no browser shortcuts get in the way.
 - **More room.** No tabs or address bar, and its own window and taskbar icon.
 - **Unsaved drawings are protected.** It asks before closing with unsaved changes, as the browser does.
@@ -40,7 +40,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 - **The main window stays on the app.** It only shows pages from `https://cad-dza.caffeine.xyz`. Any other link opens in your own browser.
 - **Sign-in.** Internet Identity (`id.ai`) opens in its own small window, so sign-in works as it does in the browser.
 - **Report windows.** The app's own printable reports open in their own window.
-- **A few things to the computer:** the app's page can reach the pointer-speed setting, start Sign in with your browser, read whether a newer installer is out, and answer before the window closes. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
+- **A few things to the computer:** the app's page can reach the pointer-speed setting, start Sign in with your browser, read its update state and restart into a downloaded update, and answer before the window closes. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
 - **Permissions:** only clipboard, full screen, pointer lock and notifications are allowed, and only to the app. The camera, microphone and location are refused.
 - **Settings kept on the computer:** only the window's size and place, the pointer setting, and a short log, all in `%APPDATA%\CAD Protocol`. Drawings and files stay in your encrypted vault.
 - **Hardened Electron options:** "run as Node" and debugging flags are switched off in the executable.
@@ -52,7 +52,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 | [`src/main.js`](src/main.js) | The window, links, permissions, focus and the Windows build's check |
 | [`src/config.js`](src/config.js) | The app's address and which pages may open where |
 | [`src/close-guard.js`](src/close-guard.js) | Asking the app before the window closes |
-| [`src/updates.js`](src/updates.js) | Whether a newer installer is out |
+| [`src/auto-update.js`](src/auto-update.js), [`src/update.html`](src/update.html) | Updating itself, and the update screen |
 | [`src/browser-sign-in.js`](src/browser-sign-in.js) | Sign in with your browser: the one-use listener on `127.0.0.1` |
 | [`src/pointer-speed.js`](src/pointer-speed.js) | Reading and setting the pointer speed (Windows' `SystemParametersInfo`, through [koffi](https://koffi.dev)) |
 | [`src/preload.js`](src/preload.js) | The small `window.cadpDesktop` object the app sees |
