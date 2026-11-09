@@ -15,7 +15,8 @@ function guard(options = {}) {
 }
 
 test("closing asks the app, waits while it works, and closes when it's done", async () => {
-  const { g, asked, closed } = guard();
+  // A long limit: a slow test machine's timers mustn't reach it here.
+  const { g, asked, closed } = guard({ maxMs: 5000 });
   assert.equal(g.request(), true);
   assert.equal(g.request(), true);
   assert.deepEqual(asked, [1]);
