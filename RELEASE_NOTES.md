@@ -1,5 +1,7 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.6: a start-up card.** CAD Protocol starts in a small card with its icon and name over its ribbon picture and a bar in the Internet Computer's colors, and the app goes on in the same card while it loads (and shows it as it signs you out when you close the window, instead of the home page). 1.5 updates itself to 1.6.
+
 **New in 1.5: work offline and save to this computer.** In Spatial Canvas, **File › Save to Computer** saves a drawing as a .cadp file in any folder through Windows' own Save window, and **File › Open from Computer** opens one; after that, Save (Ctrl+S) writes the same file. It works online or offline, signed in or not. With the app's newest web build the desktop app also keeps all of CAD Protocol on this computer (about 23 MB, again after each update), so every tool opens offline, and with no connection the sign-in card offers **Work offline**. Files on your computer aren't encrypted, like any drawing file; your vault stays encrypted. 1.4 updates itself to 1.5.
 
 **New in 1.4: a purple title bar.** On Windows 11 the bar across the top of every CAD Protocol window is now CAD Protocol purple with white text, instead of your Windows accent color. Windows 10 keeps its usual bar. 1.3 updates itself to 1.4; nothing to install.

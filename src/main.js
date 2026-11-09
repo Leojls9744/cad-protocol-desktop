@@ -18,6 +18,7 @@
 //   (title-bar.js).
 // - 1.5: drawings saved to and opened from this computer, online or offline
 //   (local-files.js).
+// - 1.6: the start-up card (update.html with splash.jpg), like the app's own.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
