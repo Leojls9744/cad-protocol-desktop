@@ -238,12 +238,12 @@ function start() {
     const ses = session.defaultSession;
     ses.setPermissionRequestHandler((contents, permission, callback, details) => {
       const from = (details && details.requestingUrl) || contents.getURL();
-      const ok = config.permissionAllowed(permission, from);
+      const ok = config.permissionAllowed(permission, from, details);
       if (!ok) log(`refused ${permission} for ${from}`);
       callback(ok);
     });
-    ses.setPermissionCheckHandler((_contents, permission, requestingOrigin) =>
-      config.permissionAllowed(permission, requestingOrigin),
+    ses.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) =>
+      config.permissionAllowed(permission, requestingOrigin, details),
     );
   }
 

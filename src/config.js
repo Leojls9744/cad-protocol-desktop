@@ -101,8 +101,27 @@ const APP_PERMISSIONS = new Set([
 ]);
 const SIGN_IN_PERMISSIONS = new Set(["clipboard-sanitized-write", "storage-access", "top-level-storage-access"]);
 
-function permissionAllowed(permission, requestingUrl) {
-  if (isAppUrl(requestingUrl)) return APP_PERMISSIONS.has(permission);
+/**
+ * The microphone, for the live session's push-to-talk (1.8): the app only,
+ * and only sound. A request naming the camera (or the screen) is refused.
+ * `mediaTypes` is the request's list ("audio", "video"); a permission
+ * check gives one `mediaType` instead.
+ */
+function microphoneOnly(details) {
+  if (!details) return false;
+  const types = Array.isArray(details.mediaTypes)
+    ? details.mediaTypes
+    : details.mediaType
+      ? [details.mediaType]
+      : [];
+  return types.length > 0 && types.every((t) => t === "audio");
+}
+
+function permissionAllowed(permission, requestingUrl, details) {
+  if (isAppUrl(requestingUrl)) {
+    if (permission === "media") return microphoneOnly(details);
+    return APP_PERMISSIONS.has(permission);
+  }
   if (isSignInUrl(requestingUrl)) return SIGN_IN_PERMISSIONS.has(permission);
   return false;
 }
@@ -130,5 +149,6 @@ module.exports = {
   isExternalSafe,
   canNavigate,
   permissionAllowed,
+  microphoneOnly,
   plainUserAgent,
 };

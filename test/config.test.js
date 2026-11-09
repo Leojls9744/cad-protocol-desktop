@@ -59,6 +59,12 @@ test("permissions: a short list for the app, less for sign-in, none for anyone e
   assert.equal(config.permissionAllowed("clipboard-read", APP), true);
   assert.equal(config.permissionAllowed("fullscreen", APP), true);
   assert.equal(config.permissionAllowed("media", APP), false);
+  // The microphone for push-to-talk (1.8), never the camera.
+  assert.equal(config.permissionAllowed("media", APP, { mediaTypes: ["audio"] }), true);
+  assert.equal(config.permissionAllowed("media", APP, { mediaType: "audio" }), true);
+  assert.equal(config.permissionAllowed("media", APP, { mediaTypes: ["audio", "video"] }), false);
+  assert.equal(config.permissionAllowed("media", APP, { mediaType: "video" }), false);
+  assert.equal(config.permissionAllowed("media", "https://id.ai", { mediaTypes: ["audio"] }), false);
   assert.equal(config.permissionAllowed("geolocation", APP), false);
   assert.equal(config.permissionAllowed("clipboard-read", "https://id.ai"), false);
   assert.equal(config.permissionAllowed("clipboard-sanitized-write", "https://id.ai"), true);
