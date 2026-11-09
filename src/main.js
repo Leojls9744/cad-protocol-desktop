@@ -23,7 +23,8 @@
 //   it closes (splash.js, launch.js); the app's window when it's ready.
 // - 1.8: the microphone for the app's push-to-talk (config.js).
 // - 1.8.1: the card shows only once its picture's drawn, and stays long
-//   enough to read (splash.js), never a blank flash.
+//   enough to read (splash.js), never a blank flash; closing, the app's
+//   window goes at once and only the card shows.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -316,17 +317,14 @@ function start() {
     ipcMain.on("cadp:close-started", (event, id) => {
       if (!fromApp(event) || !closeGuard) return;
       closeGuard.started(id);
-      // The card's made now, out of sight, so it's drawn by the time it's
-      // wanted (1.8.1); closed unseen if the app's done first.
-      if (splash) splash.prepare();
-      // Still working a moment later (saving, signing out): only the card
-      // shows until it's done (1.7).
-      setTimeout(() => {
-        if (!closeGuard || !closeGuard.asking || !splash) return;
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
-        splash.open();
-        splash.say("Signing you out…", "Saving your drawings first");
-      }, 250);
+      // Saving and signing out (1.8.1; Leo, 2026-11-09 15:12: the card
+      // showed in the big window, then jumped to a blank one): the app's
+      // window goes at once, and only the small card shows, once it's
+      // drawn, until it's done (closed unseen if the app's done first).
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+      if (!splash) return;
+      splash.open();
+      splash.say("Signing you out…", "Saving your drawings first");
     });
     ipcMain.on("cadp:close-done", (event, id) => {
       if (fromApp(event) && closeGuard) closeGuard.done(id);
