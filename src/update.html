@@ -18,25 +18,38 @@
       svg { width: 56px; height: 56px; margin-bottom: 14px; }
       h1 { margin: 0 0 6px; font-size: 1.15rem; font-weight: 600; }
       p { margin: 0; color: #a9a9b2; }
-      .bar { height: 6px; margin: 18px 0 8px; border-radius: 3px; background: #1d1f27; overflow: hidden; }
-      .bar span { display: block; height: 100%; width: 0; background: #3b00b9; transition: width 0.2s ease; }
-      .bar[hidden] { display: none; }
+      .bar { position: relative; height: 4px; margin: 18px 0 8px; border-radius: 2px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+      .bar span { display: block; height: 100%; width: 0; border-radius: 2px; background: linear-gradient(90deg, #4c1fc4, #7a2ad8 55%, #9a32e0); transition: width 0.2s ease; }
+      /* No percentage yet (1.5): a sweep, as on the app's own loading card. */
+      .bar.waiting span { position: absolute; width: 40%; animation: sweep 1.3s ease-in-out infinite; }
+      @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+      @media (prefers-reduced-motion: reduce) { .bar.waiting span { animation: none; left: 30%; } }
       small { color: #6f6f78; }
     </style>
   </head>
   <body>
     <main>
-      <svg viewBox="0 0 64 64" aria-hidden="true" fill="none" stroke="#fff" stroke-width="3">
-        <rect x="22" y="22" width="20" height="20" rx="2" />
-        <path d="M32 6v16M32 42v16M6 32h16M42 32h16" />
-        <circle cx="32" cy="6" r="3" fill="#fff" />
-        <circle cx="32" cy="58" r="3" fill="#fff" />
-        <circle cx="6" cy="32" r="3" fill="#fff" />
-        <circle cx="58" cy="32" r="3" fill="#fff" />
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <defs>
+          <linearGradient id="ic" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#2f8bff" />
+            <stop offset="0.38" stop-color="#7b4dff" />
+            <stop offset="0.68" stop-color="#e0459f" />
+            <stop offset="1" stop-color="#ff8a3d" />
+          </linearGradient>
+        </defs>
+        <rect x="22" y="22" width="20" height="20" rx="3.5" fill="url(#ic)" />
+        <path d="M32 11.5V18M32 46V52.5M11.5 32H18M46 32H52.5" stroke="#fff" stroke-width="4" stroke-linecap="round" />
+        <g fill="#fff">
+          <circle cx="32" cy="7" r="4.5" />
+          <circle cx="32" cy="57" r="4.5" />
+          <circle cx="7" cy="32" r="4.5" />
+          <circle cx="57" cy="32" r="4.5" />
+        </g>
       </svg>
       <h1 id="title">Checking for updates…</h1>
       <p id="detail">CAD Protocol for Windows</p>
-      <div class="bar" id="bar" hidden><span id="fill"></span></div>
+      <div class="bar waiting" id="bar"><span id="fill"></span></div>
       <small id="note"></small>
     </main>
     <script>
@@ -45,8 +58,9 @@
         document.getElementById("title").textContent = title;
         document.getElementById("detail").textContent = detail || "";
         const bar = document.getElementById("bar");
-        bar.hidden = typeof percent !== "number";
-        if (typeof percent === "number") document.getElementById("fill").style.width = `${percent}%`;
+        const fill = document.getElementById("fill");
+        bar.classList.toggle("waiting", typeof percent !== "number");
+        fill.style.width = typeof percent === "number" ? `${percent}%` : "";
         document.getElementById("note").textContent = note || "";
       };
     </script>

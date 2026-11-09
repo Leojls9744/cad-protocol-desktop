@@ -16,6 +16,8 @@
 //   launch and every 6 hours, installed without running the installer again.
 // - 1.4: a purple title bar on Windows 11 instead of the accent color
 //   (title-bar.js).
+// - 1.5: drawings saved to and opened from this computer, online or offline
+//   (local-files.js).
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -31,6 +33,7 @@ const { createBrowserSignIn } = require("./browser-sign-in");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
+const { createLocalFiles } = require("./local-files");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
@@ -257,6 +260,27 @@ function start() {
     ipcMain.handle("cadp:update:restart", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return updates ? updates.installNow() : false;
+    });
+    // Drawings on this computer (1.5): only files picked in Windows' Save and
+    // Open windows, shown over the window that asked.
+    const files = createLocalFiles({
+      dialog,
+      fs: require("node:fs/promises"),
+      documentsDir: app.getPath("documents"),
+      log,
+    });
+    const windowOf = (event) => BrowserWindow.fromWebContents(event.sender) || undefined;
+    ipcMain.handle("cadp:files:save-as", (event, name, bytes) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.saveAs(windowOf(event), name, bytes);
+    });
+    ipcMain.handle("cadp:files:save", (event, token, bytes) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.save(token, bytes);
+    });
+    ipcMain.handle("cadp:files:open", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.open(windowOf(event));
     });
     // The page's answers to "the window is closing" (close-guard.js).
     ipcMain.on("cadp:close-started", (event, id) => {

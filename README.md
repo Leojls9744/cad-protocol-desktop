@@ -28,6 +28,7 @@ Each installer is built by GitHub Actions from the code in this repository ([the
   - **Every sign-in goes through the browser**, so Internet Identity never runs inside the app's window.
 - **Signing out on its own (1.2).** Before the window closes, the app gets a minute to save open drawings to your vault and sign you out, if your setting says so ([`src/close-guard.js`](src/close-guard.js)). The app also signs out after a time without activity, and a desktop sign-in lasts 8 hours unless you change it. Both are in Settings › Account and security.
 - **It updates itself (1.3).** [electron-updater](https://www.electron.build/auto-update) reads `latest.yml` from the newest published release here (never a draft), downloads the new installer, checks it against the SHA-512 in that file, and installs it silently. At launch an update screen checks first and installs any new version before the app opens; while the app is open it checks every 6 hours and installs on the next restart or close ([`src/auto-update.js`](src/auto-update.js)). The app's top bar shows "Up to date" or "Update ready – Restart".
+- **Drawings on this computer (1.5).** Spatial Canvas's Save to Computer and Open from Computer use Windows' own Save and Open windows ([`src/local-files.js`](src/local-files.js)). The page only ever gets files the person picked there, each as a token that lasts until the app closes; a save is written beside the file and renamed over it. Online or offline, signed in or not. The app itself is kept for offline use by the page (its service worker).
 - **A purple title bar (1.4).** On Windows 11 every CAD Protocol window asks Windows for a purple title bar with white text, instead of your accent color (Windows' `DwmSetWindowAttribute`, through koffi; [`src/title-bar.js`](src/title-bar.js)). Windows 10 keeps its usual bar.
 - **Every key goes to the drawing.** There's no menu bar, so no browser shortcuts get in the way.
 - **More room.** No tabs or address bar, and its own window and taskbar icon.
@@ -56,6 +57,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 | [`src/auto-update.js`](src/auto-update.js), [`src/update.html`](src/update.html) | Updating itself, and the update screen |
 | [`src/browser-sign-in.js`](src/browser-sign-in.js) | Sign in with your browser: the one-use listener on `127.0.0.1` |
 | [`src/pointer-speed.js`](src/pointer-speed.js) | Reading and setting the pointer speed (Windows' `SystemParametersInfo`, through [koffi](https://koffi.dev)) |
+| [`src/local-files.js`](src/local-files.js) | Drawings saved to and opened from this computer |
 | [`src/title-bar.js`](src/title-bar.js) | The purple title bar (Windows 11) |
 | [`src/preload.js`](src/preload.js) | The small `window.cadpDesktop` object the app sees |
 | [`src/store.js`](src/store.js) | The settings file and log |

@@ -3,8 +3,9 @@
 // It gives the CAD Protocol app, and only the app, a small window.cadpDesktop
 // object: that it is running in the desktop app, its version, the pointer
 // speed setting, Sign in with your browser, its update state and a restart
-// into a downloaded update, and a say before the window closes. Nothing else of the computer is
-// reachable.
+// into a downloaded update, a say before the window closes, and drawings
+// saved to and opened from files the person picks. Nothing else of the
+// computer is reachable.
 
 const { contextBridge, ipcRenderer } = require("electron");
 
@@ -39,6 +40,17 @@ if (appOrigin && window.location.origin === appOrigin) {
     update: {
       get: () => ipcRenderer.invoke("cadp:update:get"),
       restart: () => ipcRenderer.invoke("cadp:update:restart"),
+    },
+    /**
+     * 1.5: drawings on this computer, through Windows' Save and Open windows.
+     * saveAs(name, bytes) and open() resolve with { token, name, path } (open
+     * adds bytes), or null when cancelled; save(token, bytes) writes the same
+     * file again, or resolves null when the token is no longer known.
+     */
+    files: {
+      saveAs: (name, bytes) => ipcRenderer.invoke("cadp:files:save-as", name, bytes),
+      save: (token, bytes) => ipcRenderer.invoke("cadp:files:save", token, bytes),
+      open: () => ipcRenderer.invoke("cadp:files:open"),
     },
     /**
      * 1.2: `handler` runs when the window is about to close (it may save and
