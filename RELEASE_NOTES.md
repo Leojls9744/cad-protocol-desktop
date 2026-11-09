@@ -1,5 +1,9 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.8.1: the card is never blank.** The small card that shows while CAD Protocol starts and while it signs you out on close now appears only once its picture is drawn, and stays up long enough to read, instead of flashing an empty window. Signing out, it's ready the moment it's needed. 1.8 updates itself to 1.8.1.
+
+**New in 1.8: talk in live sessions and meetings.** The app's Hold to talk and meeting mic work in the desktop app: Windows asks once to let it use the microphone. Only sound: the camera and screen stay off.
+
 **New in 1.7: only the small card while it starts.** CAD Protocol now starts as a small card window of its own, with no full window behind it: the app loads out of sight (while it checks for updates, too) and its window opens when it's ready, in its last size or maximized. Closing it while it saves and signs you out shows the same small card instead of the window. 1.6 updates itself to 1.7.
 
 **New in 1.6: a start-up card.** CAD Protocol starts in a small card with its icon and name over its ribbon picture and a bar in the Internet Computer's colors, and the app goes on in the same card while it loads (and shows it as it signs you out when you close the window, instead of the home page). 1.5 updates itself to 1.6.

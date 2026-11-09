@@ -21,6 +21,9 @@
 // - 1.6: the start-up card (update.html with splash.jpg), like the app's own.
 // - 1.7: only the card shows while the app starts, updates or signs out as
 //   it closes (splash.js, launch.js); the app's window when it's ready.
+// - 1.8: the microphone for the app's push-to-talk (config.js).
+// - 1.8.1: the card shows only once its picture's drawn, and stays long
+//   enough to read (splash.js), never a blank flash.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -313,6 +316,9 @@ function start() {
     ipcMain.on("cadp:close-started", (event, id) => {
       if (!fromApp(event) || !closeGuard) return;
       closeGuard.started(id);
+      // The card's made now, out of sight, so it's drawn by the time it's
+      // wanted (1.8.1); closed unseen if the app's done first.
+      if (splash) splash.prepare();
       // Still working a moment later (saving, signing out): only the card
       // shows until it's done (1.7).
       setTimeout(() => {
@@ -352,11 +358,16 @@ function start() {
     kinds.set(win.webContents, "main");
     // Shown when the app's ready, the card closed then (1.7, launch.js).
     launch = createLaunch({
+      // Once the card's been up long enough to be read (1.8.1, splash.js).
       showMain: () => {
-        if (win.isDestroyed()) return;
-        if (!saved || saved.maximized !== false) win.maximize();
-        win.show();
-        win.focus();
+        const reveal = () => {
+          if (win.isDestroyed()) return;
+          if (!saved || saved.maximized !== false) win.maximize();
+          win.show();
+          win.focus();
+        };
+        if (splash) splash.after(reveal);
+        else reveal();
       },
       closeSplash: () => splash && splash.close(),
     });

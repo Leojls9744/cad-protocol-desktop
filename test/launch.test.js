@@ -123,13 +123,16 @@ class FakeWindow extends EventEmitter {
   }
 }
 
-test("the card is a small window of its own, no frame, and says what it's told", () => {
+test("the card is a small window of its own, no frame, and says what it's told", async () => {
   let quit = 0;
+  const timers = fakeTimers();
   const splash = createSplash({
     BrowserWindow: FakeWindow,
     file: "update.html",
     webPreferences: { sandbox: true },
     onClosedByPerson: () => (quit += 1),
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
   });
   splash.open();
   const win = FakeWindow.made.at(-1);
@@ -137,9 +140,8 @@ test("the card is a small window of its own, no frame, and says what it's told",
   assert.equal(win.options.width, 560);
   assert.equal(win.options.height, 300);
   assert.equal(win.options.resizable, false);
+  assert.equal(win.options.webPreferences.backgroundThrottling, false);
   assert.deepEqual(win.loaded, { file: "update.html", options: { query: { splash: "1" } } });
-  win.emit("ready-to-show");
-  assert.equal(win.visible, true);
   splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
   assert.match(win.ran.at(-1), /showUpdate\("Loading CAD Protocol…", "CAD Protocol for Windows", null, ""\)/);
   // Closed by the app: not the person's doing.
@@ -150,6 +152,75 @@ test("the card is a small window of its own, no frame, and says what it's told",
   splash.open();
   FakeWindow.made.at(-1).emit("closed");
   assert.equal(quit, 1);
+});
+
+test("the card shows only once its picture's drawn, and stays long enough to read (1.8.1)", async () => {
+  const timers = fakeTimers();
+  let clock = 1000;
+  const splash = createSplash({
+    BrowserWindow: FakeWindow,
+    file: "update.html",
+    webPreferences: {},
+    now: () => clock,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  splash.open();
+  const win = FakeWindow.made.at(-1);
+  // Loaded, but its picture isn't drawn yet: not shown, never blank.
+  win.webContents.emit("did-finish-load");
+  assert.equal(win.visible, false);
+  assert.match(win.ran.at(-1), /img\.src = "splash\.jpg"/);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(win.visible, true);
+  assert.equal(splash.isShown, true);
+  // The app's ready at once: it shows, and the card goes, once it's been up 1.2 s.
+  const seen = [];
+  splash.after(() => seen.push("main"));
+  splash.close();
+  assert.deepEqual(seen, []);
+  assert.equal(splash.isOpen, true);
+  clock += 1200;
+  timers.fire(1200);
+  assert.deepEqual(seen, ["main"]);
+  assert.equal(splash.isOpen, false);
+  // Its picture never says it's drawn: shown anyway after 1.5 s.
+  const late = createSplash({
+    BrowserWindow: class extends FakeWindow {
+      constructor(options) {
+        super(options);
+        this.webContents.executeJavaScript = () => new Promise(() => {});
+      }
+    },
+    file: "update.html",
+    webPreferences: {},
+    now: () => clock,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  late.open();
+  const lateWin = FakeWindow.made.at(-1);
+  lateWin.webContents.emit("did-finish-load");
+  assert.equal(lateWin.visible, false);
+  timers.fire(1500);
+  assert.equal(lateWin.visible, true);
+  // Made out of sight for signing out, and closed before it was wanted: never seen.
+  const quiet = createSplash({
+    BrowserWindow: FakeWindow,
+    file: "update.html",
+    webPreferences: {},
+    now: () => clock,
+    setTimer: timers.setTimer,
+    clearTimer: timers.clearTimer,
+  });
+  quiet.prepare();
+  const quietWin = FakeWindow.made.at(-1);
+  quietWin.webContents.emit("did-finish-load");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(quietWin.visible, false);
+  quiet.close();
+  assert.equal(quiet.isOpen, false);
+  assert.equal(quietWin.visible, false);
 });
 
 test("the close guard says it's still asking until the app's done", () => {
