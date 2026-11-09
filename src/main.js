@@ -14,6 +14,8 @@
 //   out (close-guard.js);
 // - 1.3: it updates itself (auto-update.js): checked on the update screen at
 //   launch and every 6 hours, installed without running the installer again.
+// - 1.4: a purple title bar on Windows 11 instead of the accent color
+//   (title-bar.js).
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -28,6 +30,7 @@ const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
+const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
@@ -158,6 +161,9 @@ function start() {
   app.whenReady().then(() => {
     pointer = createPointerSpeed({ backend: windowsBackend(log), store, log });
     pointer.recover();
+    // Every window (the app, sign-in, reports) gets the purple bar as it's made.
+    const titleBar = createTitleBar({ backend: titleBarBackend(log), log });
+    app.on("browser-window-created", (_event, win) => titleBar.paint(win));
     guardPermissions();
     answerTheApp();
     mainWindow = createMainWindow();

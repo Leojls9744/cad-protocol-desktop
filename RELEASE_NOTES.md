@@ -1,5 +1,7 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.4: a purple title bar.** On Windows 11 the bar across the top of every CAD Protocol window is now CAD Protocol purple with white text, instead of your Windows accent color. Windows 10 keeps its usual bar. 1.3 updates itself to 1.4; nothing to install.
+
 **New in 1.3: it updates itself.** From now on the desktop app keeps itself up to date: when it opens, it checks for a new version and, if there is one, installs it on an update screen and restarts; while it's open it checks every 6 hours, downloads quietly and installs when you restart or close (the badge in the top bar says "Update ready – Restart"). No more running the installer. This is the last version you install by hand: install 1.3 over 1.1; your settings stay.
 
 Also in 1.3: closing the window saves your open drawings to your vault and signs you out, unless you turn that off in Settings › Account and security; with the app's newest web build, every sign-in also signs out after a time without activity (10 minutes unless you change it), with a minute's warning, and a desktop sign-in lasts 8 hours unless you change it.
