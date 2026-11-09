@@ -57,6 +57,10 @@ function createCloseGuard({ ask, close, ackMs = ACK_MS, maxMs = MAX_MS }) {
     get closing() {
       return state === "closing";
     },
+    /** Asked and not answered "done" yet (1.7: the card shows meanwhile). */
+    get asking() {
+      return state === "asking";
+    },
   };
 }
 

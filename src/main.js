@@ -19,6 +19,8 @@
 // - 1.5: drawings saved to and opened from this computer, online or offline
 //   (local-files.js).
 // - 1.6: the start-up card (update.html with splash.jpg), like the app's own.
+// - 1.7: only the card shows while the app starts, updates or signs out as
+//   it closes (splash.js, launch.js); the app's window when it's ready.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -35,6 +37,8 @@ const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles } = require("./local-files");
+const { createLaunch } = require("./launch");
+const { createSplash } = require("./splash");
 
 const OFFLINE_FILE = path.join(__dirname, "offline.html");
 const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
@@ -104,6 +108,9 @@ function start() {
   }
   /** While the update screen shows: what it says. */
   let onUpdateScreen = false;
+  /** The small card window, and when the app's window shows (1.7). */
+  let splash = null;
+  let launch = null;
   const browserSignIn = createBrowserSignIn({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
@@ -126,6 +133,11 @@ function start() {
   });
 
   app.on("second-instance", () => {
+    // Still starting: the card's what there is to see.
+    if (launch && !launch.shown && splash) {
+      splash.focus();
+      return;
+    }
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
@@ -170,6 +182,18 @@ function start() {
     app.on("browser-window-created", (_event, win) => titleBar.paint(win));
     guardPermissions();
     answerTheApp();
+    // Only the small card while the app starts (1.7).
+    splash = createSplash({
+      BrowserWindow,
+      file: UPDATE_FILE,
+      webPreferences: secureWebPreferences(),
+      // Closed before the app showed: nothing's left to see, so stop.
+      onClosedByPerson: () => {
+        if (!launch || !launch.shown) app.quit();
+      },
+    });
+    splash.open();
+    splash.say(updates ? "Checking for updates…" : "Starting CAD Protocol…", "CAD Protocol for Windows");
     mainWindow = createMainWindow();
     void openApp(mainWindow);
 
@@ -226,6 +250,8 @@ function start() {
   /** Brings the app's window to the front, as far as Windows allows. */
   function bringToFront() {
     if (!mainWindow) return;
+    // Still starting: the window shows once the app's ready.
+    if (launch && !launch.shown) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.setAlwaysOnTop(true);
@@ -285,10 +311,23 @@ function start() {
     });
     // The page's answers to "the window is closing" (close-guard.js).
     ipcMain.on("cadp:close-started", (event, id) => {
-      if (fromApp(event) && closeGuard) closeGuard.started(id);
+      if (!fromApp(event) || !closeGuard) return;
+      closeGuard.started(id);
+      // Still working a moment later (saving, signing out): only the card
+      // shows until it's done (1.7).
+      setTimeout(() => {
+        if (!closeGuard || !closeGuard.asking || !splash) return;
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+        splash.open();
+        splash.say("Signing you out…", "Saving your drawings first");
+      }, 250);
     });
     ipcMain.on("cadp:close-done", (event, id) => {
       if (fromApp(event) && closeGuard) closeGuard.done(id);
+    });
+    // The app's first screen is up: its window shows, the card goes (1.7).
+    ipcMain.on("cadp:ready", (event) => {
+      if (fromApp(event) && launch) launch.ready();
     });
   }
 
@@ -311,8 +350,16 @@ function start() {
       }),
     });
     kinds.set(win.webContents, "main");
-    if (!saved || saved.maximized !== false) win.maximize();
-    win.show();
+    // Shown when the app's ready, the card closed then (1.7, launch.js).
+    launch = createLaunch({
+      showMain: () => {
+        if (win.isDestroyed()) return;
+        if (!saved || saved.maximized !== false) win.maximize();
+        win.show();
+        win.focus();
+      },
+      closeSplash: () => splash && splash.close(),
+    });
 
     const contents = win.webContents;
     contents.setVisualZoomLevelLimits(1, 1); // trackpad pinch goes to the drawing, not the page
@@ -322,11 +369,21 @@ function start() {
       if (!isMainFrame || code === -3 || !config.isAppUrl(url)) return;
       log(`couldn't load ${url}: ${code} ${description}`);
       win.loadFile(OFFLINE_FILE, { query: { reason: `${description} (${code})` } });
+      if (launch) launch.failed();
+    });
+    // The app's page is in: it shows when it says it's ready, or soon after.
+    contents.on("did-finish-load", () => {
+      if (launch && config.isAppUrl(contents.getURL())) launch.loaded();
     });
 
     // The app asks before closing with unsaved drawings. A browser shows that
     // question itself; here we ask it.
     contents.on("will-prevent-unload", (event) => {
+      // Asked over the app's window, never a hidden one.
+      if (!win.isVisible()) {
+        win.show();
+        if (splash) splash.close();
+      }
       const choice = dialog.showMessageBoxSync(win, {
         type: "warning",
         buttons: ["Leave", "Stay"],
@@ -350,6 +407,7 @@ function start() {
       ask: (id) => win.webContents.send("cadp:closing", id),
       close: () => {
         if (!win.isDestroyed()) win.close();
+        if (splash) splash.close();
       },
     });
     win.on("close", (event) => {
@@ -377,11 +435,15 @@ function start() {
    */
   async function openApp(win) {
     if (!updates) {
-      win.loadURL(config.APP_URL);
+      loadApp(win);
       return;
     }
+    // The app loads behind the card while the update's looked for (1.7),
+    // shown only once there's none to install.
     onUpdateScreen = true;
-    await win.loadFile(UPDATE_FILE).catch(() => undefined);
+    if (launch) launch.hold();
+    loadApp(win);
+    if (splash) splash.say("Starting CAD Protocol…", "Checking for updates");
     setInterval(() => void updates.check(), EVERY_MS).unref();
     const decision = await launchDecision(updates);
     if (decision === "update") {
@@ -389,15 +451,21 @@ function start() {
       return; // installNow() runs when the download is in (updateScreen)
     }
     onUpdateScreen = false;
+    if (splash) splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
+    if (launch) launch.release();
+  }
+
+  /** The app loads out of sight; the card says so (1.7). */
+  function loadApp(win) {
+    if (!win || win.isDestroyed()) return;
+    if (splash) splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
+    if (launch) launch.loading();
     win.loadURL(config.APP_URL);
   }
 
   function updateScreen(state) {
-    if (!onUpdateScreen || !mainWindow || mainWindow.isDestroyed()) return;
-    const say = (title, detail, percent, note) =>
-      mainWindow.webContents
-        .executeJavaScript(`window.showUpdate(${JSON.stringify(title)}, ${JSON.stringify(detail)}, ${percent === null ? "null" : percent}, ${JSON.stringify(note)})`)
-        .catch(() => undefined);
+    if (!onUpdateScreen || !splash) return;
+    const say = (title, detail, percent, note) => splash.say(title, detail, percent, note);
     if (state.phase === "downloading") {
       say(`Updating to ${state.latest || "the newest version"}…`, `You have ${state.current}. CAD Protocol restarts by itself when it's done.`, state.percent, "");
     } else if (state.phase === "ready") {
@@ -408,7 +476,7 @@ function start() {
       say("Couldn't update right now", "Opening CAD Protocol; it tries again next time.", null, "");
       setTimeout(() => {
         onUpdateScreen = false;
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.loadURL(config.APP_URL);
+        if (launch) launch.release();
       }, 1500);
     }
   }

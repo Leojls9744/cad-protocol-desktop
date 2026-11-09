@@ -41,6 +41,8 @@ if (appOrigin && window.location.origin === appOrigin) {
       get: () => ipcRenderer.invoke("cadp:update:get"),
       restart: () => ipcRenderer.invoke("cadp:update:restart"),
     },
+    /** 1.7: the app's first screen is up, so its window shows (the start-up card goes). */
+    ready: () => ipcRenderer.send("cadp:ready"),
     /**
      * 1.5: drawings on this computer, through Windows' Save and Open windows.
      * saveAs(name, bytes) and open() resolve with { token, name, path } (open
