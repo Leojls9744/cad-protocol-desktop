@@ -8,6 +8,7 @@ const path = require("node:path");
 const { app, BrowserWindow } = require("electron");
 const { createTitleBar, windowsBackend } = require("../src/title-bar");
 const { createSplash } = require("../src/splash");
+const config = require("../src/config");
 
 const mode = process.env.CADP_MODE || "now";
 const t0 = Date.now();
@@ -25,6 +26,16 @@ const prefs = (extra = {}) => ({
 
 app.whenReady().then(() => {
   const titleBar = createTitleBar({ backend: windowsBackend(say) });
+  // As main.js: windows not marked are "report" windows.
+  if (process.env.CADP_GUARD === "1")
+    app.on("web-contents-created", (_e, contents) => {
+      contents.on("will-navigate", (event, url) => {
+        const ok = config.canNavigate("report", url, null);
+        say(`will-navigate ${url.slice(0, 60)}… ${ok ? "allowed" : "STOPPED"}`);
+        if (!ok) event.preventDefault();
+      });
+      contents.on("did-finish-load", () => say(`loaded ${contents.getURL().slice(0, 70)}`));
+    });
   app.on("browser-window-created", (_e, win) => titleBar.paint(win));
   const splash = createSplash({
     BrowserWindow,

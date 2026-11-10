@@ -44,8 +44,9 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
-          foreach ($mode in "now", "blank", "after") {
-            $env:CADP_MODE = $mode
+          foreach ($mode in "guard", "now") {
+            $env:CADP_MODE = "now"
+            $env:CADP_GUARD = $(if ($mode -eq "guard") { "1" } else { "0" })
             $out = Join-Path $env:RUNNER_TEMP "load-$mode.log"
             $p = Start-Process -FilePath $electron -ArgumentList "test/splash-load.js" -PassThru -RedirectStandardOutput $out
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
