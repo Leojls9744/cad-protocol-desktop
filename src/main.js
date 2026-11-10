@@ -25,14 +25,16 @@
 // - 1.8.1: the card shows only once its picture's drawn, and stays long
 //   enough to read (splash.js), never a blank flash; closing, the app's
 //   window goes at once and only the card shows.
+// - 1.8.2: the card and the offline page come from cadp://app/
+//   (local-pages.js): the installed app won't show file:// pages (its
+//   grantFileProtocolExtraPrivileges fuse is off), so the card was empty.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
 
 const path = require("node:path");
 const fs = require("node:fs");
-const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, screen, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, protocol, screen, session, shell } = require("electron");
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
@@ -43,10 +45,12 @@ const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar
 const { createLocalFiles } = require("./local-files");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
+const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
 
-const OFFLINE_FILE = path.join(__dirname, "offline.html");
-const OFFLINE_URL = pathToFileURL(OFFLINE_FILE).href;
-const UPDATE_FILE = path.join(__dirname, "update.html");
+// The app's own pages, at cadp://app/ (1.8.2, local-pages.js): file:// pages
+// don't show in the installed app.
+const OFFLINE_URL = pageUrl("offline.html");
+const CARD_URL = pageUrl("update.html", { splash: "1" });
 
 // ---------------------------------------------------------------------------
 // --smoke-test=<file>: used by the build on GitHub to check, on real Windows,
@@ -88,6 +92,8 @@ if (smokeArg) {
 }
 
 function start() {
+  // Before the app's ready (1.8.2): the scheme the card and offline page come from.
+  registerScheme(protocol);
   app.setAppUserModelId("com.cadprotocol.desktop");
   app.userAgentFallback = config.plainUserAgent(app.userAgentFallback);
   Menu.setApplicationMenu(null); // no menu bar: every key goes to the drawing
@@ -186,10 +192,11 @@ function start() {
     app.on("browser-window-created", (_event, win) => titleBar.paint(win));
     guardPermissions();
     answerTheApp();
+    serveLocalPages({ protocol, dir: __dirname, readFile: require("node:fs/promises").readFile, log });
     // Only the small card while the app starts (1.7).
     splash = createSplash({
       BrowserWindow,
-      file: UPDATE_FILE,
+      url: CARD_URL,
       webPreferences: secureWebPreferences(),
       // Closed before the app showed: nothing's left to see, so stop.
       onClosedByPerson: () => {
@@ -377,7 +384,7 @@ function start() {
       // -3 is a load the page itself cancelled; not a failure.
       if (!isMainFrame || code === -3 || !config.isAppUrl(url)) return;
       log(`couldn't load ${url}: ${code} ${description}`);
-      win.loadFile(OFFLINE_FILE, { query: { reason: `${description} (${code})` } });
+      win.loadURL(pageUrl("offline.html", { reason: `${description} (${code})` }));
       if (launch) launch.failed();
     });
     // The app's page is in: it shows when it says it's ready, or soon after.
