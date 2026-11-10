@@ -8,7 +8,7 @@ on:
     branches: [splash-check]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   look:
@@ -41,7 +41,7 @@ jobs:
             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
             $g = [System.Drawing.Graphics]::FromImage($bmp)
             $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-            $bmp.Save((Join-Path $shots "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Save((Join-Path $shots "$name.jpg"), [System.Drawing.Imaging.ImageFormat]::Jpeg)
             $g.Dispose(); $bmp.Dispose()
           }
           Shot "000-before"
@@ -63,8 +63,12 @@ jobs:
           Get-Process electron -ErrorAction SilentlyContinue | Stop-Process -Force
           $log = Join-Path $env:APPDATA "cad-protocol-desktop/desktop.log"
           Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName -Tail 40 }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: shots-${{ strategy.job-index }}
-          retention-days: 3
-          path: ${{ runner.temp }}/shots
+      - name: Keep the pictures on a branch of their own
+        shell: bash
+        run: |
+          cd "$RUNNER_TEMP/shots"
+          git init -q -b shots
+          git config user.name "splash-check"
+          git config user.email "splash-check@users.noreply.github.com"
+          git add -A && git commit -qm "shots ${{ matrix.ref }}"
+          git push -q --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" shots:splash-shots-${{ strategy.job-index }}
