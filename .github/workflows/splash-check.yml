@@ -29,6 +29,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node node_modules/electron/install.js
+      - run: npx electron-builder --win dir --x64 --publish never
       - name: Open the variants and photograph the screen
         shell: pwsh
         run: |
@@ -44,19 +45,19 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
-          foreach ($mode in "guard", "now") {
-            $env:CADP_MODE = "now"
-            $env:CADP_GUARD = $(if ($mode -eq "guard") { "1" } else { "0" })
-            $out = Join-Path $env:RUNNER_TEMP "load-$mode.log"
-            $p = Start-Process -FilePath $electron -ArgumentList "test/splash-load.js" -PassThru -RedirectStandardOutput $out
+          $packaged = (Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1).FullName
+          foreach ($mode in "unpacked", "packaged") {
+            if ($mode -eq "unpacked") { $p = Start-Process -FilePath $electron -ArgumentList "." -PassThru }
+            else { $p = Start-Process -FilePath $packaged -PassThru }
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
             for ($i = 1; $i -le 24; $i++) {
               while ($sw.ElapsedMilliseconds -lt ($i * 250)) { Start-Sleep -Milliseconds 20 }
               Shot ("{0}-{1:D2}-{2}ms" -f $mode, $i, $sw.ElapsedMilliseconds)
             }
-            $p.WaitForExit(15000) | Out-Null
-            "== $mode"; Get-Content $out
-            Start-Sleep -Seconds 1
+            Get-Process | Where-Object { $_.Path -eq $electron -or $_.Path -eq $packaged } | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            "== $mode"
+            Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 15; Remove-Item $_.FullName }
           }
       - name: Keep the pictures on a branch of their own
         shell: bash
