@@ -1,0 +1,69 @@
+name: Splash check (temporary)
+
+# Starts the app on real Windows and takes a picture of the screen every
+# 250 ms, to see the start-up card and the closing card as a person does.
+
+on:
+  push:
+    branches: [splash-check]
+
+permissions:
+  contents: read
+
+jobs:
+  look:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [cec98c8, splash-check]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Start the app and photograph the screen
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $shots = Join-Path $env:RUNNER_TEMP "shots"
+          New-Item -ItemType Directory -Force -Path $shots | Out-Null
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          "screen $($b.Width)x$($b.Height)"
+          function Shot($name) {
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save((Join-Path $shots "$name.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $bmp.Dispose()
+          }
+          Shot "000-before"
+          $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
+          $p = Start-Process -FilePath $electron -ArgumentList "." -PassThru
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          for ($i = 1; $i -le 64; $i++) {
+            Start-Sleep -Milliseconds 250
+            Shot ("{0:D3}-start-{1}ms" -f $i, $sw.ElapsedMilliseconds)
+          }
+          $main = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
+          "main window: $($main.MainWindowTitle)"
+          $main.CloseMainWindow() | Out-Null
+          $sw.Restart()
+          for ($i = 1; $i -le 24; $i++) {
+            Start-Sleep -Milliseconds 250
+            Shot ("{0:D3}-close-{1}ms" -f (100 + $i), $sw.ElapsedMilliseconds)
+          }
+          Get-Process electron -ErrorAction SilentlyContinue | Stop-Process -Force
+          $log = Join-Path $env:APPDATA "cad-protocol-desktop/desktop.log"
+          Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName -Tail 40 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.ref }}
+          retention-days: 3
+          path: ${{ runner.temp }}/shots
