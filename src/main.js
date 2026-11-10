@@ -398,6 +398,8 @@ function start() {
     // Signed out (1.10): the sign-in card, the window kept out of sight.
     ipcMain.handle("cadp:card:sign-in", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
+      // Closing signs you out: no card then, the app's on its way out.
+      if (closeGuard && (closeGuard.asking || closeGuard.closing)) return;
       awaitingSignIn = true;
       if (launch && !launch.shown) launch.gate();
       else if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) mainWindow.hide();
@@ -515,6 +517,8 @@ function start() {
       close: () => {
         if (!win.isDestroyed()) win.close();
         if (splash) splash.close();
+        // Nothing left open to keep the app running.
+        if (signInCard) signInCard.close();
       },
     });
     win.on("close", (event) => {
