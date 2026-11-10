@@ -12,6 +12,9 @@
 // at least MIN_SHOWN_MS, so it's never a blank flash. Closing early waits
 // for that (`close`, `after`). Signing out, it's made out of sight at once
 // (`prepare`) and shown only if the sign-out is still going a moment later.
+//
+// 1.8.2: the card's page comes from cadp://app/ (local-pages.js), not
+// file://, which the installed app can't show (it was an empty box).
 
 const WIDTH = 560;
 const HEIGHT = 300;
@@ -31,7 +34,7 @@ const PAINTED_JS = `new Promise((resolve) => {
 
 function createSplash({
   BrowserWindow,
-  file,
+  url,
   webPreferences,
   onClosedByPerson = () => {},
   minShownMs = MIN_SHOWN_MS,
@@ -113,7 +116,7 @@ function createSplash({
       }
       if (!closingOnPurpose) onClosedByPerson();
     });
-    mine.loadFile(file, { query: { splash: "1" } }).catch(() => undefined);
+    mine.loadURL(url).catch(() => undefined);
   }
 
   function destroy() {

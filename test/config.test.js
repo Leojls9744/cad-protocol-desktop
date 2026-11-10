@@ -4,7 +4,8 @@ const assert = require("node:assert/strict");
 const config = require("../src/config");
 
 const APP = config.APP_ORIGIN;
-const OFFLINE = "file:///C:/Program%20Files/CAD%20Protocol/resources/app.asar/src/offline.html";
+// The offline page's address since 1.8.2 (local-pages.js).
+const OFFLINE = "cadp://app/offline.html";
 
 test("the app loads from the live address", () => {
   assert.equal(config.APP_URL, "https://cad-dza.caffeine.xyz/");

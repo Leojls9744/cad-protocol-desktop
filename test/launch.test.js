@@ -114,8 +114,8 @@ class FakeWindow extends EventEmitter {
     this.visible = true;
   }
   focus() {}
-  async loadFile(file, options) {
-    this.loaded = { file, options };
+  async loadURL(url) {
+    this.loaded = url;
   }
   destroy() {
     this.destroyed = true;
@@ -128,7 +128,7 @@ test("the card is a small window of its own, no frame, and says what it's told",
   const timers = fakeTimers();
   const splash = createSplash({
     BrowserWindow: FakeWindow,
-    file: "update.html",
+    url: "cadp://app/update.html?splash=1",
     webPreferences: { sandbox: true },
     onClosedByPerson: () => (quit += 1),
     setTimer: timers.setTimer,
@@ -141,7 +141,8 @@ test("the card is a small window of its own, no frame, and says what it's told",
   assert.equal(win.options.height, 300);
   assert.equal(win.options.resizable, false);
   assert.equal(win.options.webPreferences.backgroundThrottling, false);
-  assert.deepEqual(win.loaded, { file: "update.html", options: { query: { splash: "1" } } });
+  // From cadp://app/, which the installed app can show (1.8.2), not file://.
+  assert.equal(win.loaded, "cadp://app/update.html?splash=1");
   splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
   assert.match(win.ran.at(-1), /showUpdate\("Loading CAD Protocol…", "CAD Protocol for Windows", null, ""\)/);
   // Closed by the app: not the person's doing.
@@ -159,7 +160,7 @@ test("the card shows only once its picture's drawn, and stays long enough to rea
   let clock = 1000;
   const splash = createSplash({
     BrowserWindow: FakeWindow,
-    file: "update.html",
+    url: "cadp://app/update.html?splash=1",
     webPreferences: {},
     now: () => clock,
     setTimer: timers.setTimer,
@@ -192,7 +193,7 @@ test("the card shows only once its picture's drawn, and stays long enough to rea
         this.webContents.executeJavaScript = () => new Promise(() => {});
       }
     },
-    file: "update.html",
+    url: "cadp://app/update.html?splash=1",
     webPreferences: {},
     now: () => clock,
     setTimer: timers.setTimer,
@@ -207,7 +208,7 @@ test("the card shows only once its picture's drawn, and stays long enough to rea
   // Made out of sight for signing out, and closed before it was wanted: never seen.
   const quiet = createSplash({
     BrowserWindow: FakeWindow,
-    file: "update.html",
+    url: "cadp://app/update.html?splash=1",
     webPreferences: {},
     now: () => clock,
     setTimer: timers.setTimer,
