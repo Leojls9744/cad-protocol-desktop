@@ -28,11 +28,13 @@ function createLaunch({
   let fallback = null;
   let max = null;
   let held = false;
+  // Signed out (1.10): the sign-in card's up; the window waits for it.
+  let gated = false;
   let wanted = null;
 
   function reveal(why) {
     if (shown) return;
-    if (held) {
+    if (held || gated) {
       if (!wanted) wanted = why;
       return;
     }
@@ -71,7 +73,16 @@ function createLaunch({
     /** No update to install after all: shown, now or once it's ready. */
     release() {
       held = false;
-      if (wanted) reveal(wanted);
+      if (wanted && !gated) reveal(wanted);
+    },
+    /** Signed out: the sign-in card shows; the window waits (1.10). */
+    gate() {
+      gated = true;
+    },
+    /** Signed in, or Spatial Canvas offline chosen: the window may show. */
+    ungate() {
+      gated = false;
+      if (wanted && !held) reveal(wanted);
     },
     get shown() {
       return shown;

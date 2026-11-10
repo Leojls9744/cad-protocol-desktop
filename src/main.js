@@ -25,6 +25,10 @@
 // - 1.8.1: the card shows only once its picture's drawn, and stays long
 //   enough to read (splash.js), never a blank flash; closing, the app's
 //   window goes at once and only the card shows.
+// - 1.10: signed out, a sign-in card of its own (signin-card.js, four
+//   times the start-up card) instead of the app's full sign-in page: Sign
+//   in with your browser or Use Spatial Canvas offline, and how far signing
+//   in has got; the window shows once you're in.
 // - 1.9: Google Drive through the person's browser (browser-drive.js):
 //   cadp:drive:connect opens /desktop-drive there; the token comes back
 //   sealed to a key only this process has.
@@ -43,6 +47,7 @@ const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
 const { createBrowserDrive } = require("./browser-drive");
+const { createSignInCard } = require("./signin-card");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
@@ -125,6 +130,8 @@ function start() {
   /** The small card window, and when the app's window shows (1.7). */
   let splash = null;
   let launch = null;
+  /** The sign-in card (1.10, signin-card.js), made once the app's ready. */
+  let signInCard = null;
   const browserSignIn = createBrowserSignIn({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
@@ -154,6 +161,11 @@ function start() {
   });
 
   app.on("second-instance", () => {
+    // Signing in (1.10): the sign-in card's what there is to see.
+    if (awaitingSignIn && signInCard && signInCard.isShown) {
+      signInCard.focus();
+      return;
+    }
     // Still starting: the card's what there is to see.
     if (launch && !launch.shown && splash) {
       splash.focus();
@@ -205,6 +217,14 @@ function start() {
     answerTheApp();
     serveLocalPages({ protocol, dir: __dirname, readFile: require("node:fs/promises").readFile, log });
     // Only the small card while the app starts (1.7).
+    signInCard = createSignInCard({
+      BrowserWindow,
+      workArea: () => screen.getPrimaryDisplay().workArea,
+      url: pageUrl("signin-card.html"),
+      preload: path.join(__dirname, "card-preload.js"),
+      webPreferences: secureWebPreferences(),
+      log,
+    });
     splash = createSplash({
       BrowserWindow,
       url: CARD_URL,
@@ -272,6 +292,11 @@ function start() {
 
   /** Brings the app's window to the front, as far as Windows allows. */
   function bringToFront() {
+    // Signing in on the card (1.10): back to the card, not the window.
+    if (awaitingSignIn && signInCard && signInCard.isShown) {
+      signInCard.focus();
+      return;
+    }
     if (!mainWindow) return;
     // Still starting: the window shows once the app's ready.
     if (launch && !launch.shown) return;
@@ -358,12 +383,56 @@ function start() {
     });
     // The app's first screen is up: its window shows, the card goes (1.7).
     ipcMain.on("cadp:ready", (event) => {
-      if (fromApp(event) && launch) launch.ready();
+      if (!fromApp(event)) return;
+      if (awaitingSignIn) {
+        // In, or Spatial Canvas offline chosen (1.10): the window, then the card goes.
+        awaitingSignIn = false;
+        if (launch && !launch.shown) {
+          launch.ungate();
+          launch.ready();
+        } else showWindowAgain();
+        return;
+      }
+      if (launch) launch.ready();
+    });
+    // Signed out (1.10): the sign-in card, the window kept out of sight.
+    ipcMain.handle("cadp:card:sign-in", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      awaitingSignIn = true;
+      if (launch && !launch.shown) launch.gate();
+      else if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) mainWindow.hide();
+      signInCard.open(() => splash && splash.close());
+    });
+    ipcMain.handle("cadp:card:progress", (event, state) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      signInCard.say(state);
+    });
+    // The card's buttons (card-preload.js): Close quits; the rest go to the app's page.
+    ipcMain.on("cadp:card:choose", (event, kind) => {
+      if (!signInCard || event.sender !== signInCard.webContents) return;
+      if (kind === "quit") {
+        app.quit();
+        return;
+      }
+      if (["browser", "offline", "cancel"].includes(kind) && mainWindow && !mainWindow.isDestroyed())
+        mainWindow.webContents.send("cadp:card:choice", kind);
     });
   }
 
   /** The main window's close handshake, made with the window. */
   let closeGuard = null;
+  /** Signed out, the sign-in card up (1.10). */
+  let awaitingSignIn = false;
+
+  /** After signing in again (the window was up before): shown, the card gone. */
+  function showWindowAgain() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const saved = store.get("window", null);
+    if (!saved || saved.maximized !== false) mainWindow.maximize();
+    mainWindow.show();
+    mainWindow.focus();
+    signInCard.close();
+  }
 
   function createMainWindow() {
     const saved = store.get("window", null);
@@ -390,6 +459,8 @@ function start() {
           if (!saved || saved.maximized !== false) win.maximize();
           win.show();
           win.focus();
+          // Signed in on the card (1.10): the card goes once the window's up.
+          if (signInCard) signInCard.close();
         };
         if (splash) splash.after(reveal);
         else reveal();

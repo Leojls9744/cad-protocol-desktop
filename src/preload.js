@@ -32,6 +32,20 @@ if (appOrigin && window.location.origin === appOrigin) {
       withBrowser: (publicKeyHex) => ipcRenderer.invoke("cadp:sign-in:browser", publicKeyHex),
       cancel: () => ipcRenderer.invoke("cadp:sign-in:cancel"),
     },
+    /**
+     * 1.10: signed out, the desktop's sign-in card instead of the app's
+     * page: `signIn` shows it, `progress` says how far signing in has got,
+     * `onChoice` hears its buttons ("browser", "offline", "cancel").
+     */
+    card: {
+      signIn: () => ipcRenderer.invoke("cadp:card:sign-in"),
+      progress: (state) => ipcRenderer.invoke("cadp:card:progress", state),
+      onChoice: (fn) => {
+        const heard = (_event, kind) => fn(kind);
+        ipcRenderer.on("cadp:card:choice", heard);
+        return () => ipcRenderer.removeListener("cadp:card:choice", heard);
+      },
+    },
     /** 1.9: Google Drive through the person's browser; resolves with { accessToken, expiresIn, email }. */
     drive: {
       connect: (clientId) => ipcRenderer.invoke("cadp:drive:connect", clientId),

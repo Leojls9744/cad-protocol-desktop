@@ -18,6 +18,7 @@ const HOST = "app";
 const FILES = new Map([
   ["update.html", "text/html; charset=utf-8"],
   ["offline.html", "text/html; charset=utf-8"],
+  ["signin-card.html", "text/html; charset=utf-8"],
   ["splash.jpg", "image/jpeg"],
 ]);
 
