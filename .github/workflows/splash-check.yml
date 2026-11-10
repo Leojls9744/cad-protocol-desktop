@@ -46,7 +46,8 @@ jobs:
           }
           $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
           $packaged = (Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1).FullName
-          foreach ($mode in "packaged", "offline") {
+          foreach ($mode in "offline") {
+            Remove-Item -Recurse -Force (Join-Path $env:APPDATA "CAD Protocol") -ErrorAction SilentlyContinue
             if ($mode -eq "offline") { Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 cad-dza.caffeine.xyz" }
             $p = Start-Process -FilePath $packaged -PassThru
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
