@@ -46,15 +46,15 @@ jobs:
           }
           $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
           $packaged = (Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1).FullName
-          foreach ($mode in "unpacked", "packaged") {
-            if ($mode -eq "unpacked") { $p = Start-Process -FilePath $electron -ArgumentList "." -PassThru }
-            else { $p = Start-Process -FilePath $packaged -PassThru }
+          foreach ($mode in "packaged", "offline") {
+            if ($mode -eq "offline") { Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 cad-dza.caffeine.xyz" }
+            $p = Start-Process -FilePath $packaged -PassThru
             $sw = [System.Diagnostics.Stopwatch]::StartNew()
-            for ($i = 1; $i -le 24; $i++) {
+            for ($i = 1; $i -le 28; $i++) {
               while ($sw.ElapsedMilliseconds -lt ($i * 250)) { Start-Sleep -Milliseconds 20 }
               Shot ("{0}-{1:D2}-{2}ms" -f $mode, $i, $sw.ElapsedMilliseconds)
             }
-            Get-Process | Where-Object { $_.Path -eq $electron -or $_.Path -eq $packaged } | Stop-Process -Force
+            Get-Process | Where-Object { $_.Path -eq $packaged } | Stop-Process -Force
             Start-Sleep -Seconds 2
             "== $mode"
             Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { Get-Content $_.FullName -Tail 15; Remove-Item $_.FullName }
