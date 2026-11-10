@@ -32,6 +32,11 @@ if (appOrigin && window.location.origin === appOrigin) {
       withBrowser: (publicKeyHex) => ipcRenderer.invoke("cadp:sign-in:browser", publicKeyHex),
       cancel: () => ipcRenderer.invoke("cadp:sign-in:cancel"),
     },
+    /** 1.9: Google Drive through the person's browser; resolves with { accessToken, expiresIn, email }. */
+    drive: {
+      connect: (clientId) => ipcRenderer.invoke("cadp:drive:connect", clientId),
+      cancel: () => ipcRenderer.invoke("cadp:drive:cancel"),
+    },
     /**
      * 1.3: { current, latest, newer, url, phase, percent }, phase being
      * checking, up-to-date, downloading, ready, error or off; restart() puts

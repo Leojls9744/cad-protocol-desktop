@@ -25,6 +25,9 @@
 // - 1.8.1: the card shows only once its picture's drawn, and stays long
 //   enough to read (splash.js), never a blank flash; closing, the app's
 //   window goes at once and only the card shows.
+// - 1.9: Google Drive through the person's browser (browser-drive.js):
+//   cadp:drive:connect opens /desktop-drive there; the token comes back
+//   sealed to a key only this process has.
 // - 1.8.2: the card and the offline page come from cadp://app/
 //   (local-pages.js): the installed app won't show file:// pages (its
 //   grantFileProtocolExtraPrivileges fuse is off), so the card was empty.
@@ -39,6 +42,7 @@ const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
+const { createBrowserDrive } = require("./browser-drive");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
@@ -122,6 +126,13 @@ function start() {
   let splash = null;
   let launch = null;
   const browserSignIn = createBrowserSignIn({
+    appUrl: config.APP_URL,
+    openExternal: (url) => shell.openExternal(url),
+    focusApp: () => bringToFront(),
+    log,
+  });
+  // Google Drive through the person's browser (1.9, browser-drive.js).
+  const browserDrive = createBrowserDrive({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
     focusApp: () => bringToFront(),
@@ -221,6 +232,7 @@ function start() {
 
   app.on("before-quit", () => {
     browserSignIn.cancel();
+    browserDrive.cancel();
     if (pointer) pointer.blur();
   });
   app.on("will-quit", () => pointer && pointer.blur());
@@ -290,6 +302,14 @@ function start() {
     ipcMain.handle("cadp:sign-in:cancel", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       browserSignIn.cancel();
+    });
+    ipcMain.handle("cadp:drive:connect", (event, clientId) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return browserDrive.connect(clientId);
+    });
+    ipcMain.handle("cadp:drive:cancel", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      browserDrive.cancel();
     });
     ipcMain.handle("cadp:update:get", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
