@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [cec98c8, splash-check]
+        ref: [cec98c85ae6a817bbb21cf1b28adbea0197a0e49, splash-check]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -28,6 +28,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npx electron-builder --win dir --x64 --publish never
       - name: Start the app and photograph the screen
         shell: pwsh
         run: |
@@ -44,8 +45,8 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           Shot "000-before"
-          $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
-          $p = Start-Process -FilePath $electron -ArgumentList "." -PassThru
+          $exe = Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1
+          $p = Start-Process -FilePath $exe.FullName -PassThru
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
           for ($i = 1; $i -le 64; $i++) {
             Start-Sleep -Milliseconds 250
@@ -64,6 +65,6 @@ jobs:
           Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName -Tail 40 }
       - uses: actions/upload-artifact@v4
         with:
-          name: shots-${{ matrix.ref }}
+          name: shots-${{ strategy.job-index }}
           retention-days: 3
           path: ${{ runner.temp }}/shots
