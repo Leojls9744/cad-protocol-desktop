@@ -44,15 +44,19 @@ jobs:
             $g.Dispose(); $bmp.Dispose()
           }
           $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
-          $out = Join-Path $env:RUNNER_TEMP "variants.log"
-          $p = Start-Process -FilePath $electron -ArgumentList "test/splash-variants.js" -PassThru -RedirectStandardOutput $out
-          $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          foreach ($ms in 1500, 3000, 5000, 7500) {
-            while ($sw.ElapsedMilliseconds -lt $ms) { Start-Sleep -Milliseconds 50 }
-            Shot ("v-{0:D5}ms" -f $ms)
+          foreach ($mode in "now", "blank", "after") {
+            $env:CADP_MODE = $mode
+            $out = Join-Path $env:RUNNER_TEMP "load-$mode.log"
+            $p = Start-Process -FilePath $electron -ArgumentList "test/splash-load.js" -PassThru -RedirectStandardOutput $out
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            for ($i = 1; $i -le 24; $i++) {
+              while ($sw.ElapsedMilliseconds -lt ($i * 250)) { Start-Sleep -Milliseconds 20 }
+              Shot ("{0}-{1:D2}-{2}ms" -f $mode, $i, $sw.ElapsedMilliseconds)
+            }
+            $p.WaitForExit(15000) | Out-Null
+            "== $mode"; Get-Content $out
+            Start-Sleep -Seconds 1
           }
-          $p.WaitForExit(15000) | Out-Null
-          Get-Content $out
       - name: Keep the pictures on a branch of their own
         shell: bash
         run: |
