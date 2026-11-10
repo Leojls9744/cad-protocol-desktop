@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [cec98c85ae6a817bbb21cf1b28adbea0197a0e49, splash-check]
+        ref: [splash-check]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -28,15 +28,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx electron-builder --win dir --x64 --publish never
-      - name: Start the app and photograph the screen
+      - run: node node_modules/electron/install.js
+      - name: Open the variants and photograph the screen
         shell: pwsh
         run: |
           Add-Type -AssemblyName System.Windows.Forms, System.Drawing
           $shots = Join-Path $env:RUNNER_TEMP "shots"
           New-Item -ItemType Directory -Force -Path $shots | Out-Null
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          "screen $($b.Width)x$($b.Height)"
           function Shot($name) {
             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
             $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -44,25 +43,16 @@ jobs:
             $bmp.Save((Join-Path $shots "$name.jpg"), [System.Drawing.Imaging.ImageFormat]::Jpeg)
             $g.Dispose(); $bmp.Dispose()
           }
-          Shot "000-before"
-          $exe = Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1
-          $p = Start-Process -FilePath $exe.FullName -PassThru
+          $electron = Resolve-Path "node_modules/electron/dist/electron.exe"
+          $out = Join-Path $env:RUNNER_TEMP "variants.log"
+          $p = Start-Process -FilePath $electron -ArgumentList "test/splash-variants.js" -PassThru -RedirectStandardOutput $out
           $sw = [System.Diagnostics.Stopwatch]::StartNew()
-          for ($i = 1; $i -le 64; $i++) {
-            Start-Sleep -Milliseconds 250
-            Shot ("{0:D3}-start-{1}ms" -f $i, $sw.ElapsedMilliseconds)
+          foreach ($ms in 1500, 3000, 5000, 7500) {
+            while ($sw.ElapsedMilliseconds -lt $ms) { Start-Sleep -Milliseconds 50 }
+            Shot ("v-{0:D5}ms" -f $ms)
           }
-          $main = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
-          "main window: $($main.MainWindowTitle)"
-          $main.CloseMainWindow() | Out-Null
-          $sw.Restart()
-          for ($i = 1; $i -le 24; $i++) {
-            Start-Sleep -Milliseconds 250
-            Shot ("{0:D3}-close-{1}ms" -f (100 + $i), $sw.ElapsedMilliseconds)
-          }
-          Get-Process electron -ErrorAction SilentlyContinue | Stop-Process -Force
-          $log = Join-Path $env:APPDATA "cad-protocol-desktop/desktop.log"
-          Get-ChildItem $env:APPDATA -Recurse -Filter desktop.log -ErrorAction SilentlyContinue | ForEach-Object { "== $($_.FullName)"; Get-Content $_.FullName -Tail 40 }
+          $p.WaitForExit(15000) | Out-Null
+          Get-Content $out
       - name: Keep the pictures on a branch of their own
         shell: bash
         run: |
