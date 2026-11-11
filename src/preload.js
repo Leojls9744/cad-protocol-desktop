@@ -46,10 +46,16 @@ if (appOrigin && window.location.origin === appOrigin) {
         return () => ipcRenderer.removeListener("cadp:card:choice", heard);
       },
     },
-    /** 1.9: Google Drive through the person's browser; resolves with { accessToken, expiresIn, email }. */
+    /**
+     * 1.9: Google Drive through the person's browser; resolves with
+     * { accessToken, expiresIn, email }. 1.10.2: with { pick: { kind,
+     * apiKey, title, startIn } } the browser shows Google's picker too, and
+     * what's chosen comes back as `picked` (canPick says so).
+     */
     drive: {
-      connect: (clientId) => ipcRenderer.invoke("cadp:drive:connect", clientId),
+      connect: (clientId, options) => ipcRenderer.invoke("cadp:drive:connect", clientId, options),
       cancel: () => ipcRenderer.invoke("cadp:drive:cancel"),
+      canPick: true,
     },
     /**
      * 1.3: { current, latest, newer, url, phase, percent }, phase being

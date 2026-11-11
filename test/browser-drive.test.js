@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
-const { createBrowserDrive, drivePageUrl, readDriveAnswer, HANDOFF_INFO } = require("../src/browser-drive");
+const { createBrowserDrive, drivePageUrl, readDriveAnswer, pickRequest, pickedFrom, HANDOFF_INFO } = require("../src/browser-drive");
 
 const CLIENT = "1234567890-abcdefghijklmnop.apps.googleusercontent.com";
 const subtle = globalThis.crypto.subtle;
@@ -86,4 +86,47 @@ test("a bad client id isn't sent to the browser, and cancelling rejects", async 
   drive.cancel();
   await assert.rejects(waiting, /cancelled/);
   assert.deepEqual(readDriveAnswer("/done", "GET", "s", null), { status: 404, message: "Nothing here." });
+});
+
+const API_KEY = "AIzaSyA1234567890abcdefghijklmnopqrstu";
+
+test("1.10.2: picking in the browser: the request rides after #, and what's chosen comes back sealed", async () => {
+  let opened = null;
+  const drive = createBrowserDrive({
+    appUrl: "https://cad-dza.caffeine.xyz",
+    openExternal: (url) => {
+      opened = new URL(url);
+    },
+  });
+  const result = drive.connect(CLIENT, { pick: { kind: "folder", apiKey: API_KEY, title: "Choose a Drive folder for 26273", startIn: "abc_123" } });
+  while (!opened) await new Promise((r) => setTimeout(r, 10));
+  assert.equal(opened.search, "");
+  const q = new URLSearchParams(opened.hash.slice(1));
+  assert.equal(q.get("m"), "folder");
+  assert.equal(q.get("a"), API_KEY);
+  assert.equal(q.get("t"), "Choose a Drive folder for 26273");
+  assert.equal(q.get("f"), "abc_123");
+  const state = q.get("s");
+  const picked = [
+    { id: "folder_1", name: "Boundary", mimeType: "application/vnd.google-apps.folder", parentId: "abc_123", sizeBytes: null },
+    { id: "../nope", name: "x" },
+  ];
+  const sealed = await sealAsThePageDoes(q.get("k"), state, { accessToken: "ya29.t", expiresIn: 3000, email: "leo@example.com", picked });
+  const done = await get(`http://127.0.0.1:${Number(q.get("p"))}/drive?${new URLSearchParams({ s: state, ...sealed })}`);
+  assert.equal(done.status, 200);
+  assert.match(done.body, /Sent to CAD Protocol/);
+  assert.deepEqual((await result).picked, [picked[0]]);
+});
+
+test("1.10.2: a pick that isn't one is turned down before the browser opens", async () => {
+  let opens = 0;
+  const drive = createBrowserDrive({ appUrl: "https://x.example", openExternal: () => (opens += 1) });
+  await assert.rejects(drive.connect(CLIENT, { pick: { kind: "everything", apiKey: API_KEY } }), /Pick files or a folder/);
+  await assert.rejects(drive.connect(CLIENT, { pick: { kind: "file", apiKey: "nope" } }), /API key/);
+  assert.equal(opens, 0);
+  assert.equal(pickRequest(undefined), null);
+  assert.deepEqual(pickRequest({ kind: "file", apiKey: API_KEY, startIn: "bad/id" }), { kind: "file", apiKey: API_KEY, title: "", startIn: "" });
+  assert.equal(pickedFrom(undefined), undefined);
+  assert.deepEqual(pickedFrom([]), []);
+  assert.equal(pickedFrom(Array.from({ length: 80 }, (_, i) => ({ id: `f${i}` }))).length, 50);
 });

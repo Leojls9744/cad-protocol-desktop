@@ -18,6 +18,14 @@
 //
 // What passes through the browser's address bar is no use without this
 // key; the state stops any other page's answer being taken for this one.
+//
+// 1.10.2 (Leo, 2026-11-10 16:50: "when i click on a folder and hit select
+// nothing happens"): Google's file picker can't show in the app's window
+// either (it asks to sign in to Google there, and opened in a tab of its
+// own it has no way back), so picking goes the same way. connect() with
+// `pick` ({ kind: "file" | "folder", apiKey, title, startIn }) has the
+// page show the picker after the token, and the files or folder chosen
+// come back sealed with it as `picked` (an empty list: closed).
 
 const crypto = require("node:crypto");
 const http = require("node:http");
@@ -26,15 +34,52 @@ const TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_HEADER_BYTES = 64 * 1024;
 const HANDOFF_INFO = "cadp-drive-handoff-v1";
 
+const MAX_PICKED = 50;
+const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
+
 function isClientId(value) {
   return typeof value === "string" && /^\d+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(value);
 }
 
+/** What to pick (1.10.2), checked; null for none, or throws. */
+function pickRequest(pick) {
+  if (pick === undefined || pick === null) return null;
+  if (typeof pick !== "object") throw new Error("That isn't something to pick.");
+  if (pick.kind !== "file" && pick.kind !== "folder") throw new Error("Pick files or a folder.");
+  if (typeof pick.apiKey !== "string" || !/^AIza[0-9A-Za-z_-]{20,80}$/.test(pick.apiKey)) throw new Error("That isn't a Google API key.");
+  const title = typeof pick.title === "string" ? pick.title.slice(0, 120) : "";
+  const startIn = typeof pick.startIn === "string" && DRIVE_ID.test(pick.startIn) ? pick.startIn : "";
+  return { kind: pick.kind, apiKey: pick.apiKey, title, startIn };
+}
+
 /** The page in the person's browser. Everything after # stays in the browser. */
-function drivePageUrl(appUrl, key, port, state, clientId) {
+function drivePageUrl(appUrl, key, port, state, clientId, pick = null) {
   const url = new URL("/desktop-drive", appUrl);
-  url.hash = new URLSearchParams({ k: key, p: String(port), s: state, c: clientId }).toString();
+  const q = new URLSearchParams({ k: key, p: String(port), s: state, c: clientId });
+  if (pick) {
+    q.set("m", pick.kind);
+    q.set("a", pick.apiKey);
+    if (pick.title) q.set("t", pick.title);
+    if (pick.startIn) q.set("f", pick.startIn);
+  }
+  url.hash = q.toString();
   return url.toString();
+}
+
+/** The files or folder chosen, as far as they can be kept; undefined when none was asked. */
+function pickedFrom(list) {
+  if (!Array.isArray(list)) return undefined;
+  const short = (v, n) => (typeof v === "string" ? v.slice(0, n) : "");
+  return list
+    .filter((item) => item && typeof item.id === "string" && DRIVE_ID.test(item.id))
+    .slice(0, MAX_PICKED)
+    .map((item) => ({
+      id: item.id,
+      name: short(item.name, 300),
+      mimeType: short(item.mimeType, 200),
+      parentId: typeof item.parentId === "string" && DRIVE_ID.test(item.parentId) ? item.parentId : null,
+      sizeBytes: Number.isFinite(item.sizeBytes) && item.sizeBytes >= 0 ? item.sizeBytes : null,
+    }));
 }
 
 function sameText(a, b) {
@@ -57,11 +102,14 @@ function openSealed(ecdh, state, sealed) {
   const got = JSON.parse(plain.toString("utf8"));
   if (!got || typeof got.accessToken !== "string" || !got.accessToken || got.accessToken.length > 4096) throw new Error("no token");
   const expiresIn = Number(got.expiresIn);
-  return {
+  const out = {
     accessToken: got.accessToken,
     expiresIn: Number.isFinite(expiresIn) && expiresIn > 0 ? Math.min(expiresIn, 3600) : 3600,
     email: typeof got.email === "string" ? got.email.slice(0, 300) : "",
   };
+  const picked = pickedFrom(got.picked);
+  if (picked) out.picked = picked;
+  return out;
 }
 
 /** Reads the browser's answer: { result } for a good one, or { status, message }. */
@@ -107,9 +155,19 @@ function createBrowserDrive({ appUrl, openExternal, focusApp = () => {}, log = (
   }
 
   return {
-    /** Resolves with { accessToken, expiresIn, email }, or rejects when cancelled or after the time limit. */
-    connect(clientId) {
+    /**
+     * Resolves with { accessToken, expiresIn, email } (and `picked` when
+     * `options.pick` asked for it), or rejects when cancelled or after the
+     * time limit.
+     */
+    connect(clientId, options = {}) {
       if (!isClientId(clientId)) return Promise.reject(new Error("That isn't a Google OAuth client id."));
+      let pick;
+      try {
+        pick = pickRequest(options && options.pick);
+      } catch (err) {
+        return Promise.reject(err);
+      }
       if (pending) finish(new Error("cancelled: a new connection started"));
       const state = crypto.randomBytes(32).toString("hex");
       const ecdh = crypto.createECDH("prime256v1");
@@ -132,8 +190,21 @@ function createBrowserDrive({ appUrl, openExternal, focusApp = () => {}, log = (
             return;
           }
           res.statusCode = 200;
-          res.end(page("Google Drive is connected", "Go back to CAD Protocol for Windows. You can close this tab."));
-          log("Google Drive connected through the browser");
+          if (pick) {
+            const chose = answer.result.picked && answer.result.picked.length;
+            res.end(
+              page(
+                chose ? "Sent to CAD Protocol" : "Nothing chosen",
+                chose
+                  ? "Go back to CAD Protocol for Windows: what you chose is there. You can close this tab."
+                  : "Nothing was chosen on Google Drive. Go back to CAD Protocol for Windows. You can close this tab.",
+              ),
+            );
+            log("Google Drive picked through the browser");
+          } else {
+            res.end(page("Google Drive is connected", "Go back to CAD Protocol for Windows. You can close this tab."));
+            log("Google Drive connected through the browser");
+          }
           focusApp();
           finish(null, answer.result);
         });
@@ -147,7 +218,7 @@ function createBrowserDrive({ appUrl, openExternal, focusApp = () => {}, log = (
         server.listen(0, "127.0.0.1", () => {
           if (!pending || pending.server !== server) return;
           const { port } = server.address();
-          const url = drivePageUrl(appUrl, publicKey, port, state, clientId);
+          const url = drivePageUrl(appUrl, publicKey, port, state, clientId, pick);
           Promise.resolve(openExternal(url)).catch((err) => {
             log(`couldn't open the browser: ${err && err.message ? err.message : err}`);
             finish(new Error("Your browser couldn't be opened."));
@@ -164,4 +235,4 @@ function createBrowserDrive({ appUrl, openExternal, focusApp = () => {}, log = (
   };
 }
 
-module.exports = { createBrowserDrive, drivePageUrl, readDriveAnswer, openSealed, isClientId, HANDOFF_INFO, TIMEOUT_MS };
+module.exports = { createBrowserDrive, drivePageUrl, readDriveAnswer, openSealed, isClientId, pickRequest, pickedFrom, HANDOFF_INFO, TIMEOUT_MS, MAX_PICKED };

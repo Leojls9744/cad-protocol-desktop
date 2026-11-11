@@ -328,9 +328,10 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       browserSignIn.cancel();
     });
-    ipcMain.handle("cadp:drive:connect", (event, clientId) => {
+    ipcMain.handle("cadp:drive:connect", (event, clientId, options) => {
       if (!fromApp(event)) throw new Error("not allowed");
-      return browserDrive.connect(clientId);
+      // 1.10.2: `options.pick` has the browser show Google's picker too.
+      return browserDrive.connect(clientId, options || {});
     });
     ipcMain.handle("cadp:drive:cancel", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
