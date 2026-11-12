@@ -35,6 +35,10 @@
 // - 1.8.2: the card and the offline page come from cadp://app/
 //   (local-pages.js): the installed app won't show file:// pages (its
 //   grantFileProtocolExtraPrivileges fuse is off), so the card was empty.
+// - 1.11: .cadp files are the app's in Windows (the installer registers
+//   them, with their own document icon, build/cadp-file.ico): a
+//   double-click starts the app with the file, or hands it to the open one,
+//   and the page takes it (cadp:files:take-launched) and opens it.
 //
 // It has no access to the computer beyond that: pages get no Node.js, run
 // sandboxed, and only the app's own pages may load in the main window.
@@ -51,7 +55,7 @@ const { createSignInCard } = require("./signin-card");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
-const { createLocalFiles } = require("./local-files");
+const { createLocalFiles, launchedPaths } = require("./local-files");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
@@ -87,6 +91,8 @@ if (smokeArg) {
         report: config.openKind(`blob:${config.APP_ORIGIN}/0b8f`),
         external: config.openKind("https://github.com/"),
       };
+      // 1.11: the .cadp files on its command line (a double-click).
+      result.launched = launchedPaths(process.argv);
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -98,6 +104,15 @@ if (smokeArg) {
   app.quit();
 } else {
   start();
+}
+
+/** Documents, the first folder Save offers (home if Windows won't say yet). */
+function documentsFolder() {
+  try {
+    return app.getPath("documents");
+  } catch {
+    return app.getPath("home");
+  }
 }
 
 function start() {
@@ -146,6 +161,22 @@ function start() {
     log,
   });
 
+  // Drawings on this computer (1.5): only files picked in Windows' Save and
+  // Open windows, or (1.11) double-clicked, which Windows starts the app
+  // with (the .cadp files are the app's, by the installer).
+  const files = createLocalFiles({
+    dialog,
+    fs: require("node:fs/promises"),
+    documentsDir: documentsFolder(),
+    log,
+  });
+  /** Double-clicked drawings queued for the page; how many wait. */
+  const launchFiles = (argv) => {
+    const found = launchedPaths(argv);
+    return found.length ? files.launch(found) : 0;
+  };
+  launchFiles(process.argv);
+
   /** Which kind each window is: "main", "signin" or "report" (see config.js). */
   const kinds = new WeakMap();
 
@@ -160,7 +191,14 @@ function start() {
     app.exit(1);
   });
 
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    // A .cadp double-clicked while the app's open (1.11): it waits for the
+    // page, which hears it's there.
+    const waiting = launchFiles(argv);
+    if (waiting && mainWindow && !mainWindow.isDestroyed()) {
+      const contents = mainWindow.webContents;
+      if (config.isAppUrl(contents.getURL())) contents.send("cadp:files:launched", waiting);
+    }
     // Signing in (1.10): the sign-in card's what there is to see.
     if (awaitingSignIn && signInCard && signInCard.isShown) {
       signInCard.focus();
@@ -345,14 +383,8 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       return updates ? updates.installNow() : false;
     });
-    // Drawings on this computer (1.5): only files picked in Windows' Save and
-    // Open windows, shown over the window that asked.
-    const files = createLocalFiles({
-      dialog,
-      fs: require("node:fs/promises"),
-      documentsDir: app.getPath("documents"),
-      log,
-    });
+    // Drawings on this computer (1.5): Windows' Save and Open windows, shown
+    // over the window that asked.
     const windowOf = (event) => BrowserWindow.fromWebContents(event.sender) || undefined;
     ipcMain.handle("cadp:files:save-as", (event, name, bytes) => {
       if (!fromApp(event)) throw new Error("not allowed");
@@ -365,6 +397,15 @@ function start() {
     ipcMain.handle("cadp:files:open", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return files.open(windowOf(event));
+    });
+    // 1.11: double-clicked drawings, read and handed over once each.
+    ipcMain.handle("cadp:files:launched-count", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.launchedCount();
+    });
+    ipcMain.handle("cadp:files:take-launched", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.takeLaunched();
     });
     // The page's answers to "the window is closing" (close-guard.js).
     ipcMain.on("cadp:close-started", (event, id) => {

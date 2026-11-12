@@ -48,7 +48,9 @@ jobs:
         run: |
           $exe = Get-ChildItem "dist/win-unpacked/*.exe" | Select-Object -First 1
           $out = Join-Path $env:RUNNER_TEMP "smoke.json"
-          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test=$out" -PassThru
+          # 1.11: a .cadp handed over as a double-click does (a path with spaces).
+          $cadp = Join-Path $env:RUNNER_TEMP "Smith ALTA.cadp"
+          $p = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test=$out", "`"$cadp`"" -PassThru
           if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "The app didn't finish its check in 90 seconds." }
           if (Test-Path "$out.log") { Get-Content "$out.log" }
           if (-not (Test-Path $out)) { throw "The app didn't write its check." }
@@ -59,6 +61,7 @@ jobs:
           if ($r.during -ne $r.target) { throw "Setting the pointer speed didn't take." }
           if ($r.after -ne $r.before) { throw "The pointer speed wasn't put back." }
           if ($r.config.signIn -ne "signin") { throw "Internet Identity windows aren't recognised." }
+          if (@($r.launched).Count -ne 1 -or @($r.launched)[0] -ne $cadp) { throw "A double-clicked .cadp wasn't found on the command line: $($r.launched -join ', ')" }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }
@@ -69,6 +72,22 @@ jobs:
         run: |
           cd dist
           sha256sum CAD-Protocol-Setup.exe | sed 's/ \*/  /' | tee SHA256SUMS.txt
+
+      - name: Check the installer makes .cadp files the app's
+        shell: pwsh
+        run: |
+          # 1.11: installed for this user, silently, as an update would.
+          $setup = Start-Process -FilePath "dist/CAD-Protocol-Setup.exe" -ArgumentList "/S" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "The installer stopped with $($setup.ExitCode)." }
+          $classes = "HKCU:\Software\Classes"
+          $progId = (Get-ItemProperty -Path "$classes\.cadp").'(default)'
+          if ($progId -ne "CADProtocol.Drawing") { throw ".cadp isn't the app's: $progId" }
+          $type = (Get-ItemProperty -Path "$classes\$progId").'(default)'
+          $icon = (Get-ItemProperty -Path "$classes\$progId\DefaultIcon").'(default)'
+          $command = (Get-ItemProperty -Path "$classes\$progId\shell\open\command").'(default)'
+          Write-Output "type: $type"; Write-Output "icon: $icon"; Write-Output "command: $command"
+          if (-not (Test-Path ($icon.Trim('"')))) { throw "The .cadp icon wasn't installed: $icon" }
+          if ($command -notlike '*CAD Protocol.exe*"%1"*') { throw "Double-click doesn't open CAD Protocol: $command" }
 
       - uses: actions/upload-artifact@v4
         with:

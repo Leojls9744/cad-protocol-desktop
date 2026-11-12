@@ -12,6 +12,10 @@
 // last until the app closes, and after that the person picks the file again.
 // A save is written to a file beside the drawing and then renamed over it,
 // so a failed save never leaves half a drawing.
+//
+// 1.11: a .cadp double-clicked in Windows starts the app with its path (or
+// hands it to the open app). Those count as picked too: they wait here
+// until the page takes them, each read once and given a token like Open's.
 
 const path = require("node:path");
 const crypto = require("node:crypto");
@@ -35,6 +39,31 @@ function cadpName(name) {
 /** The picked path, with .cadp on the end. */
 function withExtension(file) {
   return file.toLowerCase().endsWith(EXTENSION) ? file : `${file}${EXTENSION}`;
+}
+
+/** At most this many double-clicked drawings wait for the page at once. */
+const MAX_LAUNCHED = 20;
+
+/**
+ * 1.11: the .cadp files Windows started the app with (a double-click, or
+ * Open with), from its command line: whole paths ending .cadp, not the
+ * switches Electron and Chromium add.
+ */
+function launchedPaths(argv) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(argv) ? argv : []) {
+    if (typeof raw !== "string") continue;
+    const a = raw.trim().replace(/^"(.*)"$/, "$1");
+    if (!a || a.startsWith("-")) continue;
+    if (!a.toLowerCase().endsWith(EXTENSION)) continue;
+    if (!path.isAbsolute(a) && !path.win32.isAbsolute(a)) continue;
+    const key = a.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(a);
+  }
+  return out;
 }
 
 /** What the page sent, as bytes, or an error. */
@@ -73,6 +102,20 @@ function createLocalFiles({ dialog, fs, documentsDir, log = () => {} }) {
 
   const answer = (token, file) => ({ token, name: path.basename(file), path: file });
 
+  /** A file's bytes, read for the page, with its token. */
+  async function read(file) {
+    const stat = await fs.stat(file);
+    if (stat.size > MAX_BYTES) throw new Error("That file is too large to be a drawing.");
+    const bytes = await fs.readFile(file);
+    return {
+      ...answer(remember(file), file),
+      bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    };
+  }
+
+  /** 1.11: double-clicked drawings waiting for the page to take them. */
+  const launched = [];
+
   return {
     /** The Save window, then the file written; null when the person cancels. */
     async saveAs(win, suggested, data) {
@@ -108,16 +151,62 @@ function createLocalFiles({ dialog, fs, documentsDir, log = () => {} }) {
       });
       const file = picked.canceled ? undefined : picked.filePaths && picked.filePaths[0];
       if (!file) return null;
-      const stat = await fs.stat(file);
-      if (stat.size > MAX_BYTES) throw new Error("That file is too large to be a drawing.");
-      const bytes = await fs.readFile(file);
+      const opened = await read(file);
       log(`opened a drawing from ${file}`);
-      return {
-        ...answer(remember(file), file),
-        bytes: new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength),
-      };
+      return opened;
+    },
+
+    /**
+     * 1.11: drawings Windows handed the app (a double-click on a .cadp), kept
+     * until the page takes them; how many now wait.
+     */
+    launch(paths) {
+      for (const file of launchedPaths(paths)) {
+        if (launched.some((f) => f.toLowerCase() === file.toLowerCase())) continue;
+        if (launched.length >= MAX_LAUNCHED) break;
+        launched.push(file);
+      }
+      return launched.length;
+    },
+
+    /** How many double-clicked drawings wait. */
+    launchedCount() {
+      return launched.length;
+    },
+
+    /**
+     * The double-clicked drawings, read and handed over once each: { token,
+     * name, path, bytes }, or { name, path, error } for one that couldn't be
+     * read (moved, say). Saving again writes to the same file, as after Open.
+     */
+    async takeLaunched() {
+      const files = launched.splice(0, launched.length);
+      const out = [];
+      for (const file of files) {
+        try {
+          out.push(await read(file));
+          log(`opened a drawing Windows handed over: ${file}`);
+        } catch (err) {
+          log(`couldn't open ${file}: ${err && err.message}`);
+          out.push({
+            name: path.basename(file),
+            path: file,
+            error: err && err.code === "ENOENT" ? "The file isn't there any more." : (err && err.message) || "It couldn't be read.",
+          });
+        }
+      }
+      return out;
     },
   };
 }
 
-module.exports = { EXTENSION, FILTERS, MAX_BYTES, cadpName, withExtension, createLocalFiles };
+module.exports = {
+  EXTENSION,
+  FILTERS,
+  MAX_BYTES,
+  MAX_LAUNCHED,
+  cadpName,
+  withExtension,
+  launchedPaths,
+  createLocalFiles,
+};

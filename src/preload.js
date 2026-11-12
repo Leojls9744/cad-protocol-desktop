@@ -73,11 +73,22 @@ if (appOrigin && window.location.origin === appOrigin) {
      * saveAs(name, bytes) and open() resolve with { token, name, path } (open
      * adds bytes), or null when cancelled; save(token, bytes) writes the same
      * file again, or resolves null when the token is no longer known.
+     * 1.11: .cadp files double-clicked in Windows wait for the page:
+     * launchedCount() says how many, takeLaunched() hands them over once
+     * each ({ token, name, path, bytes }, or { name, path, error }), and
+     * onLaunched(fn) hears when another arrives while the app's open.
      */
     files: {
       saveAs: (name, bytes) => ipcRenderer.invoke("cadp:files:save-as", name, bytes),
       save: (token, bytes) => ipcRenderer.invoke("cadp:files:save", token, bytes),
       open: () => ipcRenderer.invoke("cadp:files:open"),
+      launchedCount: () => ipcRenderer.invoke("cadp:files:launched-count"),
+      takeLaunched: () => ipcRenderer.invoke("cadp:files:take-launched"),
+      onLaunched: (fn) => {
+        const heard = (_event, count) => fn(count);
+        ipcRenderer.on("cadp:files:launched", heard);
+        return () => ipcRenderer.removeListener("cadp:files:launched", heard);
+      },
     },
     /**
      * 1.2: `handler` runs when the window is about to close (it may save and

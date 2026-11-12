@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { cadpName, createLocalFiles, withExtension } = require("../src/local-files");
+const { MAX_LAUNCHED, cadpName, createLocalFiles, launchedPaths, withExtension } = require("../src/local-files");
 
 async function folder() {
   return fs.mkdtemp(path.join(os.tmpdir(), "cadp-files-"));
@@ -95,4 +95,69 @@ test("a failed write leaves the drawing as it was", async () => {
   await assert.rejects(files.save(opened.token, Uint8Array.of(2)), /disk full/);
   assert.deepEqual([...(await fs.readFile(file))], [1]);
   assert.deepEqual(await fs.readdir(dir), ["Keep.cadp"]);
+});
+
+test("1.11: the .cadp files Windows started the app with, from its command line", () => {
+  const argv = [
+    "C:\\Users\\leo\\AppData\\Local\\Programs\\cad-protocol\\CAD Protocol.exe",
+    "--allow-file-access-from-files",
+    "--original-process-start-time=13370000000000000",
+    "C:\\Jobs\\26258 Smith\\Smith ALTA.cadp",
+    '"C:\\Jobs\\Lot 7.CADP"',
+    "C:\\Jobs\\26258 Smith\\smith alta.cadp",
+    "C:\\Jobs\\notes.txt",
+    "Lot 9.cadp",
+    ".",
+    42,
+  ];
+  assert.deepEqual(launchedPaths(argv), ["C:\\Jobs\\26258 Smith\\Smith ALTA.cadp", "C:\\Jobs\\Lot 7.CADP"]);
+  assert.deepEqual(launchedPaths(undefined), []);
+  assert.deepEqual(launchedPaths(["/home/leo/Topo.cadp"]), ["/home/leo/Topo.cadp"]);
+});
+
+test("1.11: double-clicked drawings wait, are handed over once each, and save back to their file", async () => {
+  const dir = await folder();
+  const one = path.join(dir, "Smith ALTA.cadp");
+  const two = path.join(dir, "Lot 7.cadp");
+  await fs.writeFile(one, Buffer.from([1, 2]));
+  await fs.writeFile(two, Buffer.from([3]));
+  const dialog = fakeDialog();
+  const files = createLocalFiles({ dialog, fs, documentsDir: dir });
+  assert.equal(files.launchedCount(), 0);
+  assert.deepEqual(await files.takeLaunched(), []);
+  assert.equal(files.launch(["app.exe", one]), 1);
+  // The same file again (two double-clicks) waits once.
+  assert.equal(files.launch(["app.exe", "--x", one.toUpperCase(), two]), 2);
+  const taken = await files.takeLaunched();
+  assert.deepEqual(
+    taken.map((t) => [t.name, [...t.bytes]]),
+    [["Smith ALTA.cadp", [1, 2]], ["Lot 7.cadp", [3]]],
+  );
+  assert.ok(taken[0].bytes instanceof Uint8Array);
+  assert.equal(files.launchedCount(), 0);
+  assert.deepEqual(await files.takeLaunched(), []);
+  // Ctrl+S writes the file that was double-clicked, no window.
+  await files.save(taken[0].token, Uint8Array.of(9));
+  assert.deepEqual([...(await fs.readFile(one))], [9]);
+  assert.equal(dialog.asked.length, 0);
+});
+
+test("1.11: a double-clicked drawing that's gone says so, and the rest still open", async () => {
+  const dir = await folder();
+  const here = path.join(dir, "Here.cadp");
+  await fs.writeFile(here, Buffer.from([5]));
+  const files = createLocalFiles({ dialog: fakeDialog(), fs, documentsDir: dir });
+  files.launch([path.join(dir, "Moved.cadp"), here]);
+  const [gone, ok] = await files.takeLaunched();
+  assert.equal(gone.name, "Moved.cadp");
+  assert.equal(gone.error, "The file isn't there any more.");
+  assert.equal(gone.token, undefined);
+  assert.deepEqual([...ok.bytes], [5]);
+});
+
+test("1.11: at most MAX_LAUNCHED drawings wait at once", () => {
+  const files = createLocalFiles({ dialog: fakeDialog(), fs, documentsDir: os.tmpdir() });
+  const many = Array.from({ length: MAX_LAUNCHED + 5 }, (_, i) => path.join(os.tmpdir(), `d${i}.cadp`));
+  assert.equal(files.launch(many), MAX_LAUNCHED);
+  assert.equal(files.launch([path.join(os.tmpdir(), "late.cadp")]), MAX_LAUNCHED);
 });
