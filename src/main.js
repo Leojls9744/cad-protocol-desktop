@@ -36,7 +36,8 @@
 //   (local-pages.js): the installed app won't show file:// pages (its
 //   grantFileProtocolExtraPrivileges fuse is off), so the card was empty.
 // - 1.11: .cadp files are the app's in Windows (the installer registers
-//   them, with their own document icon, build/cadp-file.ico): a
+//   them; 1.11.1: with the app's own icon, build/icon.ico, as Leo
+//   preferred over 1.11's document icon): a
 //   double-click starts the app with the file, or hands it to the open one,
 //   and the page takes it (cadp:files:take-launched) and opens it.
 //

@@ -87,6 +87,7 @@ jobs:
           $command = (Get-ItemProperty -Path "$classes\$progId\shell\open\command").'(default)'
           Write-Output "type: $type"; Write-Output "icon: $icon"; Write-Output "command: $command"
           if (-not (Test-Path ($icon.Trim('"')))) { throw "The .cadp icon wasn't installed: $icon" }
+          if ($icon -notlike '*icon.ico*') { throw ".cadp files don't show the app's icon: $icon" }
           if ($command -notlike '*CAD Protocol.exe*"%1"*') { throw "Double-click doesn't open CAD Protocol: $command" }
 
       - uses: actions/upload-artifact@v4

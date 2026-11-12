@@ -1,5 +1,7 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.11.1: .cadp files show the app's icon.** In File Explorer your .cadp drawings now show the CAD Protocol app icon instead of 1.11's document icon. 1.11 updates itself to 1.11.1 (if Explorer still shows the old icon, it changes after a restart).
+
 **New in 1.11: .cadp files open with a double-click.** Drawings you save to this computer (.cadp) now show their own document icon in File Explorer, and double-clicking one opens it in CAD Protocol: the app starts with it, or, if it's already open, it opens there. Ctrl+S saves back to the same file. Open with › CAD Protocol works too. Needs the app's newest web build (v823). 1.10.2 updates itself to 1.11.
 
 **New in 1.10.2: choose from Google Drive in your browser.** Google's file picker can't show in the app's window: it asked you to sign in to Google there, and its Sign in opened the picker in a browser tab where Select did nothing. Now Open from Drive, Choose Default Folder and a project's folder open Google Drive in your own browser: press Continue with Google, choose, and what you chose comes back to the app. Needs the app's newest web build. 1.10.1 updates itself to 1.10.2.
