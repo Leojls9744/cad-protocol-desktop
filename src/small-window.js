@@ -22,12 +22,19 @@
 //    Windows' own calls. No other window is ever touched.
 // 4. It's closed when the sign-in is done or cancelled. Closed by the
 //    person first, the sign-in is cancelled.
+// 5. Clicking the card behind it brings it forward again, with the window
+//    its page opened over it (Internet Identity), so neither is lost
+//    behind the card.
 
 const path = require("node:path");
 
-/** Its size over the card, in the screen's own units (the card is 1120 x 600). */
+/**
+ * Its size over the card, in the screen's own units (the card is 1120 x
+ * 600): room for the sign-in page, and for Internet Identity, which opens
+ * over it at the same size and asks for about 525 x 705 inside.
+ */
 const WIDTH = 540;
-const HEIGHT = 720;
+const HEIGHT = 760;
 
 /** The window class of Chrome, Edge and Brave windows (and of this app's own, which are left out by process). */
 const WINDOW_CLASS = "Chrome_WidgetWin_1";
@@ -78,6 +85,11 @@ function overRect(anchor, workArea, size = { width: WIDTH, height: HEIGHT }) {
     width,
     height,
   };
+}
+
+/** Whether two windows share any of the screen. */
+function overlaps(a, b) {
+  return Boolean(a && b) && a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 
 /** Within a few pixels: a browser may round, or keep an edge of its own. */
@@ -210,7 +222,7 @@ function windowsBackend(log = () => {}) {
         const title = textOf(buffer, getWindowText(hwnd, buffer, buffer.length));
         const pid = [0];
         getProcessId(hwnd, pid);
-        return { visible: Boolean(isWindowVisible(hwnd)), cls, title, pid: pid[0] };
+        return { visible: Boolean(isWindowVisible(hwnd)), maximized: Boolean(isZoomed(hwnd)), cls, title, pid: pid[0] };
       },
       /** The program a process runs, or null if Windows won't say. */
       exeOf(pid) {
@@ -237,8 +249,9 @@ function windowsBackend(log = () => {}) {
         if (isIconic(hwnd) || isZoomed(hwnd)) showWindow(hwnd, SW_RESTORE);
         return Boolean(setWindowPos(hwnd, HWND_TOP, r.x, r.y, r.width, r.height, SWP_NOZORDER | SWP_NOACTIVATE));
       },
-      /** In front of the card, as far as Windows allows. */
+      /** In front of the card, as far as Windows allows (minimised, it's a window again first). */
       raise(hwnd) {
+        if (isIconic(hwnd)) showWindow(hwnd, SW_RESTORE);
         setWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         setForeground(hwnd);
       },
@@ -455,11 +468,26 @@ function createSmallWindow({ backend, spawn, ownPid = process.pid, log = () => {
           closing = true;
           if (hwnd !== null) shut();
         },
-        /** In front of the card again (the card was clicked). */
+        /**
+         * In front of the card again (the card was clicked), and then the
+         * windows opened over it since (Internet Identity's, and Google's
+         * from there: newer windows of the same browser that overlap it,
+         * not maximised), which would otherwise be left behind it. Those
+         * are only ever brought forward, in the order they were in.
+         */
         raise() {
           if (state !== "open" || closing) return;
           try {
-            if (stillThere()) backend.raise(hwnd);
+            if (!stillThere()) return;
+            backend.raise(hwnd);
+            const at = backend.rect(hwnd);
+            // Windows lists them front to back: the backmost first, so they keep their order.
+            for (const handle of backend.handles().reverse()) {
+              if (handle === hwnd || before.has(String(handle))) continue;
+              const info = backend.info(handle);
+              if (!info.visible || info.maximized || info.cls !== WINDOW_CLASS || info.pid !== pid || !info.title) continue;
+              if (overlaps(backend.rect(handle), at)) backend.raise(handle);
+            }
           } catch (err) {
             told("it couldn't be brought forward", err);
           }
@@ -480,6 +508,7 @@ module.exports = {
   isChromium,
   overRect,
   sameRect,
+  overlaps,
   regValue,
   exeFromCommand,
   registryBrowser,

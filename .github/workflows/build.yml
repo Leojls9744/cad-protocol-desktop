@@ -71,6 +71,7 @@ jobs:
           if ([math]::Abs($w.rect.x - $w.want.x) -gt 16 -or [math]::Abs($w.rect.y - $w.want.y) -gt 16) { throw "The small sign-in window wasn't put in place: $($w.rect.x),$($w.rect.y)" }
           if ([math]::Abs($w.rect.width - $w.want.width) -gt 16 -or [math]::Abs($w.rect.height - $w.want.height) -gt 16) { throw "The small sign-in window wasn't sized: $($w.rect.width) x $($w.rect.height)" }
           if (-not $w.closed) { throw "The small sign-in window wasn't closed." }
+          if (@($w.notes).Count -gt 0) { throw "The small sign-in window had trouble: $($w.notes -join '; ')" }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }

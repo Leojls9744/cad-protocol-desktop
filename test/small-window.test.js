@@ -9,6 +9,7 @@ const {
   isChromium,
   overRect,
   sameRect,
+  overlaps,
   regValue,
   exeFromCommand,
   registryBrowser,
@@ -20,7 +21,7 @@ const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const EDGE = "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe";
 const FIREFOX = "C:\\Program Files\\Mozilla Firefox\\firefox.exe";
 const URL_SMALL = "https://cad-dza.caffeine.xyz/desktop-sign-in#k=ab12&p=51234&s=ff00&w=1";
-const RECT = { x: 690, y: 180, width: 540, height: 720 };
+const RECT = { x: 690, y: 140, width: 540, height: 760 };
 const TITLES = ["CAD Protocol", "cad-dza.caffeine.xyz", "desktop-sign-in"];
 /** Quick, so the tests are. */
 const QUICK = { pollMs: 5, fastForMs: 100, slowPollMs: 5, findForMs: 150, settleMs: [5, 5], watchMs: 5 };
@@ -44,7 +45,9 @@ function fakeWindows({ browser = { exe: CHROME, how: "windows" }, supported = tr
     handles: () => [...wins.keys()],
     info: (h) => {
       const w = wins.get(h);
-      return w ? { visible: w.visible, cls: w.cls, title: w.title, pid: w.pid } : { visible: false, cls: "", title: "", pid: 0 };
+      return w
+        ? { visible: w.visible, maximized: Boolean(w.maximized), cls: w.cls, title: w.title, pid: w.pid }
+        : { visible: false, maximized: false, cls: "", title: "", pid: 0 };
     },
     exeOf: (pid) => exes.get(pid) ?? null,
     exists: (h) => wins.has(h),
@@ -113,15 +116,16 @@ test("Chrome, Edge and Brave have a small window; other browsers don't", () => {
 });
 
 test("it goes over the middle of the card, inside the screen", () => {
+  assert.deepEqual([WIDTH, HEIGHT], [540, 760]);
   const screen = { x: 0, y: 0, width: 1920, height: 1040 };
   // The card, 1120 x 600, centred.
-  assert.deepEqual(overRect({ x: 400, y: 220, width: 1120, height: 600 }, screen), { x: 690, y: 160, width: WIDTH, height: HEIGHT });
+  assert.deepEqual(overRect({ x: 400, y: 220, width: 1120, height: 600 }, screen), { x: 690, y: 140, width: WIDTH, height: HEIGHT });
   // A card near the top: kept on the screen.
   assert.deepEqual(overRect({ x: 400, y: 0, width: 1120, height: 600 }, screen), { x: 690, y: 0, width: WIDTH, height: HEIGHT });
   // A second screen to the left.
   assert.deepEqual(overRect({ x: -1500, y: 200, width: 1120, height: 600 }, { x: -1920, y: 0, width: 1920, height: 1040 }), {
     x: -1210,
-    y: 140,
+    y: 120,
     width: WIDTH,
     height: HEIGHT,
   });
@@ -132,6 +136,12 @@ test("it goes over the middle of the card, inside the screen", () => {
     width: WIDTH,
     height: 560,
   });
+});
+
+test("windows overlap when they share any of the screen", () => {
+  assert.equal(overlaps(RECT, { x: 710, y: 240, width: 500, height: 600 }), true);
+  assert.equal(overlaps(RECT, { x: 0, y: 0, width: 690, height: 900 }), false); // side by side
+  assert.equal(overlaps(RECT, null), false);
 });
 
 test("rectangles a pixel or two apart are the same place", () => {
@@ -393,4 +403,36 @@ test("Windows failing part-way never throws out of a timer", async () => {
   // It can still be closed.
   handle.close();
   assert.deepEqual(windows.calls, [["close", opened]]);
+});
+
+test("clicking the card brings Internet Identity's window forward too, and nothing else of the browser's", async () => {
+  const windows = fakeWindows();
+  const theirs = windows.add({ title: "Inbox - Google Chrome" });
+  let opened = null;
+  const { spawn } = fakeSpawn({ onStart: () => (opened = windows.add()) });
+  const handle = await small(windows, spawn).open(URL_SMALL, { rect: RECT, titles: TITLES });
+  await handle.placed;
+  // Its page opens Internet Identity over it; Internet Identity opens Google's, its own size, across it.
+  const identity = windows.add({ title: "Internet Identity", rect: { ...RECT } });
+  const google = windows.add({ title: "Sign in - Google Accounts", rect: { x: 710, y: 240, width: 500, height: 600 } });
+  // Meanwhile: windows of their own (elsewhere, and maximised), another program's in the same place, and a tooltip.
+  const own = windows.add({ title: "New Tab - Google Chrome", rect: { x: 0, y: 0, width: 600, height: 120 } });
+  const full = windows.add({ title: "Mail - Google Chrome", maximized: true, rect: { x: -8, y: -8, width: 1936, height: 1056 } });
+  windows.exes.set(700, "C:\\Program Files\\Slack\\slack.exe");
+  const other = windows.add({ title: "Slack", pid: 700, rect: { ...RECT } });
+  const tip = windows.add({ title: "", rect: { ...RECT } });
+  // Windows lists windows front to back: the newest first here.
+  windows.backend.handles = () => [...windows.wins.keys()].reverse();
+  windows.calls.length = 0;
+  handle.raise();
+  // The small window, then the ones over it, the front one last.
+  assert.deepEqual(windows.calls, [
+    ["raise", opened],
+    ["raise", identity],
+    ["raise", google],
+  ]);
+  for (const untouched of [theirs, own, full, other, tip]) assert.ok(!windows.touched().includes(untouched));
+  handle.close();
+  assert.deepEqual(windows.calls.at(-1), ["close", opened]);
+  assert.ok(windows.wins.has(identity));
 });

@@ -131,8 +131,14 @@ async function smokeSmallWindow(log) {
   const http = require("node:http");
   const os = require("node:os");
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const backend = smallWindowBackend(log);
-  const seen = { supported: backend.supported };
+  // Anything it had to say (a call that failed) is kept with what it saw.
+  const notes = [];
+  const note = (line) => {
+    notes.push(line);
+    log(line);
+  };
+  const backend = smallWindowBackend(note);
+  const seen = { supported: backend.supported, notes };
   if (!backend.supported) return seen;
   seen.default = backend.defaultBrowser();
   const installed = [
@@ -150,7 +156,7 @@ async function smokeSmallWindow(log) {
     const before = new Set(backend.handles().map(String));
     // Inside the build machine's small screen (1024 x 768).
     seen.want = { x: 120, y: 40, width: WIDTH_SMALL, height: Math.min(HEIGHT_SMALL, 600) };
-    const small = createSmallWindow({ backend, spawn: require("node:child_process").spawn, log });
+    const small = createSmallWindow({ backend, spawn: require("node:child_process").spawn, log: note });
     const handle = await small.open(`http://127.0.0.1:${server.address().port}/desktop-sign-in`, {
       rect: seen.want,
       titles: ["CAD Protocol"],
@@ -166,6 +172,9 @@ async function smokeSmallWindow(log) {
     // Its window, to see it go: the one new browser window with that title.
     const titled = () => backend.handles().filter((h) => !before.has(String(h)) && backend.info(h).title.includes("CAD Protocol sign-in check"));
     seen.windows = titled().length;
+    // Brought forward as a click on the card does (and still in place after).
+    handle.raise();
+    seen.raised = titled().map((h) => backend.rect(h));
     handle.close();
     for (let i = 0; i < 60 && titled().length > 0; i += 1) await wait(250);
     seen.closed = titled().length === 0;
@@ -675,6 +684,8 @@ function start() {
     win.on("closed", () => {
       if (mainWindow === win) mainWindow = null;
     });
+    // Clicked while the small sign-in window's over it (1.13): that stays in front.
+    win.on("focus", () => browserSignIn.raise());
 
     return win;
   }
