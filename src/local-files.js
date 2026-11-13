@@ -22,6 +22,7 @@
 // same name ending .dwg in the same folder is written.
 
 const path = require("node:path");
+const { hasAppLink } = require("./app-link");
 const crypto = require("node:crypto");
 
 const EXTENSION = ".cadp";
@@ -60,10 +61,14 @@ const MAX_LAUNCHED = 20;
  * 1.11: the .cadp files Windows started the app with (a double-click, or
  * Open with), from its command line: whole paths ending .cadp, not the
  * switches Electron and Chromium add.
+ * 1.15: none from a start that came with a cadprotocol:// link (app-link.js).
+ * A link is never a drawing, whatever it ends with, and nothing that rode
+ * in beside one is either: a link comes from a page, not from a double-click.
  */
 function launchedPaths(argv) {
   const seen = new Set();
   const out = [];
+  if (hasAppLink(argv)) return out;
   for (const raw of Array.isArray(argv) ? argv : []) {
     if (typeof raw !== "string") continue;
     const a = raw.trim().replace(/^"(.*)"$/, "$1");

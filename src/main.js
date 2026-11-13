@@ -41,6 +41,9 @@
 // - 1.14: the card's Sign in opens Internet Identity at once in a window of
 //   the app's own, over the card (signin-window.js); the browser is the
 //   card's second choice.
+// - 1.15: cadprotocol:// links are the app's (app-link.js), so another app
+//   (UnifyField, say) can open it: cadprotocol://open starts it or brings
+//   it to the front, and nothing else in a link is read.
 // - 1.11: .cadp files are the app's in Windows (the installer registers
 //   them; 1.11.1: with the app's own icon, build/icon.ico, as Leo
 //   preferred over 1.11's document icon): a
@@ -64,6 +67,7 @@ const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles, launchedPaths } = require("./local-files");
+const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
@@ -86,6 +90,15 @@ const CARD_URL = pageUrl("update.html", { splash: "1" });
 // that the packaged app can read and set the pointer speed. It changes the
 // speed for a moment, puts it back, writes what it saw to <file> and quits.
 // ---------------------------------------------------------------------------
+// 1.15: cadprotocol:// links are this app's, said before anything else (the
+// installer says so too; this keeps it so wherever the app's run from).
+const linksAreOurs = registerAppLink(app, {
+  defaultApp: Boolean(process.defaultApp),
+  execPath: process.execPath,
+  argv: process.argv,
+  resolve: (p) => path.resolve(p),
+});
+
 const smokeArg = process.argv.find((a) => a.startsWith("--smoke-test="));
 if (smokeArg) {
   app.whenReady().then(async () => {
@@ -109,6 +122,13 @@ if (smokeArg) {
       };
       // 1.11: the .cadp files on its command line (a double-click).
       result.launched = launchedPaths(process.argv);
+      // 1.15: cadprotocol:// links are the app's, and never a drawing.
+      result.appLink = {
+        said: linksAreOurs,
+        ours: app.isDefaultProtocolClient(LINK_SCHEME),
+        open: hasAppLink(["CAD Protocol.exe", "cadprotocol://open"]),
+        files: launchedPaths(["CAD Protocol.exe", "cadprotocol://open/C:/Jobs/Lot 7.cadp", "C:\\Jobs\\Lot 7.cadp"]).length,
+      };
       // 1.13: a small browser window opened, put in place and closed.
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
       // 1.14: a sign-in window of the app's own, over a card, in front of it.
@@ -309,6 +329,8 @@ function start() {
     return found.length ? files.launch(found) : 0;
   };
   launchFiles(process.argv);
+  // Started by a cadprotocol:// link (1.15): it opens, as from its icon.
+  if (hasAppLink(process.argv)) log("started by a cadprotocol link");
 
   /** Which kind each window is: "main", "signin" or "report" (see config.js). */
   const kinds = new WeakMap();
@@ -325,6 +347,9 @@ function start() {
   });
 
   app.on("second-instance", (_event, argv) => {
+    // A cadprotocol:// link while the app's open (1.15): to the front, as
+    // below, and nothing of the link read (no drawing is taken from it).
+    if (hasAppLink(argv)) log("brought to the front by a cadprotocol link");
     // A .cadp double-clicked while the app's open (1.11): it waits for the
     // page, which hears it's there.
     const waiting = launchFiles(argv);

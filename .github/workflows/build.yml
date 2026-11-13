@@ -80,6 +80,11 @@ jobs:
           if ([math]::Abs($s.rect.width - $s.want.width) -gt 16 -or [math]::Abs($s.rect.height - $s.want.height) -gt 16) { throw "The app's sign-in window wasn't sized: $($s.rect.width) x $($s.rect.height)" }
           if ($s.title -ne "Internet Identity") { throw "The app's sign-in window is titled $($s.title)." }
           if (-not $s.closed) { throw "The app's sign-in window wasn't closed." }
+          # 1.15: cadprotocol:// links are the app's, and never a drawing.
+          $l = $r.appLink
+          if (-not $l.said -or -not $l.ours) { throw "cadprotocol:// links weren't registered to the app." }
+          if (-not $l.open) { throw "A cadprotocol:// link isn't recognised." }
+          if ($l.files -ne 0) { throw "A cadprotocol:// link was read as a drawing." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }
@@ -107,6 +112,40 @@ jobs:
           if (-not (Test-Path ($icon.Trim('"')))) { throw "The .cadp icon wasn't installed: $icon" }
           if ($icon -notlike '*icon.ico*') { throw ".cadp files don't show the app's icon: $icon" }
           if ($command -notlike '*CAD Protocol.exe*"%1"*') { throw "Double-click doesn't open CAD Protocol: $command" }
+
+      - name: Check cadprotocol:// links open the installed app
+        shell: pwsh
+        run: |
+          # 1.15: registered by the installer (the check above left them at the build's own copy).
+          $link = "HKCU:\Software\Classes\cadprotocol"
+          if (-not (Test-Path $link)) { throw "cadprotocol:// isn't registered." }
+          if ($null -eq (Get-ItemProperty -Path $link).'URL Protocol') { throw "cadprotocol:// isn't registered as a link." }
+          $linkCommand = (Get-ItemProperty -Path "$link\shell\open\command").'(default)'
+          Write-Output "link command: $linkCommand"
+          if ($linkCommand -notlike '*CAD Protocol.exe*"%1"*') { throw "cadprotocol:// doesn't open CAD Protocol: $linkCommand" }
+          if ($linkCommand -like '*win-unpacked*') { throw "cadprotocol:// opens the build's copy, not the installed app: $linkCommand" }
+          # A link starts the app; a second, dressed up as a drawing, comes to the app that's open.
+          $log = Join-Path $env:APPDATA "CAD Protocol\desktop.log"
+          if (Test-Path $log) { Remove-Item $log }
+          $said = { param($words) (Test-Path $log) -and (Select-String -Path $log -SimpleMatch $words -Quiet) }
+          Start-Process "cadprotocol://open"
+          $until = (Get-Date).AddSeconds(90)
+          while ((Get-Date) -lt $until -and -not (& $said "started by a cadprotocol link")) { Start-Sleep -Milliseconds 500 }
+          if (-not (& $said "started by a cadprotocol link")) {
+            Get-Process | Where-Object { $_.ProcessName -like "CAD*" } | Format-Table Id, ProcessName, StartTime
+            if (Test-Path $log) { Get-Content $log }
+            throw "A cadprotocol:// link didn't start the app."
+          }
+          Start-Sleep -Seconds 6
+          $cadp = (Join-Path $env:RUNNER_TEMP "Smith ALTA.cadp") -replace '\\', '/'
+          Start-Process "cadprotocol://open/$cadp"
+          $until = (Get-Date).AddSeconds(60)
+          while ((Get-Date) -lt $until -and -not (& $said "brought to the front by a cadprotocol link")) { Start-Sleep -Milliseconds 500 }
+          Get-Content $log
+          $running = @(Get-Process -Name "CAD Protocol" -ErrorAction SilentlyContinue)
+          Write-Output "windows: $(($running | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }) -join ' | ')"
+          $running | Stop-Process -Force -ErrorAction SilentlyContinue
+          if (-not (& $said "brought to the front by a cadprotocol link")) { throw "A second cadprotocol:// link didn't reach the open app." }
 
       - uses: actions/upload-artifact@v4
         with:
