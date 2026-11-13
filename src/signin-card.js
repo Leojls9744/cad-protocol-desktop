@@ -28,7 +28,8 @@ function cleanState(state) {
   return { phase: PHASES.has(s.phase) ? s.phase : "ready", text: text(s.text), note: text(s.note) };
 }
 
-function createSignInCard({ BrowserWindow, workArea, url, preload, webPreferences, log = () => {} }) {
+/** `onFocus` (1.13): the card came to the front (the small sign-in window goes back over it). */
+function createSignInCard({ BrowserWindow, workArea, url, preload, webPreferences, log = () => {}, onFocus = () => {} }) {
   let win = null;
   let shown = false;
   let last = { phase: "ready", text: "", note: "" };
@@ -46,6 +47,10 @@ function createSignInCard({ BrowserWindow, workArea, url, preload, webPreference
     },
     get webContents() {
       return win && !win.isDestroyed() ? win.webContents : null;
+    },
+    /** Where it is on the screen while it shows, else null (1.13: the small sign-in window opens over it). */
+    bounds() {
+      return win && !win.isDestroyed() && shown && !win.isMinimized() ? win.getBounds() : null;
     },
     /** Open it (once); `then` when it's on screen (the start-up card goes then). */
     open(then = () => {}) {
@@ -84,6 +89,7 @@ function createSignInCard({ BrowserWindow, workArea, url, preload, webPreference
         reveal();
       });
       win.webContents.on("did-finish-load", apply);
+      win.on("focus", () => onFocus());
       win.on("closed", () => {
         clearTimeout(timer);
         win = null;

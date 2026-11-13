@@ -35,6 +35,9 @@
 // - 1.8.2: the card and the offline page come from cadp://app/
 //   (local-pages.js): the installed app won't show file:// pages (its
 //   grantFileProtocolExtraPrivileges fuse is off), so the card was empty.
+// - 1.13: signing in opens a small window of the person's browser over the
+//   sign-in card (small-window.js), which closes by itself once they're in;
+//   a tab as before with a browser that has no such window.
 // - 1.11: .cadp files are the app's in Windows (the installer registers
 //   them; 1.11.1: with the app's own icon, build/icon.ico, as Leo
 //   preferred over 1.11's document icon): a
@@ -60,6 +63,14 @@ const { createLocalFiles, launchedPaths } = require("./local-files");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
+const {
+  createSmallWindow,
+  overRect,
+  windowsBackend: smallWindowBackend,
+  isChromium,
+  WIDTH: WIDTH_SMALL,
+  HEIGHT: HEIGHT_SMALL,
+} = require("./small-window");
 
 // The app's own pages, at cadp://app/ (1.8.2, local-pages.js): file:// pages
 // don't show in the installed app.
@@ -73,7 +84,7 @@ const CARD_URL = pageUrl("update.html", { splash: "1" });
 // ---------------------------------------------------------------------------
 const smokeArg = process.argv.find((a) => a.startsWith("--smoke-test="));
 if (smokeArg) {
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     const out = smokeArg.slice("--smoke-test=".length);
     const backend = windowsBackend((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
     const result = { version: app.getVersion(), electron: process.versions.electron, supported: backend.supported };
@@ -94,6 +105,8 @@ if (smokeArg) {
       };
       // 1.11: the .cadp files on its command line (a double-click).
       result.launched = launchedPaths(process.argv);
+      // 1.13: a small browser window opened, put in place and closed.
+      result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -105,6 +118,61 @@ if (smokeArg) {
   app.quit();
 } else {
   start();
+}
+
+/**
+ * The build's check of the small sign-in window (1.13) on real Windows: a
+ * page of this check's own, titled as the sign-in page is, opened in a small
+ * window of Chrome or Edge (whichever https opens with, or is installed),
+ * found, put at a set place and closed again. In a profile of its own, so
+ * no browser that's already running is involved.
+ */
+async function smokeSmallWindow(log) {
+  const http = require("node:http");
+  const os = require("node:os");
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const backend = smallWindowBackend(log);
+  const seen = { supported: backend.supported };
+  if (!backend.supported) return seen;
+  seen.default = backend.defaultBrowser();
+  const installed = [
+    path.join(process.env.ProgramFiles || "C:\\Program Files", "Google", "Chrome", "Application", "chrome.exe"),
+    path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Microsoft", "Edge", "Application", "msedge.exe"),
+  ];
+  seen.exe = seen.default && isChromium(seen.default.exe) ? seen.default.exe : installed.find((exe) => fs.existsSync(exe)) || null;
+  if (!seen.exe) return seen;
+  const server = http.createServer((_req, res) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end("<!doctype html><title>CAD Protocol sign-in check</title><h1>CAD Protocol</h1>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const before = new Set(backend.handles().map(String));
+    // Inside the build machine's small screen (1024 x 768).
+    seen.want = { x: 120, y: 40, width: WIDTH_SMALL, height: Math.min(HEIGHT_SMALL, 600) };
+    const small = createSmallWindow({ backend, spawn: require("node:child_process").spawn, log });
+    const handle = await small.open(`http://127.0.0.1:${server.address().port}/desktop-sign-in`, {
+      rect: seen.want,
+      titles: ["CAD Protocol"],
+      exe: seen.exe,
+      extraArgs: [`--user-data-dir=${fs.mkdtempSync(path.join(os.tmpdir(), "cadp-small-"))}`, "--no-first-run", "--no-default-browser-check"],
+    });
+    seen.opened = Boolean(handle);
+    if (!handle) return seen;
+    const placed = await Promise.race([handle.placed, wait(60000).then(() => null)]);
+    seen.found = Boolean(placed);
+    seen.title = placed ? placed.title : null;
+    seen.rect = placed ? placed.rect : null;
+    // Its window, to see it go: the one new browser window with that title.
+    const titled = () => backend.handles().filter((h) => !before.has(String(h)) && backend.info(h).title.includes("CAD Protocol sign-in check"));
+    seen.windows = titled().length;
+    handle.close();
+    for (let i = 0; i < 60 && titled().length > 0; i += 1) await wait(250);
+    seen.closed = titled().length === 0;
+    return seen;
+  } finally {
+    server.close();
+  }
 }
 
 /** Documents, the first folder Save offers (home if Windows won't say yet). */
@@ -148,9 +216,18 @@ function start() {
   let launch = null;
   /** The sign-in card (1.10, signin-card.js), made once the app's ready. */
   let signInCard = null;
+  // The small sign-in window (1.13, small-window.js), over the card.
+  const smallWindow = createSmallWindow({ backend: smallWindowBackend(log), spawn: require("node:child_process").spawn, log });
   const browserSignIn = createBrowserSignIn({
     appUrl: config.APP_URL,
     openExternal: (url) => shell.openExternal(url),
+    openSmall: (url, hooks) =>
+      smallWindow.open(url, {
+        rect: smallWindowRect(),
+        // The page's title, and its address while it loads.
+        titles: ["CAD Protocol", new URL(config.APP_URL).host, "desktop-sign-in"],
+        ...hooks,
+      }),
     focusApp: () => bringToFront(),
     log,
   });
@@ -263,6 +340,8 @@ function start() {
       preload: path.join(__dirname, "card-preload.js"),
       webPreferences: secureWebPreferences(),
       log,
+      // Clicked while the small sign-in window's up (1.13): that stays in front.
+      onFocus: () => browserSignIn.raise(),
     });
     splash = createSplash({
       BrowserWindow,
@@ -327,6 +406,20 @@ function start() {
     ses.setPermissionCheckHandler((_contents, permission, requestingOrigin, details) =>
       config.permissionAllowed(permission, requestingOrigin, details),
     );
+  }
+
+  /**
+   * Where the small sign-in window goes (1.13), in screen pixels: over the
+   * sign-in card, or the app's window, or the middle of the screen.
+   */
+  function smallWindowRect() {
+    const anchor =
+      (signInCard && signInCard.bounds()) ||
+      (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized() ? mainWindow.getBounds() : null) ||
+      screen.getPrimaryDisplay().workArea;
+    const rect = overRect(anchor, screen.getDisplayMatching(anchor).workArea);
+    // Windows' calls take the screen's own pixels (a scaled screen has more of them).
+    return typeof screen.dipToScreenRect === "function" ? screen.dipToScreenRect(null, rect) : rect;
   }
 
   /** Brings the app's window to the front, as far as Windows allows. */

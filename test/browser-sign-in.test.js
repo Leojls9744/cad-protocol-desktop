@@ -132,3 +132,129 @@ test("if the browser can't be opened, the sign-in ends", async () => {
   });
   await assert.rejects(signIn.start(KEY), /couldn't be opened/);
 });
+
+// ── 1.13: the small sign-in window ───────────────────────────────────────────
+
+/** A small window that opens (or can't), and what was asked of it. */
+function smallWindows({ none = false, fails = false } = {}) {
+  const asked = [];
+  const closed = [];
+  let raised = 0;
+  const openSmall = async (url, hooks) => {
+    asked.push({ url, hooks });
+    if (fails) throw new Error("Windows said no");
+    if (none) return null;
+    const n = asked.length;
+    return { close: () => closed.push(n), raise: () => (raised += 1) };
+  };
+  const waitForSmall = async () => {
+    for (let i = 0; i < 100 && asked.length === 0; i += 1) await new Promise((r) => setTimeout(r, 10));
+    await new Promise((r) => setImmediate(r));
+    const url = new URL(asked[asked.length - 1].url);
+    const params = new URLSearchParams(url.hash.slice(1));
+    return { url, params, port: Number(params.get("p")), state: params.get("s"), hooks: asked[asked.length - 1].hooks };
+  };
+  return { openSmall, asked, closed, raised: () => raised, waitForSmall };
+}
+
+test("the small window's page is told it's one; a tab's isn't", () => {
+  assert.equal(
+    signInPageUrl("https://cad-dza.caffeine.xyz/", "ab12", 51234, "ff00", true),
+    "https://cad-dza.caffeine.xyz/desktop-sign-in#k=ab12&p=51234&s=ff00&w=1",
+  );
+});
+
+test("with a small window: no tab opens, it says it closes by itself, and it's closed once signed in", async () => {
+  const small = smallWindows();
+  const h = harness({ openSmall: small.openSmall, smallCloseMs: 20 });
+  const pending = h.signIn.start(KEY);
+  const { params, port, state } = await small.waitForSmall();
+  assert.equal(params.get("w"), "1");
+  assert.equal(params.get("k"), KEY);
+  assert.deepEqual(h.opened, []);
+
+  // Clicking the card brings it forward.
+  h.signIn.raise();
+  assert.equal(small.raised(), 1);
+
+  const right = await get(port, `/done?s=${state}&a=${USER}&d=${enc(CHAIN)}`);
+  assert.equal(right.status, 200);
+  assert.match(right.body, /This window closes by itself/);
+  assert.doesNotMatch(right.body, /close this tab/);
+  assert.deepEqual(await pending, { chain: CHAIN, principal: USER });
+  // "You're signed in" shows for a moment first.
+  assert.deepEqual(small.closed, []);
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(small.closed, [1]);
+  // Nothing's waiting: nothing to bring forward.
+  h.signIn.raise();
+  assert.equal(small.raised(), 1);
+});
+
+test("cancelled or timed out, the small window closes at once", async () => {
+  const small = smallWindows();
+  const h = harness({ openSmall: small.openSmall });
+  const first = h.signIn.start(KEY);
+  await small.waitForSmall();
+  h.signIn.cancel();
+  await assert.rejects(first, /cancelled/);
+  assert.deepEqual(small.closed, [1]);
+
+  const quick = smallWindows();
+  const timed = harness({ openSmall: quick.openSmall, timeoutMs: 60 });
+  await assert.rejects(timed.signIn.start(KEY), /timed out/);
+  assert.deepEqual(quick.closed, [1]);
+});
+
+test("the person closing the small window cancels the sign-in", async () => {
+  const small = smallWindows();
+  const h = harness({ openSmall: small.openSmall });
+  const pending = h.signIn.start(KEY);
+  const { hooks, port, state } = await small.waitForSmall();
+  hooks.onClosed();
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(h.signIn.serverForTests, null);
+  await new Promise((r) => setTimeout(r, 30));
+  await assert.rejects(get(port, `/done?s=${state}&a=${USER}&d=${enc(CHAIN)}`));
+  // A window closed late (the sign-in after it is another one) cancels nothing.
+  const next = h.signIn.start(KEY);
+  await new Promise((r) => setTimeout(r, 30));
+  hooks.onClosed();
+  h.signIn.cancel();
+  await assert.rejects(next, /^Error: cancelled$/);
+});
+
+test("cancelled while the small window was opening, it's closed when it comes", async () => {
+  let release;
+  const closed = [];
+  const h = harness({
+    openSmall: () =>
+      new Promise((resolve) => {
+        release = () => resolve({ close: () => closed.push(1), raise: () => {} });
+      }),
+  });
+  const pending = h.signIn.start(KEY);
+  for (let i = 0; i < 100 && !release; i += 1) await new Promise((r) => setTimeout(r, 10));
+  h.signIn.cancel();
+  await assert.rejects(pending, /cancelled/);
+  release();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(closed, [1]);
+  assert.deepEqual(h.opened, []);
+});
+
+test("with no small window to be had, the page opens in a tab as before", async () => {
+  for (const options of [{ none: true }, { fails: true }]) {
+    const small = smallWindows(options);
+    const h = harness({ openSmall: small.openSmall });
+    const pending = h.signIn.start(KEY);
+    const { url, port, state } = await h.waitForPage();
+    assert.equal(small.asked.length, 1);
+    // The tab's page isn't told it's a small window.
+    assert.equal(new URLSearchParams(url.hash.slice(1)).get("w"), null);
+    const right = await get(port, `/done?s=${state}&a=${USER}&d=${enc(CHAIN)}`);
+    assert.match(right.body, /You can close this tab/);
+    await pending;
+    assert.deepEqual(small.closed, []);
+  }
+});

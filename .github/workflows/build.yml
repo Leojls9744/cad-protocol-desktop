@@ -51,7 +51,7 @@ jobs:
           # 1.11: a .cadp handed over as a double-click does (a path with spaces).
           $cadp = Join-Path $env:RUNNER_TEMP "Smith ALTA.cadp"
           $p = Start-Process -FilePath $exe.FullName -ArgumentList "--smoke-test=$out", "`"$cadp`"" -PassThru
-          if (-not $p.WaitForExit(90000)) { $p.Kill(); throw "The app didn't finish its check in 90 seconds." }
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "The app didn't finish its check in 3 minutes." }
           if (Test-Path "$out.log") { Get-Content "$out.log" }
           if (-not (Test-Path $out)) { throw "The app didn't write its check." }
           Get-Content $out
@@ -62,6 +62,15 @@ jobs:
           if ($r.after -ne $r.before) { throw "The pointer speed wasn't put back." }
           if ($r.config.signIn -ne "signin") { throw "Internet Identity windows aren't recognised." }
           if (@($r.launched).Count -ne 1 -or @($r.launched)[0] -ne $cadp) { throw "A double-clicked .cadp wasn't found on the command line: $($r.launched -join ', ')" }
+          # 1.13: a small browser window opened, found, put in place and closed.
+          $w = $r.smallWindow
+          if (-not $w.supported) { throw "The small sign-in window isn't available in the packaged app." }
+          if (-not $w.exe) { throw "No Chrome or Edge was found for the small sign-in window." }
+          if (-not $w.opened) { throw "The browser didn't start for the small sign-in window." }
+          if (-not $w.found) { throw "The small sign-in window wasn't found after it opened." }
+          if ([math]::Abs($w.rect.x - $w.want.x) -gt 16 -or [math]::Abs($w.rect.y - $w.want.y) -gt 16) { throw "The small sign-in window wasn't put in place: $($w.rect.x),$($w.rect.y)" }
+          if ([math]::Abs($w.rect.width - $w.want.width) -gt 16 -or [math]::Abs($w.rect.height - $w.want.height) -gt 16) { throw "The small sign-in window wasn't sized: $($w.rect.width) x $($w.rect.height)" }
+          if (-not $w.closed) { throw "The small sign-in window wasn't closed." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }

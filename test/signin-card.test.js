@@ -55,6 +55,9 @@ test("it opens once it's drawn, frameless, with its own preload, says what the p
     isMinimized() {
       return false;
     }
+    getBounds() {
+      return { x: 400, y: 220, width: this.options.width, height: this.options.height };
+    }
     isDestroyed() {
       return this.destroyed;
     }
@@ -69,11 +72,19 @@ test("it opens once it's drawn, frameless, with its own preload, says what the p
     url: "cadp://app/signin-card.html",
     preload: "/app/card-preload.js",
     webPreferences: { sandbox: true },
+    onFocus: () => (focused += 1),
   });
+  let focused = 0;
   let then = 0;
+  // 1.13: nowhere until it shows.
+  assert.equal(card.bounds(), null);
   card.open(() => (then += 1));
   await new Promise((r) => setImmediate(r));
   const win = made[0];
+  // 1.13: where the small sign-in window goes over it, and when it's clicked.
+  assert.deepEqual(card.bounds(), { x: 400, y: 220, width: 1120, height: 600 });
+  win.emit("focus");
+  assert.equal(focused, 1);
   assert.equal(win.url, "cadp://app/signin-card.html");
   assert.equal(win.options.frame, false);
   assert.equal(win.options.width, 1120);
@@ -85,6 +96,7 @@ test("it opens once it's drawn, frameless, with its own preload, says what the p
   assert.match(win.ran.at(-1), /"phase":"finishing"/);
   card.close();
   assert.equal(card.isShown, false);
+  assert.equal(card.bounds(), null);
 });
 
 test("signed out, the window waits for the card, and shows once signed in", () => {

@@ -18,6 +18,12 @@
 //
 // The result is no use without the desktop app's key, which never leaves
 // it; the state stops any other page's answer being taken for this one.
+//
+// 1.13 (Leo, 2026-11-13 07:43): the page opens in a small window of the
+// person's browser over the sign-in card (small-window.js) where it can,
+// which closes by itself once they're in, and in a tab as before where it
+// can't. The small window's page is told it's one (w=1 after the #), so
+// Internet Identity opens as a small window over it too.
 
 const crypto = require("node:crypto");
 const http = require("node:http");
@@ -25,15 +31,17 @@ const http = require("node:http");
 const TIMEOUT_MS = 10 * 60 * 1000;
 /** Big enough for a delegation chain in the address. */
 const MAX_HEADER_BYTES = 256 * 1024;
+/** The small window stays this long on "You're signed in" before it closes. */
+const SMALL_CLOSE_MS = 700;
 
 function isPublicKeyHex(value) {
   return typeof value === "string" && value.length % 2 === 0 && /^[0-9a-f]{40,400}$/.test(value);
 }
 
-/** The page in the person's browser. Everything after # stays in the browser. */
-function signInPageUrl(appUrl, key, port, state) {
+/** The page in the person's browser (`small`: in a small window). Everything after # stays in the browser. */
+function signInPageUrl(appUrl, key, port, state, small = false) {
   const url = new URL("/desktop-sign-in", appUrl);
-  url.hash = new URLSearchParams({ k: key, p: String(port), s: state }).toString();
+  url.hash = new URLSearchParams({ k: key, p: String(port), s: state, ...(small ? { w: "1" } : {}) }).toString();
   return url.toString();
 }
 
@@ -83,8 +91,22 @@ function page(title, message) {
 /**
  * One sign-in at a time. `openExternal(url)` opens the person's browser;
  * `focusApp()` brings the desktop app to the front.
+ *
+ * `openSmall(url, { onClosed })` (1.13, optional) opens the page in a small
+ * window of their browser instead and resolves with its handle ({ close,
+ * raise }), or with null when it can't, and the page opens in a tab as
+ * before. `onClosed` is the person closing that window: the sign-in's
+ * cancelled.
  */
-function createBrowserSignIn({ appUrl, openExternal, focusApp = () => {}, log = () => {}, timeoutMs = TIMEOUT_MS }) {
+function createBrowserSignIn({
+  appUrl,
+  openExternal,
+  openSmall = null,
+  focusApp = () => {},
+  log = () => {},
+  timeoutMs = TIMEOUT_MS,
+  smallCloseMs = SMALL_CLOSE_MS,
+}) {
   let pending = null;
 
   function finish(error, result) {
@@ -97,8 +119,36 @@ function createBrowserSignIn({ appUrl, openExternal, focusApp = () => {}, log = 
       // After the answer page has gone out.
       setTimeout(() => current.server.closeAllConnections(), 200).unref();
     }
+    // The small window goes: at once when cancelled, a moment after "You're signed in".
+    const small = current.small;
+    if (small && error) small.close();
+    else if (small) setTimeout(() => small.close(), smallCloseMs).unref();
     if (error) current.reject(error);
     else current.resolve(result);
+  }
+
+  /** The page, in a small window where there's one to be had, else in a tab. */
+  async function openPage(server, key, port, state) {
+    const waiting = () => Boolean(pending && pending.server === server);
+    if (openSmall) {
+      let small = null;
+      try {
+        small = await openSmall(signInPageUrl(appUrl, key, port, state, true), {
+          onClosed: () => {
+            if (waiting()) finish(new Error("cancelled: the sign-in window was closed"));
+          },
+        });
+      } catch (err) {
+        log(`small sign-in window: ${err && err.message ? err.message : err}`);
+      }
+      if (small) {
+        // Cancelled while it opened: it goes too.
+        if (waiting()) pending.small = small;
+        else small.close();
+        return;
+      }
+    }
+    if (waiting()) await openExternal(signInPageUrl(appUrl, key, port, state));
   }
 
   return {
@@ -125,7 +175,11 @@ function createBrowserSignIn({ appUrl, openExternal, focusApp = () => {}, log = 
             return;
           }
           res.statusCode = 200;
-          res.end(page("You're signed in", "Go back to CAD Protocol for Windows. You can close this tab."));
+          res.end(
+            pending.small
+              ? page("You're signed in", "Going back to CAD Protocol for Windows. This window closes by itself.")
+              : page("You're signed in", "Go back to CAD Protocol for Windows. You can close this tab."),
+          );
           log("signed in through the browser");
           focusApp();
           finish(null, answer.result);
@@ -140,16 +194,19 @@ function createBrowserSignIn({ appUrl, openExternal, focusApp = () => {}, log = 
         server.listen(0, "127.0.0.1", () => {
           if (!pending || pending.server !== server) return;
           const { port } = server.address();
-          const url = signInPageUrl(appUrl, publicKeyHex, port, state);
-          Promise.resolve(openExternal(url)).catch((err) => {
+          openPage(server, publicKeyHex, port, state).catch((err) => {
             log(`couldn't open the browser: ${err && err.message ? err.message : err}`);
-            finish(new Error("Your browser couldn't be opened."));
+            if (pending && pending.server === server) finish(new Error("Your browser couldn't be opened."));
           });
         });
       });
     },
     cancel() {
       finish(new Error("cancelled"));
+    },
+    /** The small window in front of the app's card again (the card was clicked). */
+    raise() {
+      if (pending && pending.small) pending.small.raise();
     },
     /** For tests: the server of the sign-in in progress. */
     get serverForTests() {
@@ -158,4 +215,4 @@ function createBrowserSignIn({ appUrl, openExternal, focusApp = () => {}, log = 
   };
 }
 
-module.exports = { createBrowserSignIn, isPublicKeyHex, signInPageUrl, readAnswer, TIMEOUT_MS };
+module.exports = { createBrowserSignIn, isPublicKeyHex, signInPageUrl, readAnswer, TIMEOUT_MS, SMALL_CLOSE_MS };
