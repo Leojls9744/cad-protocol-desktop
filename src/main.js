@@ -395,6 +395,11 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       return files.save(token, bytes);
     });
+    // 1.12: a drawing's DWG copy beside it.
+    ipcMain.handle("cadp:files:save-beside", (event, token, bytes) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return files.saveBeside(token, bytes);
+    });
     ipcMain.handle("cadp:files:open", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return files.open(windowOf(event));

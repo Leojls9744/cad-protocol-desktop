@@ -16,11 +16,17 @@
 // 1.11: a .cadp double-clicked in Windows starts the app with its path (or
 // hands it to the open app). Those count as picked too: they wait here
 // until the page takes them, each read once and given a token like Open's.
+//
+// 1.12: a drawing's DWG copy beside it (the app's Companion .dwg). The page
+// still names no path: it gives a drawing's token, and only the file of the
+// same name ending .dwg in the same folder is written.
 
 const path = require("node:path");
 const crypto = require("node:crypto");
 
 const EXTENSION = ".cadp";
+/** 1.12: a drawing's DWG copy ends this, beside it. */
+const COMPANION = ".dwg";
 const FILTERS = [{ name: "CAD Protocol drawing", extensions: ["cadp"] }];
 /** Larger than any drawing (scans aren't kept in a .cadp). */
 const MAX_BYTES = 1024 * 1024 * 1024;
@@ -34,6 +40,12 @@ function cadpName(name) {
     .trim()
     .replace(/[. ]+$/, "");
   return `${base || "Untitled"}${EXTENSION}`;
+}
+
+/** 1.12: the DWG beside a drawing: "Lot 7.cadp" → "Lot 7.dwg" (any other name gets .dwg added). */
+function companionOf(file) {
+  const base = file.toLowerCase().endsWith(EXTENSION) ? file.slice(0, -EXTENSION.length) : file;
+  return `${base}${COMPANION}`;
 }
 
 /** The picked path, with .cadp on the end. */
@@ -141,6 +153,20 @@ function createLocalFiles({ dialog, fs, documentsDir, log = () => {} }) {
       return answer(token, file);
     },
 
+    /**
+     * 1.12: the DWG copy of the drawing the token names, written beside it
+     * (over the last one, as each save does): { name, path }. null when the
+     * token isn't known, as save's.
+     */
+    async saveBeside(token, data) {
+      const file = typeof token === "string" ? known.get(token) : undefined;
+      if (!file) return null;
+      const beside = companionOf(file);
+      if (beside.toLowerCase() === file.toLowerCase()) return null;
+      await writeSafely(beside, asBuffer(data));
+      return { name: path.basename(beside), path: beside };
+    },
+
     /** The Open window, then the file's bytes; null when the person cancels. */
     async open(win) {
       const picked = await dialog.showOpenDialog(win, {
@@ -202,6 +228,8 @@ function createLocalFiles({ dialog, fs, documentsDir, log = () => {} }) {
 
 module.exports = {
   EXTENSION,
+  COMPANION,
+  companionOf,
   FILTERS,
   MAX_BYTES,
   MAX_LAUNCHED,

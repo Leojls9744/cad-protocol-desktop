@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
-const { MAX_LAUNCHED, cadpName, createLocalFiles, launchedPaths, withExtension } = require("../src/local-files");
+const { MAX_LAUNCHED, cadpName, companionOf, createLocalFiles, launchedPaths, withExtension } = require("../src/local-files");
 
 async function folder() {
   return fs.mkdtemp(path.join(os.tmpdir(), "cadp-files-"));
@@ -51,6 +51,29 @@ test("Save to this computer writes the picked file and gives a token for next ti
   assert.equal(dialog.asked.length, 1);
   // Nothing left beside it.
   assert.deepEqual(await fs.readdir(dir), ["Lot 7.cadp"]);
+});
+
+test("1.12: a drawing's DWG copy is written beside it, and only there", async () => {
+  assert.equal(companionOf("C:\\x\\Lot 7.cadp"), "C:\\x\\Lot 7.dwg");
+  assert.equal(companionOf("C:\\x\\Lot 7.CADP"), "C:\\x\\Lot 7.dwg");
+  assert.equal(companionOf("C:\\x\\Lot 7.json"), "C:\\x\\Lot 7.json.dwg");
+  const dir = await folder();
+  const dialog = fakeDialog({ save: path.join(dir, "Lot 7") });
+  const files = createLocalFiles({ dialog, fs, documentsDir: dir });
+  const saved = await files.saveAs(null, "Lot 7.cadp", Uint8Array.of(1, 2, 3));
+  const beside = await files.saveBeside(saved.token, Uint8Array.of(7, 8));
+  assert.deepEqual(beside, { name: "Lot 7.dwg", path: path.join(dir, "Lot 7.dwg") });
+  assert.deepEqual([...(await fs.readFile(beside.path))], [7, 8]);
+  // Written over on the next save; the drawing itself untouched.
+  await files.saveBeside(saved.token, Uint8Array.of(9));
+  assert.deepEqual([...(await fs.readFile(beside.path))], [9]);
+  assert.deepEqual([...(await fs.readFile(saved.path))], [1, 2, 3]);
+  assert.deepEqual((await fs.readdir(dir)).sort(), ["Lot 7.cadp", "Lot 7.dwg"]);
+  // A token it never gave, or a path, writes nothing.
+  assert.equal(await files.saveBeside("made-up", Uint8Array.of(1)), null);
+  assert.equal(await files.saveBeside(path.join(dir, "x.cadp"), Uint8Array.of(1)), null);
+  await assert.rejects(files.saveBeside(saved.token, "not bytes"));
+  assert.deepEqual((await fs.readdir(dir)).sort(), ["Lot 7.cadp", "Lot 7.dwg"]);
 });
 
 test("a cancelled window saves nothing", async () => {

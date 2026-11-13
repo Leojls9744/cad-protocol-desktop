@@ -77,10 +77,13 @@ if (appOrigin && window.location.origin === appOrigin) {
      * launchedCount() says how many, takeLaunched() hands them over once
      * each ({ token, name, path, bytes }, or { name, path, error }), and
      * onLaunched(fn) hears when another arrives while the app's open.
+     * 1.12: saveBeside(token, bytes) writes that drawing's DWG copy beside
+     * it (same name, .dwg): { name, path }, or null when the token's gone.
      */
     files: {
       saveAs: (name, bytes) => ipcRenderer.invoke("cadp:files:save-as", name, bytes),
       save: (token, bytes) => ipcRenderer.invoke("cadp:files:save", token, bytes),
+      saveBeside: (token, bytes) => ipcRenderer.invoke("cadp:files:save-beside", token, bytes),
       open: () => ipcRenderer.invoke("cadp:files:open"),
       launchedCount: () => ipcRenderer.invoke("cadp:files:launched-count"),
       takeLaunched: () => ipcRenderer.invoke("cadp:files:take-launched"),

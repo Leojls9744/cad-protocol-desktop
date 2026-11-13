@@ -1,5 +1,7 @@
 CAD Protocol for Windows opens the live CAD Protocol app (https://cad-dza.caffeine.xyz) in its own window. It's the same app, with the same sign-in, vault and drawings, and it updates by itself.
 
+**New in 1.12: a DWG copy beside drawings you save in any folder.** With Auto-backup saves and Companion .dwg on (Settings › Cloud & Geo), each save of a drawing opened from File Explorer, or through the app's Open and Save windows, now also writes a .dwg of the same name beside it, wherever the file is. Before, that only happened inside a folder linked in the app. Needs the app's newest web build (v842). 1.11 updates itself to 1.12.
+
 **New in 1.11.1: .cadp files show the app's icon.** In File Explorer your .cadp drawings now show the CAD Protocol app icon instead of 1.11's document icon. 1.11 updates itself to 1.11.1 (if Explorer still shows the old icon, it changes after a restart).
 
 **New in 1.11: .cadp files open with a double-click.** Drawings you save to this computer (.cadp) now show their own document icon in File Explorer, and double-clicking one opens it in CAD Protocol: the app starts with it, or, if it's already open, it opens there. Ctrl+S saves back to the same file. Open with › CAD Protocol works too. Needs the app's newest web build (v823). 1.10.2 updates itself to 1.11.
