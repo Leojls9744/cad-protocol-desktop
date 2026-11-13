@@ -72,6 +72,14 @@ jobs:
           if ([math]::Abs($w.rect.width - $w.want.width) -gt 16 -or [math]::Abs($w.rect.height - $w.want.height) -gt 16) { throw "The small sign-in window wasn't sized: $($w.rect.width) x $($w.rect.height)" }
           if (-not $w.closed) { throw "The small sign-in window wasn't closed." }
           if (@($w.notes).Count -gt 0) { throw "The small sign-in window had trouble: $($w.notes -join '; ')" }
+          # 1.14: a sign-in window of the app's own, over a card, in front of it, closed by Cancel.
+          $s = $r.signInWindow
+          if (-not $s.visible) { throw "The app's sign-in window didn't show." }
+          if (-not $s.owned) { throw "The app's sign-in window isn't in front of its card." }
+          if ([math]::Abs($s.rect.x - $s.want.x) -gt 16 -or [math]::Abs($s.rect.y - $s.want.y) -gt 16) { throw "The app's sign-in window wasn't put over the card: $($s.rect.x),$($s.rect.y)" }
+          if ([math]::Abs($s.rect.width - $s.want.width) -gt 16 -or [math]::Abs($s.rect.height - $s.want.height) -gt 16) { throw "The app's sign-in window wasn't sized: $($s.rect.width) x $($s.rect.height)" }
+          if ($s.title -ne "Internet Identity") { throw "The app's sign-in window is titled $($s.title)." }
+          if (-not $s.closed) { throw "The app's sign-in window wasn't closed." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }

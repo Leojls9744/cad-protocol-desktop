@@ -3,7 +3,8 @@
 // what was chosen (signin-card.html). Nothing else is exposed to it.
 const { contextBridge, ipcRenderer } = require("electron");
 
-const KINDS = new Set(["browser", "offline", "cancel", "quit"]);
+// "window" (1.14): sign in in a window of the app's own.
+const KINDS = new Set(["window", "browser", "offline", "cancel", "quit"]);
 
 contextBridge.exposeInMainWorld("cadpCard", {
   choose(kind) {

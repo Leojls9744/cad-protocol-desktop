@@ -36,9 +36,11 @@ if (appOrigin && window.location.origin === appOrigin) {
      * 1.10: signed out, the desktop's sign-in card instead of the app's
      * page: `signIn` shows it, `progress` says how far signing in has got,
      * `onChoice` hears its buttons ("browser", "offline", "cancel").
+     * 1.14: `signIn({ window: true })` says the page can sign in in a
+     * window of the app's own; the card then has that button ("window").
      */
     card: {
-      signIn: () => ipcRenderer.invoke("cadp:card:sign-in"),
+      signIn: (can) => ipcRenderer.invoke("cadp:card:sign-in", can),
       progress: (state) => ipcRenderer.invoke("cadp:card:progress", state),
       onChoice: (fn) => {
         const heard = (_event, kind) => fn(kind);

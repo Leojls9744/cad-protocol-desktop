@@ -4,6 +4,11 @@
 // app's full sign-in page. Its buttons go to the app's page, which signs
 // in through the browser (browser-sign-in.js) as before and says how far
 // it's got; the card shows that, and goes when the app's window shows.
+//
+// 1.14: where the app's page can sign in in a window of this app's own
+// (signin-window.js), the card's first button is that, Sign in, and the
+// browser is its second choice. The page says it can as it asks for the
+// card (`can`); an older page doesn't, and the card's as it was.
 
 const WIDTH = 1120;
 const HEIGHT = 600;
@@ -33,11 +38,13 @@ function createSignInCard({ BrowserWindow, workArea, url, preload, webPreference
   let win = null;
   let shown = false;
   let last = { phase: "ready", text: "", note: "" };
+  /** The app's page can sign in in a window of this app's own (1.14). */
+  let canWindow = false;
 
   const apply = () => {
     if (!win || win.isDestroyed()) return;
     win.webContents
-      .executeJavaScript(`window.cardState && window.cardState(${JSON.stringify(last)})`)
+      .executeJavaScript(`window.cardState && window.cardState(${JSON.stringify({ ...last, canWindow })})`)
       .catch(() => undefined);
   };
 
@@ -47,6 +54,18 @@ function createSignInCard({ BrowserWindow, workArea, url, preload, webPreference
     },
     get webContents() {
       return win && !win.isDestroyed() ? win.webContents : null;
+    },
+    /** The card's window while it shows, else null (1.14: Internet Identity's window stays in front of it). */
+    get window() {
+      return win && !win.isDestroyed() && shown ? win : null;
+    },
+    get canWindow() {
+      return canWindow;
+    },
+    /** What the app's page can do, said as it asks for the card (1.14). */
+    can(what) {
+      canWindow = Boolean(what && typeof what === "object" && what.window === true);
+      apply();
     },
     /** Where it is on the screen while it shows, else null (1.13: the small sign-in window opens over it). */
     bounds() {

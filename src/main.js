@@ -38,6 +38,9 @@
 // - 1.13: signing in opens a small window of the person's browser over the
 //   sign-in card (small-window.js), which closes by itself once they're in;
 //   a tab as before with a browser that has no such window.
+// - 1.14: the card's Sign in opens Internet Identity at once in a window of
+//   the app's own, over the card (signin-window.js); the browser is the
+//   card's second choice.
 // - 1.11: .cadp files are the app's in Windows (the installer registers
 //   them; 1.11.1: with the app's own icon, build/icon.ico, as Leo
 //   preferred over 1.11's document icon): a
@@ -49,13 +52,14 @@
 
 const path = require("node:path");
 const fs = require("node:fs");
-const { app, BrowserWindow, dialog, ipcMain, Menu, powerMonitor, protocol, screen, session, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, protocol, screen, session, shell } = require("electron");
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
 const { createBrowserSignIn } = require("./browser-sign-in");
 const { createBrowserDrive } = require("./browser-drive");
 const { createSignInCard } = require("./signin-card");
+const { createSignInWindows, signInWindowOptions } = require("./signin-window");
 const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
@@ -107,6 +111,8 @@ if (smokeArg) {
       result.launched = launchedPaths(process.argv);
       // 1.13: a small browser window opened, put in place and closed.
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
+      // 1.14: a sign-in window of the app's own, over a card, in front of it.
+      result.signInWindow = await smokeSignInWindow();
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -184,6 +190,44 @@ async function smokeSmallWindow(log) {
   }
 }
 
+/**
+ * The build's check of the app's own sign-in window (1.14) on real Windows:
+ * made as Internet Identity's is, over a stand-in for the sign-in card and
+ * owned by it; where it landed, that it shows, and that it goes with Cancel.
+ */
+async function smokeSignInWindow() {
+  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const area = screen.getPrimaryDisplay().workArea;
+  const card = new BrowserWindow({ x: area.x + 60, y: area.y + 20, width: 760, height: 480, frame: false, show: true, backgroundColor: "#000000" });
+  const seen = { area };
+  try {
+    const options = signInWindowOptions({
+      anchor: card.getBounds(),
+      workArea: area,
+      parent: card,
+      dark: true,
+      webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false },
+    });
+    seen.want = { x: options.x, y: options.y, width: options.width, height: options.height };
+    const win = new BrowserWindow(options);
+    const windows = createSignInWindows();
+    windows.add(win);
+    await win.loadURL("data:text/html,<title>Internet Identity</title><h1>Sign-in window check</h1>");
+    await wait(500);
+    seen.rect = win.getBounds();
+    seen.visible = win.isVisible();
+    seen.owned = win.getParentWindow() === card;
+    seen.title = win.getTitle();
+    seen.open = windows.count;
+    windows.closeAll();
+    for (let i = 0; i < 40 && !win.isDestroyed(); i += 1) await wait(100);
+    seen.closed = win.isDestroyed() && windows.count === 0;
+    return seen;
+  } finally {
+    if (!card.isDestroyed()) card.destroy();
+  }
+}
+
 /** Documents, the first folder Save offers (home if Windows won't say yet). */
 function documentsFolder() {
   try {
@@ -225,6 +269,8 @@ function start() {
   let launch = null;
   /** The sign-in card (1.10, signin-card.js), made once the app's ready. */
   let signInCard = null;
+  /** The app's own sign-in windows (1.14, signin-window.js): Internet Identity's, and any it opened. */
+  const signInWindows = createSignInWindows();
   // The small sign-in window (1.13, small-window.js), over the card.
   const smallWindow = createSmallWindow({ backend: smallWindowBackend(log), spawn: require("node:child_process").spawn, log });
   const browserSignIn = createBrowserSignIn({
@@ -306,7 +352,23 @@ function start() {
 
     contents.setWindowOpenHandler(({ url }) => {
       const kind = config.openKind(url, kinds.get(contents));
-      if (kind === "signin" || kind === "report") {
+      // Internet Identity (1.14): over the card, in front of it; a
+      // provider's window it opens, over Internet Identity's.
+      if (kind === "signin") {
+        const over = signInOver(contents);
+        return {
+          action: "allow",
+          overrideBrowserWindowOptions: signInWindowOptions({
+            anchor: over.bounds,
+            workArea: screen.getDisplayMatching(over.bounds).workArea,
+            parent: over.window,
+            next: kinds.get(contents) === "signin",
+            dark: nativeTheme.shouldUseDarkColors,
+            webPreferences: secureWebPreferences(),
+          }),
+        };
+      }
+      if (kind === "report") {
         return {
           action: "allow",
           overrideBrowserWindowOptions: {
@@ -321,7 +383,10 @@ function start() {
     });
 
     contents.on("did-create-window", (child, details) => {
-      kinds.set(child.webContents, config.openKind(details.url, kinds.get(contents)));
+      const kind = config.openKind(details.url, kinds.get(contents));
+      kinds.set(child.webContents, kind);
+      // Kept, so Cancel on the card closes them (1.14).
+      if (kind === "signin") signInWindows.add(child);
     });
 
     contents.on("will-navigate", (event, url) => {
@@ -418,6 +483,19 @@ function start() {
   }
 
   /**
+   * What one of the app's own sign-in windows opens over (1.14), and stays
+   * in front of: the window that opened it when that's a sign-in window
+   * (Internet Identity handing over to a provider); else the sign-in card,
+   * or the app's window, or the middle of the screen with nothing behind.
+   */
+  function signInOver(opener) {
+    const usable = (win) => Boolean(win) && !win.isDestroyed() && win.isVisible() && !win.isMinimized();
+    const from = kinds.get(opener) === "signin" ? BrowserWindow.fromWebContents(opener) : null;
+    const behind = [from, signInCard && signInCard.window, mainWindow].find(usable) || null;
+    return behind ? { window: behind, bounds: behind.getBounds() } : { window: null, bounds: screen.getPrimaryDisplay().workArea };
+  }
+
+  /**
    * Where the small sign-in window goes (1.13), in screen pixels: over the
    * sign-in card, or the app's window, or the middle of the screen.
    */
@@ -468,6 +546,8 @@ function start() {
     ipcMain.handle("cadp:sign-in:cancel", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       browserSignIn.cancel();
+      // The app's own sign-in windows too (1.14): the page hears they closed.
+      signInWindows.closeAll();
     });
     ipcMain.handle("cadp:drive:connect", (event, clientId, options) => {
       if (!fromApp(event)) throw new Error("not allowed");
@@ -546,8 +626,10 @@ function start() {
       if (launch) launch.ready();
     });
     // Signed out (1.10): the sign-in card, the window kept out of sight.
-    ipcMain.handle("cadp:card:sign-in", (event) => {
+    ipcMain.handle("cadp:card:sign-in", (event, can) => {
       if (!fromApp(event)) throw new Error("not allowed");
+      // What this page can do (1.14): sign in in a window of the app's own.
+      signInCard.can(can);
       // Closing signs you out: no card then, the app's on its way out.
       if (closeGuard && (closeGuard.asking || closeGuard.closing)) return;
       awaitingSignIn = true;
@@ -566,7 +648,9 @@ function start() {
         app.quit();
         return;
       }
-      if (["browser", "offline", "cancel"].includes(kind) && mainWindow && !mainWindow.isDestroyed())
+      // "window" (1.14) only from a card that has the button: the page said it can.
+      if (kind === "window" && !signInCard.canWindow) return;
+      if (["window", "browser", "offline", "cancel"].includes(kind) && mainWindow && !mainWindow.isDestroyed())
         mainWindow.webContents.send("cadp:card:choice", kind);
     });
   }

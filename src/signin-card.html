@@ -10,7 +10,10 @@
          loading card ... use spatial canvas offline ... the sign in card
          shows the progress of signing you in and then the app opens up").
          Four times the loading card: the app's picture with its icon and
-         name on the left, signing in on the right. */
+         name on the left, signing in on the right.
+         1.14 (Leo, 2026-11-13 10:09: "it jumps right to the internet
+         identity page"): Sign in opens Internet Identity at once in a
+         window of the app's own; the browser is the small second choice. */
       :root { color-scheme: dark; }
       html, body { height: 100%; margin: 0; }
       body {
@@ -75,6 +78,10 @@
       .secondary:hover { background: rgba(255, 255, 255, 0.06); }
       .primary:focus-visible, .secondary:focus-visible, .close:focus-visible, .link:focus-visible { outline: 2px solid #7b4dff; outline-offset: 2px; }
       button:disabled { opacity: 0.45; cursor: default; }
+      [hidden] { display: none !important; }
+      /* The browser as the second choice (1.14): a small link under the rest. */
+      .actions .link { order: 9; align-self: center; margin-top: 4px; }
+      .actions .link:hover { color: #ececf1; }
       .offline-note { margin: -2px 0 0; color: #8c8c99; font-size: 13px; text-align: center; }
       /* Signing in: three steps, the one under way with the bar. */
       .progress { display: none; flex-direction: column; gap: 14px; }
@@ -150,6 +157,7 @@
         <p class="note" id="note"></p>
 
         <div class="actions">
+          <button type="button" class="primary" id="window" hidden>Sign in</button>
           <button type="button" class="primary" id="browser">Sign in with your browser</button>
           <button type="button" class="secondary" id="offline">Use Spatial Canvas offline</button>
           <p class="offline-note">Draw without signing in and save drawings as files on this computer.</p>
@@ -157,7 +165,7 @@
 
         <div class="progress" aria-live="polite">
           <ol class="steps">
-            <li id="step-browser"><span class="dot">1</span>Sign in in your browser</li>
+            <li id="step-browser"><span class="dot">1</span><span id="step-browser-words">Sign in in your browser</span></li>
             <li id="step-account"><span class="dot">2</span>Signing you in</li>
             <li id="step-open"><span class="dot">3</span>Opening CAD Protocol</li>
           </ol>
@@ -176,7 +184,16 @@
       // says what's happening with window.cardState (signin-card.js).
       const $ = (id) => document.getElementById(id);
       const choose = (kind) => window.cadpCard && window.cadpCard.choose(kind);
-      $("browser").addEventListener("click", () => choose("browser"));
+      // Which way's under way: the app's own window (1.14), or the browser.
+      let way = "browser";
+      $("window").addEventListener("click", () => {
+        way = "window";
+        choose("window");
+      });
+      $("browser").addEventListener("click", () => {
+        way = "browser";
+        choose("browser");
+      });
       $("offline").addEventListener("click", () => choose("offline"));
       $("cancel").addEventListener("click", () => choose("cancel"));
       $("close").addEventListener("click", () => choose("quit"));
@@ -195,12 +212,26 @@
         $("note").textContent = s.note || "";
         $("cancel").hidden = phase !== "waiting";
         const offline = phase === "offline";
+        // 1.14: the app's page can sign in in a window of the app's own, so
+        // that's Sign in, and the browser's the small second choice.
+        const own = s.canWindow === true;
+        if (!own) way = "browser";
+        $("window").hidden = !own;
+        $("window").disabled = offline;
         $("browser").disabled = offline;
+        $("browser").className = own ? "link" : "primary";
+        $("browser").textContent = own ? "Sign in with your browser instead" : "Sign in with your browser";
+        $("browser").title = own
+          ? "For a sign-in the app's window can't do: Google refusing it, or a passkey kept by a browser extension"
+          : "";
+        $("step-browser-words").textContent = way === "window" ? "Sign in with Internet Identity" : "Sign in in your browser";
         $("lead").textContent = offline
           ? "You're offline: signing in needs a connection. Spatial Canvas works on this computer."
-          : "You sign in with Internet Identity in your own browser, then come straight back here.";
+          : own
+            ? "You sign in with Internet Identity."
+            : "You sign in with Internet Identity in your own browser, then come straight back here.";
         if (phase === "ready" || phase === "error" || phase === "offline")
-          (offline ? $("offline") : $("browser")).focus();
+          (offline ? $("offline") : own ? $("window") : $("browser")).focus();
       };
       window.cardState({ phase: "ready" });
     </script>
