@@ -85,6 +85,10 @@ jobs:
           if (-not $l.said -or -not $l.ours) { throw "cadprotocol:// links weren't registered to the app." }
           if (-not $l.open) { throw "A cadprotocol:// link isn't recognised." }
           if ($l.files -ne 0) { throw "A cadprotocol:// link was read as a drawing." }
+          # 1.16: the faster graphics card asked for before the app was ready.
+          Write-Output "graphics: asked for $($r.graphics.asked); cards: $($r.graphics.cards)"
+          if ($r.graphics.asked -ne "high") { throw "The faster graphics card wasn't asked for: $($r.graphics.asked)" }
+          if (-not $r.graphics.onCommandLine) { throw "The faster graphics card's switch isn't on the app's command line." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }

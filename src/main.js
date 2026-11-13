@@ -44,6 +44,9 @@
 // - 1.15: cadprotocol:// links are the app's (app-link.js), so another app
 //   (UnifyField, say) can open it: cadprotocol://open starts it or brings
 //   it to the front, and nothing else in a link is read.
+// - 1.16: the faster graphics card on a computer with two (graphics.js):
+//   asked for as the app starts, so a laptop draws scans on its own
+//   graphics card rather than the built-in ones.
 // - 1.11: .cadp files are the app's in Windows (the installer registers
 //   them; 1.11.1: with the app's own icon, build/icon.ico, as Leo
 //   preferred over 1.11's document icon): a
@@ -68,6 +71,7 @@ const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles, launchedPaths } = require("./local-files");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
+const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
@@ -90,6 +94,11 @@ const CARD_URL = pageUrl("update.html", { splash: "1" });
 // that the packaged app can read and set the pointer speed. It changes the
 // speed for a moment, puts it back, writes what it saw to <file> and quits.
 // ---------------------------------------------------------------------------
+// 1.16: the faster graphics card where there are two, asked for before the
+// app's ready (the graphics process starts with the command line as it is
+// then).
+const graphicsAsked = chooseGraphics(app.commandLine);
+
 // 1.15: cadprotocol:// links are this app's, said before anything else (the
 // installer says so too; this keeps it so wherever the app's run from).
 const linksAreOurs = registerAppLink(app, {
@@ -128,6 +137,12 @@ if (smokeArg) {
         ours: app.isDefaultProtocolClient(LINK_SCHEME),
         open: hasAppLink(["CAD Protocol.exe", "cadprotocol://open"]),
         files: launchedPaths(["CAD Protocol.exe", "cadprotocol://open/C:/Jobs/Lot 7.cadp", "C:\\Jobs\\Lot 7.cadp"]).length,
+      };
+      // 1.16: the faster graphics card asked for, and the cards there are.
+      result.graphics = {
+        asked: graphicsAsked,
+        onCommandLine: app.commandLine.hasSwitch(FASTER_CARD),
+        cards: cardsWords(await app.getGPUInfo("basic").catch(() => null)),
       };
       // 1.13: a small browser window opened, put in place and closed.
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
@@ -431,6 +446,12 @@ function start() {
     guardPermissions();
     answerTheApp();
     serveLocalPages({ protocol, dir: __dirname, readFile: require("node:fs/promises").readFile, log });
+    // 1.16: which graphics card was asked for, and the ones there are (for
+    // when a laptop's scans are slow: the log says which is in use).
+    app
+      .getGPUInfo("basic")
+      .then((info) => log(`graphics: asked for the ${graphicsAsked === "low" ? "power-saving" : "faster"} card; ${cardsWords(info) || "none listed"}`))
+      .catch(() => log(`graphics: asked for the ${graphicsAsked === "low" ? "power-saving" : "faster"} card; the cards couldn't be listed`));
     // Only the small card while the app starts (1.7).
     signInCard = createSignInCard({
       BrowserWindow,
