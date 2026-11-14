@@ -13,7 +13,14 @@
          name on the left, signing in on the right.
          1.14 (Leo, 2026-11-13 10:09: "it jumps right to the internet
          identity page"): Sign in opens Internet Identity at once in a
-         window of the app's own; the browser is the small second choice. */
+         window of the app's own; the browser is the small second choice.
+         1.17 (Leo, 2026-11-14 07:31: "make it work similar to app cubed
+         ... a small sign in card that directs you to internet identity",
+         with Google's "Couldn't sign you in: this browser or app may not
+         be secure" in the app's own window): the other way round. Sign in
+         is the browser's small window over this card, where Google and
+         every passkey work; the app's own window is the small second
+         choice. */
       :root { color-scheme: dark; }
       html, body { height: 100%; margin: 0; }
       body {
@@ -157,8 +164,8 @@
         <p class="note" id="note"></p>
 
         <div class="actions">
-          <button type="button" class="primary" id="window" hidden>Sign in</button>
-          <button type="button" class="primary" id="browser">Sign in with your browser</button>
+          <button type="button" class="primary" id="browser">Sign in</button>
+          <button type="button" class="link" id="window" hidden>Sign in inside the app instead</button>
           <button type="button" class="secondary" id="offline">Use Spatial Canvas offline</button>
           <p class="offline-note">Draw without signing in and save drawings as files on this computer.</p>
         </div>
@@ -212,26 +219,22 @@
         $("note").textContent = s.note || "";
         $("cancel").hidden = phase !== "waiting";
         const offline = phase === "offline";
-        // 1.14: the app's page can sign in in a window of the app's own, so
-        // that's Sign in, and the browser's the small second choice.
+        // 1.17: Sign in is the browser's small window over this card (Google
+        // refuses the app's own window); where the app's page can sign in
+        // in a window of the app's own (1.14), that's the small second choice.
         const own = s.canWindow === true;
         if (!own) way = "browser";
         $("window").hidden = !own;
         $("window").disabled = offline;
         $("browser").disabled = offline;
-        $("browser").className = own ? "link" : "primary";
-        $("browser").textContent = own ? "Sign in with your browser instead" : "Sign in with your browser";
-        $("browser").title = own
-          ? "For a sign-in the app's window can't do: Google refusing it, or a passkey kept by a browser extension"
-          : "";
+        $("window").title = "Passkeys only: Google won't sign in inside an app's window";
+        $("browser").title = "Internet Identity opens in a small window of your browser, over this card";
         $("step-browser-words").textContent = way === "window" ? "Sign in with Internet Identity" : "Sign in in your browser";
         $("lead").textContent = offline
           ? "You're offline: signing in needs a connection. Spatial Canvas works on this computer."
-          : own
-            ? "You sign in with Internet Identity."
-            : "You sign in with Internet Identity in your own browser, then come straight back here.";
+          : "You sign in with Internet Identity, then come straight back here.";
         if (phase === "ready" || phase === "error" || phase === "offline")
-          (offline ? $("offline") : own ? $("window") : $("browser")).focus();
+          (offline ? $("offline") : $("browser")).focus();
       };
       window.cardState({ phase: "ready" });
     </script>

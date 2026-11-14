@@ -156,9 +156,11 @@ test("the card has Sign in only when the app's page says it can sign in in the a
 
 test("the card's page, its bridge and the app's page agree on the new button", () => {
   const html = read("signin-card.html");
-  assert.match(html, /<button type="button" class="primary" id="window" hidden>Sign in<\/button>/);
+  // 1.17: Sign in is the browser's small window; the app's own is the second choice.
+  assert.match(html, /<button type="button" class="primary" id="browser">Sign in<\/button>/);
+  assert.match(html, /<button type="button" class="link" id="window" hidden>Sign in inside the app instead<\/button>/);
   assert.match(html, /choose\("window"\)/);
-  assert.match(html, /Sign in with your browser instead/);
+  assert.doesNotMatch(html, /Sign in with your browser instead/);
   // Hidden means hidden, whatever the button's own display says.
   assert.match(html, /\[hidden\] \{ display: none !important; \}/);
   assert.match(read("card-preload.js"), /new Set\(\["window", "browser", "offline", "cancel", "quit"\]\)/);

@@ -76,6 +76,6 @@ test("the app asks before it's ready, says so in its log, and the build checks i
   const build = read(".github/workflows/build.yml");
   assert.match(build, /\$r\.graphics\.asked -ne "high"/);
   assert.match(build, /\$r\.graphics\.onCommandLine/);
-  assert.equal(JSON.parse(read("package.json")).version, "1.16.0");
+  assert.match(JSON.parse(read("package.json")).version, /^1\.(1[6-9]|[2-9]\d)\./);
   assert.match(read("README.md"), /force_low_power_gpu/);
 });
