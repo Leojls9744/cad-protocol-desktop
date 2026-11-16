@@ -11,7 +11,8 @@
 // - "Sign in with your browser", since Google won't sign anyone in inside an
 //   app's own window (see browser-sign-in.js);
 // - 1.2: asking the app before its window closes, so it can save and sign
-//   out (close-guard.js);
+//   out (close-guard.js); 1.18: the app may ask you first (Save, Don't
+//   Save, Cancel), the window waiting while you answer;
 // - 1.3: it updates itself (auto-update.js): checked on the update screen at
 //   launch and every 6 hours, installed without running the installer again.
 // - 1.4: a purple title bar on Windows 11 instead of the accent color
@@ -656,6 +657,23 @@ function start() {
     });
     ipcMain.on("cadp:close-done", (event, id) => {
       if (fromApp(event) && closeGuard) closeGuard.done(id);
+    });
+    // 1.18: the page asks about unsaved drawings first. The window stays,
+    // shown and in front, however long the answer takes.
+    ipcMain.on("cadp:close-asking", (event, id) => {
+      if (!fromApp(event) || !closeGuard) return;
+      closeGuard.holding(id);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        if (!mainWindow.isVisible()) mainWindow.show();
+        mainWindow.focus();
+      }
+    });
+    // Cancel (or a drawing that wasn't saved): the window stays open.
+    ipcMain.on("cadp:close-cancelled", (event, id) => {
+      if (!fromApp(event) || !closeGuard) return;
+      closeGuard.cancelled(id);
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show();
     });
     // The app's first screen is up: its window shows, the card goes (1.7).
     ipcMain.on("cadp:ready", (event) => {

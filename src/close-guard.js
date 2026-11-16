@@ -6,6 +6,12 @@
 // The page answers "started" at once and "done" when it's finished. A page
 // that doesn't answer within 1.5 s (an older app, the offline page) closes
 // straight away; one that started gets up to a minute.
+//
+// 1.18: the page may ask the person first (Save changes to 2 drawings?
+// Save, Don't Save, Cancel): "holding" while they answer, with no time
+// limit; "started" then gives its saving and signing out the minute from
+// then; "cancelled" (Cancel, or a drawing that wasn't saved) keeps the
+// window open.
 
 const ACK_MS = 1500;
 const MAX_MS = 60 * 1000;
@@ -21,6 +27,8 @@ function createCloseGuard({ ask, close, ackMs = ACK_MS, maxMs = MAX_MS }) {
   let id = 0;
   let ackTimer = null;
   let maxTimer = null;
+  /** The page is waiting on the person (1.18): no limit till it starts work. */
+  let held = false;
 
   function finish() {
     if (state === "closing") return;
@@ -36,6 +44,7 @@ function createCloseGuard({ ask, close, ackMs = ACK_MS, maxMs = MAX_MS }) {
       if (state === "closing") return false;
       if (state === "asking") return true;
       state = "asking";
+      held = false;
       id += 1;
       ackTimer = setTimeout(finish, ackMs);
       maxTimer = setTimeout(finish, maxMs);
@@ -43,7 +52,24 @@ function createCloseGuard({ ask, close, ackMs = ACK_MS, maxMs = MAX_MS }) {
       return true;
     },
     started(answerId) {
-      if (state === "asking" && answerId === id) clearTimeout(ackTimer);
+      if (state !== "asking" || answerId !== id) return;
+      clearTimeout(ackTimer);
+      // After the person answered: the work gets its minute from now.
+      if (held) {
+        held = false;
+        maxTimer = setTimeout(finish, maxMs);
+      }
+    },
+    /** 1.18: the page is asking the person; it waits however long they take. */
+    holding(answerId) {
+      if (state !== "asking" || answerId !== id) return;
+      clearTimeout(ackTimer);
+      clearTimeout(maxTimer);
+      held = true;
+    },
+    /** 1.18: the person chose to stay (or a drawing wasn't saved): the window stays open. */
+    cancelled(answerId) {
+      if (state === "asking" && answerId === id) this.reset();
     },
     done(answerId) {
       if (state === "asking" && answerId === id) finish();
@@ -52,6 +78,7 @@ function createCloseGuard({ ask, close, ackMs = ACK_MS, maxMs = MAX_MS }) {
     reset() {
       clearTimeout(ackTimer);
       clearTimeout(maxTimer);
+      held = false;
       state = "open";
     },
     get closing() {

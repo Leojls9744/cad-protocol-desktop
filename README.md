@@ -39,7 +39,7 @@ Each installer is built by GitHub Actions from the code in this repository ([the
 - **A purple title bar (1.4).** On Windows 11 every CAD Protocol window asks Windows for a purple title bar with white text, instead of your accent color (Windows' `DwmSetWindowAttribute`, through koffi; [`src/title-bar.js`](src/title-bar.js)). Windows 10 keeps its usual bar.
 - **Every key goes to the drawing.** There's no menu bar, so no browser shortcuts get in the way.
 - **More room.** No tabs or address bar, and its own window and taskbar icon.
-- **Unsaved drawings are protected.** It asks before closing with unsaved changes, as the browser does.
+- **Unsaved drawings are protected (1.18).** Closing the window with unsaved drawings, the app asks first: Save changes to 2 drawings? It lists each one and where it saves. **Save** puts each where it belongs (the vault, its .cadp in a job folder, its file on this computer; a new one asks where), **Don't Save** closes without them, and **Cancel** keeps the window open. The window waits, shown, however long you take ([`src/close-guard.js`](src/close-guard.js): `holding` has no time limit; saving and signing out after get their minute). With an app page older than web v867, it asks as the browser does: Leave or Stay.
 
 ## What it can and can't do
 

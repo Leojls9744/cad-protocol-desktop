@@ -112,5 +112,29 @@ if (appOrigin && window.location.origin === appOrigin) {
         ipcRenderer.send("cadp:close-done", id);
       });
     },
+    /**
+     * 1.18: as onClosing, but the page may ask the person first.
+     * `handler({ asking, working })` resolves "close" or "stay": asking()
+     * while the person answers (the window stays, shown, with no time
+     * limit), working() while it saves and signs out (the small card, a
+     * minute at most); "stay" keeps the window open. A new handler
+     * replaces the last (onClosing's too).
+     */
+    closeAsks: true,
+    onCloseAsk: (handler) => {
+      ipcRenderer.removeAllListeners("cadp:closing");
+      ipcRenderer.on("cadp:closing", async (_event, id) => {
+        let answer = "close";
+        try {
+          answer = await handler({
+            asking: () => ipcRenderer.send("cadp:close-asking", id),
+            working: () => ipcRenderer.send("cadp:close-started", id),
+          });
+        } catch {
+          // Closing goes ahead whatever the page did.
+        }
+        ipcRenderer.send(answer === "stay" ? "cadp:close-cancelled" : "cadp:close-done", id);
+      });
+    },
   });
 }

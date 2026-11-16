@@ -55,6 +55,37 @@ test("answers to an earlier question are ignored, and Stay asks again next time"
   assert.equal(closed(), 1);
 });
 
+test("1.18: while the page asks the person, no time limit; the work after gets its minute; Cancel keeps it open", async () => {
+  const { g, asked, closed } = guard({ ackMs: 30, maxMs: 120 });
+  g.request();
+  g.holding(1);
+  // Past the answer time and the limit: still waiting on the person.
+  await wait(200);
+  assert.equal(closed(), 0);
+  assert.equal(g.asking, true);
+  // Saving and signing out: the limit counts from now.
+  g.started(1);
+  await wait(60);
+  assert.equal(closed(), 0);
+  await wait(120);
+  assert.equal(closed(), 1);
+  // Cancel: open, and asked again next time.
+  const c = guard({ ackMs: 30, maxMs: 120 });
+  c.g.request();
+  c.g.holding(1);
+  c.g.cancelled(2); // an earlier or later question's: ignored
+  assert.equal(c.g.asking, true);
+  c.g.cancelled(1);
+  assert.equal(c.g.asking, false);
+  await wait(200);
+  assert.equal(c.closed(), 0);
+  assert.equal(c.g.request(), true);
+  assert.deepEqual(c.asked, [1, 2]);
+  c.g.done(2);
+  assert.equal(c.closed(), 1);
+  assert.deepEqual(asked, [1]);
+});
+
 /** electron-updater's autoUpdater, pretend: events, a check and an install. */
 function fakeUpdater(script) {
   const u = new EventEmitter();
