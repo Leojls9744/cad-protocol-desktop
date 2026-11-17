@@ -127,6 +127,9 @@ const linksAreOurs = registerAppLink(app, {
 
 const smokeArg = process.argv.find((a) => a.startsWith("--smoke-test="));
 if (smokeArg) {
+  // 1.19: the check goes on after its windows close (the engine's after them),
+  // so closing the last isn't quitting.
+  app.on("window-all-closed", () => {});
   app.whenReady().then(async () => {
     const out = smokeArg.slice("--smoke-test=".length);
     const backend = windowsBackend((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
@@ -161,10 +164,6 @@ if (smokeArg) {
         onCommandLine: app.commandLine.hasSwitch(FASTER_CARD),
         cards: cardsWords(await app.getGPUInfo("basic").catch(() => null)),
       };
-      // 1.13: a small browser window opened, put in place and closed.
-      result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
-      // 1.14: a sign-in window of the app's own, over a card, in front of it.
-      result.signInWindow = await smokeSignInWindow();
       // 1.19: the scan engine: a scan written here, indexed, opened again and asked of.
       result.engine = await checkEngine({
         utilityProcess,
@@ -172,6 +171,10 @@ if (smokeArg) {
         dir: __dirname,
         log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
       });
+      // 1.13: a small browser window opened, put in place and closed.
+      result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
+      // 1.14: a sign-in window of the app's own, over a card, in front of it.
+      result.signInWindow = await smokeSignInWindow();
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
