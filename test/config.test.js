@@ -67,6 +67,10 @@ test("permissions: a short list for the app, less for sign-in, none for anyone e
   assert.equal(config.permissionAllowed("media", APP, { mediaType: "video" }), false);
   assert.equal(config.permissionAllowed("media", "https://id.ai", { mediaTypes: ["audio"] }), false);
   assert.equal(config.permissionAllowed("geolocation", APP), false);
+  // 1.21: the app's storage is never cleared to make room; other sites' may be.
+  assert.equal(config.permissionAllowed("persistent-storage", APP), true);
+  assert.equal(config.permissionAllowed("persistent-storage", "https://id.ai"), false);
+  assert.equal(config.permissionAllowed("persistent-storage", "https://example.com"), false);
   assert.equal(config.permissionAllowed("clipboard-read", "https://id.ai"), false);
   assert.equal(config.permissionAllowed("clipboard-sanitized-write", "https://id.ai"), true);
   assert.equal(config.permissionAllowed("notifications", "https://example.com"), false);

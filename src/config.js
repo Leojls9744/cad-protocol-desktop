@@ -98,6 +98,11 @@ const APP_PERMISSIONS = new Set([
   "fileSystem",
   "storage-access",
   "top-level-storage-access",
+  // 1.21: the app's storage kept, never cleared to make room when the disk is
+  // low (navigator.storage.persist(): the copy of the app it opens from, the
+  // drawings kept on this computer). It was refused before, so it was the
+  // browser's to clear.
+  "persistent-storage",
 ]);
 const SIGN_IN_PERMISSIONS = new Set(["clipboard-sanitized-write", "storage-access", "top-level-storage-access"]);
 
