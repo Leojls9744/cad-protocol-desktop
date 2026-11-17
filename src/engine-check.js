@@ -78,6 +78,12 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
       },
     });
     const answer = await waitFor((m) => m.kind === "snap" && m.id === 1, 20000);
+    // 1.20: every point in a box, and a tenth of them.
+    const all = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
+    port.postMessage({ kind: "region", id: 2, token: reg.token, affine: all, min: [5999999, 1999999, 0], max: [6000011, 2000011, 200], most: 1000000 });
+    port.postMessage({ kind: "region", id: 3, token: reg.token, affine: all, min: [5999999, 1999999, 0], max: [6000011, 2000011, 200], most: 1000 });
+    const every = await waitFor((m) => m.kind === "region" && m.id === 2, 20000);
+    const tenth = await waitFor((m) => m.kind === "region" && m.id === 3, 20000);
     port.close();
     engine.stop();
     const front = answer.front || [];
@@ -91,6 +97,8 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
       // The post's top, 104, nearest the eye from above.
       frontZ: front.length >= 5 ? front[4] : null,
       frontClass: front.length >= 8 ? front[7] : null,
+      region: { count: every.count, complete: every.complete, error: every.error || null },
+      thinned: { count: tenth.count, complete: tenth.complete },
     };
   };
   try {

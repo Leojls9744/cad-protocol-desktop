@@ -6,9 +6,13 @@
 //! how far it's come; snap(scans, ask) finds the points under the cursor
 //! (each 14 numbers in a Float64Array: scan, index, x, y, z, pixels from the
 //! cursor, nearness to the eye, class, flags, intensity, returns, red,
-//! green, blue); closeScan(handle) lets one go.
+//! green, blue); closeScan(handle) lets one go. 1.20: region(handle,
+//! affine, min, max, ring, most) gives a scan's points in a box of the
+//! drawing, evenly thinned to about `most`.
 
-use cadp_engine_core::{build_or_open, snap as find, Candidate, Index, Progress, ScanIn, SnapQuery};
+use cadp_engine_core::{
+    build_or_open, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
@@ -235,6 +239,77 @@ pub fn snap(scans: Vec<SnapScan>, ask: SnapAsk) -> Result<SnapFound> {
     Ok(SnapFound {
         front: packed(&got.front),
         near: packed(&got.near),
+        tried: got.tried as f64,
+        cells: got.cells as f64,
+        ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+#[napi(object)]
+pub struct RegionFound {
+    /// Where the points are placed from (the box's middle).
+    pub origin: Vec<f64>,
+    pub count: u32,
+    pub xyz: Float32Array,
+    pub intensity: Uint16Array,
+    pub classification: Uint8Array,
+    pub flags: Uint8Array,
+    pub returns: Uint8Array,
+    /// Bytes, three a point; none when the scan has no colour.
+    pub rgb: Option<Uint8Array>,
+    /// Every point in the box came.
+    pub complete: bool,
+    pub tried: f64,
+    pub cells: f64,
+    pub ms: f64,
+}
+
+/// A scan's points in a box of the drawing (and in a ring, flat x, y pairs, when given), about `most` at most.
+#[napi]
+pub fn region(
+    handle: u32,
+    affine: Vec<f64>,
+    min: Vec<f64>,
+    max: Vec<f64>,
+    ring: Option<Vec<f64>>,
+    most: u32,
+) -> Result<RegionFound> {
+    let started = Instant::now();
+    let ix = INDEXES
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| Error::from_reason(format!("scan {handle} isn't open")))?;
+    if affine.len() != 12 || affine.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("affine needs twelve numbers"));
+    }
+    let mut a = [0.0; 12];
+    a.copy_from_slice(&affine);
+    let ring = match ring {
+        Some(r) if r.len() >= 6 && r.len() % 2 == 0 && r.iter().all(|v| v.is_finite()) => {
+            Some(r.chunks_exact(2).map(|p| [p[0], p[1]]).collect())
+        }
+        Some(_) => return Err(Error::from_reason("ring needs three or more x, y pairs")),
+        None => None,
+    };
+    let q = RegionQuery {
+        min: three(&min, "min")?,
+        max: three(&max, "max")?,
+        ring,
+        most: (most as usize).clamp(1, 50_000_000),
+    };
+    let got = within(&ix, &a, &q);
+    Ok(RegionFound {
+        origin: got.origin.to_vec(),
+        count: got.class.len() as u32,
+        xyz: Float32Array::from(got.xyz),
+        intensity: Uint16Array::from(got.intensity),
+        classification: Uint8Array::from(got.class),
+        flags: Uint8Array::from(got.flags),
+        returns: Uint8Array::from(got.returns),
+        rgb: got.rgb.map(Uint8Array::from),
+        complete: got.complete,
         tried: got.tried as f64,
         cells: got.cells as f64,
         ms: started.elapsed().as_secs_f64() * 1000.0,

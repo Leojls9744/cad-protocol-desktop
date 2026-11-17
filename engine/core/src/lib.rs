@@ -11,11 +11,17 @@
 //! classes and flags); the page gives, with each question, how the file's
 //! coordinates come into the drawing (its units, ground scale and
 //! alignment, as one affine move), so one index serves every drawing.
+//!
+//! 1.20: a scan's points in a box of the drawing (`region`), for the
+//! views' close-ups and the commands' regions, evenly thinned to what's
+//! asked.
 
 pub mod index;
+pub mod region;
 pub mod snap;
 
 mod fx;
 
 pub use index::{build_or_open, cache_name, Index, IndexError, Progress};
+pub use region::{region, RegionPoints, RegionQuery};
 pub use snap::{snap, Candidate, ScanIn, SnapAnswer, SnapQuery};

@@ -102,6 +102,22 @@ test("the real engine: a scan written here, indexed, asked of, opened again", { 
     assert.ok(Math.abs(a.front[4] - 104) < 1e-6, String(a.front[4]));
     assert.equal(a.front[7], 5);
     assert.ok(a.near.length / 14 >= 1);
+    // 1.20: the floor's points in a box, every one; then thinned.
+    page.emit("message", {
+      data: { kind: "region", id: 2, token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], min: [6000000.95, 2000000.95, 99], max: [6000002.05, 2000002.05, 100.05], most: 100000 },
+    });
+    const r = page.out.find((m) => m.kind === "region");
+    assert.equal(r.error, undefined);
+    assert.equal(r.count, 11 * 11);
+    assert.equal(r.complete, true);
+    assert.equal(r.xyz.length, r.count * 3);
+    assert.ok([...r.classification].every((c) => c === 2));
+    page.emit("message", {
+      data: { kind: "region", id: 3, token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], min: [6000000, 2000000, 0], max: [6000010, 2000010, 200], most: 1000 },
+    });
+    const thin = page.out.filter((m) => m.kind === "region")[1];
+    assert.equal(thin.complete, false);
+    assert.ok(thin.count >= 1000 && thin.count < 2000, String(thin.count));
     return opened.info;
   };
   const first = await run("t1");

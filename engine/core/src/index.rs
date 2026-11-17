@@ -14,7 +14,9 @@
 //!   numbers (i32), intensity (u16), class (u8), flags (u8: synthetic 1,
 //!   key-point 2, withheld 4, overlap 8), returns (u8: the return number in
 //!   the low 4 bits, the pulse's number of returns in the high 4), a spare
-//!   byte, then red, green and blue (u16 each).
+//!   byte, then red, green and blue (u16 each). Within a cell the points
+//!   are shuffled (1.20), so any first part of a cell is an even sample of
+//!   it: a view that wants fewer takes the same first share of each cell.
 //!
 //! Made in two passes: the file read once (LAZ on every core), each point
 //! counted to its cell and written in turn to a scratch file; then the
@@ -29,7 +31,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
 pub const MAGIC: &[u8; 8] = b"CADPENG1";
-pub const VERSION: u32 = 1;
+/// 2 (desktop 1.20): each cell's points in a shuffled order, so the first
+/// part of any cell is an even sample of it; whether colours are 16-bit.
+pub const VERSION: u32 = 2;
 pub const HEAD: usize = 512;
 pub const RECORD: usize = 24;
 pub const CELL: usize = 40;
@@ -132,6 +136,8 @@ pub struct Index {
     pub min: [i32; 3],
     pub max: [i32; 3],
     pub has_rgb: bool,
+    /// Colours of 16 bits (any channel past 255): read as bytes by their high byte.
+    pub wide: bool,
     pub source_size: u64,
     pub source_mtime: u64,
     pub cells: usize,
@@ -204,6 +210,7 @@ impl Index {
             min: i3(160),
             max: i3(172),
             has_rgb: u32_at(&map, 12) & 1 == 1,
+            wide: u32_at(&map, 12) & 2 == 2,
             source_size: u64_at(&map, 16),
             source_mtime: u64_at(&map, 24),
             cells,
@@ -413,6 +420,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
     let scratch = path.with_extension("scratch");
     let mut cells: FxMap<u64, Acc> = FxMap::default();
     let mut total: u64 = 0;
+    let mut wide = false;
     {
         let mut out = BufWriter::with_capacity(8 << 20, File::create(&scratch)?);
         let mut pts: Vec<las::Point> = Vec::with_capacity(CHUNK as usize);
@@ -447,6 +455,9 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
                 for (a, v) in [r.x, r.y, r.z].into_iter().enumerate() {
                     acc.min[a] = acc.min[a].min(v);
                     acc.max[a] = acc.max[a].max(v);
+                }
+                if r.rgb[0] > 255 || r.rgb[1] > 255 || r.rgb[2] > 255 {
+                    wide = true;
                 }
                 encode(&mut rec, &r);
                 out.write_all(&rec)?;
@@ -514,7 +525,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         h.fill(0);
         h[0..8].copy_from_slice(MAGIC);
         h[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        h[12..16].copy_from_slice(&(has_rgb as u32).to_le_bytes());
+        h[12..16].copy_from_slice(&((has_rgb as u32) | (wide as u32) << 1).to_le_bytes());
         h[16..24].copy_from_slice(&size.to_le_bytes());
         h[24..32].copy_from_slice(&mtime.to_le_bytes());
         h[32..40].copy_from_slice(&total.to_le_bytes());
@@ -577,6 +588,29 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
             }
             done += n as u64;
             progress.set(0.6 + 0.4 * (done as f64 / total.max(1) as f64));
+        }
+    }
+    // Each cell's points shuffled (the same way every time), so its first
+    // part is an even sample of it.
+    for (k, (_, _, acc)) in order.iter().enumerate() {
+        let n = acc.count as usize;
+        if n < 2 {
+            continue;
+        }
+        let base = points_at + starts[k] as usize * RECORD;
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15 ^ (k as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        let mut tmp = [0u8; RECORD];
+        for i in (1..n).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let j = (seed % (i as u64 + 1)) as usize;
+            if i != j {
+                let (a, b) = (base + i * RECORD, base + j * RECORD);
+                tmp.copy_from_slice(&map[a..a + RECORD]);
+                map.copy_within(b..b + RECORD, a);
+                map[b..b + RECORD].copy_from_slice(&tmp);
+            }
         }
     }
     map.flush()?;

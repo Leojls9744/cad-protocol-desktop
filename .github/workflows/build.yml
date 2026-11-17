@@ -123,6 +123,10 @@ jobs:
           if ($e.first.near -lt 1) { throw "The scan engine found no point under the cursor." }
           if ([math]::Abs($e.first.frontZ - 104) -gt 0.001 -or $e.first.frontClass -ne 5) { throw "The scan engine's point under the cursor was at $($e.first.frontZ) (class $($e.first.frontClass)), not the post's top." }
           if ($e.again.built) { throw "The scan engine indexed the scan again instead of opening its index." }
+          # 1.20: every point in a box, then thinned.
+          if ($e.first.region.error) { throw "The scan engine's box failed: $($e.first.region.error)" }
+          if ($e.first.region.count -ne 10040 -or -not $e.first.region.complete) { throw "The scan engine's box gave $($e.first.region.count) points, not all 10040." }
+          if ($e.first.thinned.complete -or $e.first.thinned.count -lt 1000 -or $e.first.thinned.count -gt 2500) { throw "The scan engine's thinned box gave $($e.first.thinned.count) points." }
           if (-not (Test-Path "dist/win-unpacked/resources/app.asar.unpacked/engine/dist/cadp-engine.node")) { throw "The scan engine's add-on isn't unpacked beside the app." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }

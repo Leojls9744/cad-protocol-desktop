@@ -87,6 +87,35 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       port.postMessage({ kind: "status", id, scans: [...scans].map(([t, s]) => summary(t, s)) });
       return;
     }
+    // 1.20: a scan's points in a box of the drawing (a view's close-up, a command's region).
+    if (msg.kind === "region") {
+      const held = scans.get(msg.token);
+      if (!held || held.handle == null) {
+        port.postMessage({ kind: "region", id, missing: [msg.token] });
+        return;
+      }
+      try {
+        const got = engine.region(held.handle, msg.affine, msg.min, msg.max, msg.ring ?? undefined, msg.most);
+        port.postMessage({
+          kind: "region",
+          id,
+          origin: got.origin,
+          count: got.count,
+          xyz: got.xyz,
+          intensity: got.intensity,
+          classification: got.classification,
+          flags: got.flags,
+          returns: got.returns,
+          rgb: got.rgb ?? null,
+          complete: got.complete,
+          tried: got.tried,
+          ms: got.ms,
+        });
+      } catch (err) {
+        port.postMessage({ kind: "region", id, error: String((err && err.message) || err) });
+      }
+      return;
+    }
     if (msg.kind !== "snap") return;
     const list = Array.isArray(msg.scans) ? msg.scans : [];
     const asked = [];

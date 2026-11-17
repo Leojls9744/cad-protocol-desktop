@@ -1,7 +1,7 @@
 //! The engine on scans written here: a LAS and a LAZ of a floor, a wall and
 //! a post, read, indexed, opened again, and asked what's under the cursor.
 
-use cadp_engine_core::{build_or_open, snap, Index, Progress, ScanIn, SnapQuery};
+use cadp_engine_core::{build_or_open, region, snap, Index, Progress, RegionQuery, ScanIn, SnapQuery};
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::{Path, PathBuf};
 
@@ -271,4 +271,40 @@ fn speed() {
         let a = last.unwrap();
         eprintln!("{name}: {:?} a question, {} points tried in {} cells, {} near", t.elapsed() / n, a.tried, a.cells, a.near.len());
     }
+}
+
+#[test]
+fn gives_a_box_s_points_evenly_thinned() {
+    let dir = scratch("region");
+    let las = dir.join("site.las");
+    write(&las, false);
+    let ix = build_or_open(&las, &dir.join("cache"), &Progress::default()).unwrap();
+    // The floor's 5 × 5 corner (0.1 apart: 51 × 51 points), every one.
+    let q = RegionQuery { min: [999.95, 1999.95, 99.9], max: [1005.05, 2005.05, 100.05], ring: None, most: 1_000_000 };
+    let r = region(&ix, &IDENTITY, &q);
+    assert!(r.complete);
+    assert_eq!(r.class.len(), 51 * 51);
+    assert!(r.class.iter().all(|c| *c == 2));
+    assert_eq!(r.xyz.len(), r.class.len() * 3);
+    // Placed about the box's middle.
+    let o = r.origin;
+    let x0 = (0..r.class.len()).map(|i| r.xyz[i * 3] as f64 + o[0]).fold(f64::MAX, f64::min);
+    assert!((x0 - 1000.0).abs() < 1e-3, "{x0}");
+    assert_eq!(r.rgb.as_ref().map(|v| v.len()), Some(r.class.len() * 3));
+    assert_eq!(&r.rgb.as_ref().unwrap()[0..3], &[1, 2, 3]);
+    // A ring: a triangle in plan, about half the square.
+    let tri = RegionQuery { ring: Some(vec![[999.95, 1999.95], [1005.05, 1999.95], [999.95, 2005.05]]), ..q.clone() };
+    let t = region(&ix, &IDENTITY, &tri);
+    assert!(t.class.len() > 1200 && t.class.len() < 1450, "{}", t.class.len());
+    // Thinned: about a tenth of the whole floor, spread over it.
+    let all = RegionQuery { min: [999.0, 1999.0, 99.0], max: [1021.0, 2021.0, 110.0], ring: None, most: 4_000 };
+    let a = region(&ix, &IDENTITY, &all);
+    assert!(!a.complete);
+    assert!(a.class.len() >= 4_000 && a.class.len() < 6_000, "{}", a.class.len());
+    let xs: Vec<f64> = (0..a.class.len()).map(|i| a.xyz[i * 3] as f64 + a.origin[0]).collect();
+    let east = xs.iter().filter(|x| **x > 1010.0).count() as f64 / xs.len() as f64;
+    assert!(east > 0.35 && east < 0.65, "{east}");
+    // The same points each time.
+    let b = region(&ix, &IDENTITY, &all);
+    assert_eq!(a.xyz, b.xyz);
 }
