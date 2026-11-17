@@ -1,8 +1,8 @@
 {
   "name": "cad-protocol-desktop",
   "productName": "CAD Protocol",
-  "version": "1.18.0",
-  "description": "CAD Protocol for Windows: the live CAD Protocol app in its own window, with a faster pointer while you draft.",
+  "version": "1.19.0",
+  "description": "CAD Protocol for Windows: the live CAD Protocol app in its own window, with a faster pointer while you draft and a scan engine of its own.",
   "main": "src/main.js",
   "private": true,
   "author": "leojls9744",
@@ -15,7 +15,8 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test \"test/*.test.js\"",
-    "dist": "electron-builder --win nsis --x64 --publish never"
+    "dist": "electron-builder --win nsis --x64 --publish never",
+    "build:engine": "node engine/build.js"
   },
   "dependencies": {
     "electron-updater": "6.8.11",
@@ -28,18 +29,20 @@
   "build": {
     "appId": "com.cadprotocol.desktop",
     "productName": "CAD Protocol",
-    "copyright": "Copyright © 2026 leojls9744",
+    "copyright": "Copyright \u00a9 2026 leojls9744",
     "directories": {
       "output": "dist",
       "buildResources": "build"
     },
     "files": [
       "src/**/*",
+      "engine/dist/cadp-engine.node",
       "package.json"
     ],
     "asar": true,
     "asarUnpack": [
-      "node_modules/@koromix/**"
+      "node_modules/@koromix/**",
+      "engine/dist/**"
     ],
     "npmRebuild": false,
     "electronFuses": {

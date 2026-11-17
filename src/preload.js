@@ -4,10 +4,11 @@
 // object: that it is running in the desktop app, its version, the pointer
 // speed setting, Sign in with your browser, its update state and a restart
 // into a downloaded update, a say before the window closes, and drawings
-// saved to and opened from files the person picks. Nothing else of the
-// computer is reachable.
+// saved to and opened from files the person picks, and (1.19) the scan
+// engine for scan files the person chose. Nothing else of the computer is
+// reachable.
 
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 function arg(name) {
   const found = process.argv.find((a) => a.startsWith(`--${name}=`));
@@ -96,6 +97,27 @@ if (appOrigin && window.location.origin === appOrigin) {
       },
     },
     /**
+     * 1.19: the scan engine (src/scan-engine.js), for LAS and LAZ scans
+     * read from this computer. register(file) hands it a scan file the
+     * person chose (a File from an Open window, a drop or a linked folder):
+     * { token, name, size }, or null when it isn't one it reads. connect()
+     * asks for a port to it: the port comes to the page as a message
+     * ({ cadpEngine: "port" }, its ports[0]) from this window's own origin.
+     */
+    engine: {
+      register: (file) => {
+        let where = "";
+        try {
+          where = webUtils.getPathForFile(file);
+        } catch {
+          where = "";
+        }
+        if (!where) return Promise.resolve(null);
+        return ipcRenderer.invoke("cadp:engine:register", where);
+      },
+      connect: () => ipcRenderer.send("cadp:engine:connect"),
+    },
+    /**
      * 1.2: `handler` runs when the window is about to close (it may save and
      * sign out); the window closes when its promise settles, or after a minute.
      * A new handler replaces the last.
@@ -136,5 +158,9 @@ if (appOrigin && window.location.origin === appOrigin) {
         ipcRenderer.send(answer === "stay" ? "cadp:close-cancelled" : "cadp:close-done", id);
       });
     },
+  });
+  // 1.19: the engine's port handed on to the page (a port can't cross the bridge).
+  ipcRenderer.on("cadp:engine:port", (event) => {
+    window.postMessage({ cadpEngine: "port" }, window.location.origin, event.ports);
   });
 }

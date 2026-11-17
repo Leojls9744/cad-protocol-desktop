@@ -1,0 +1,17 @@
+[package]
+name = "cadp-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "The scan engine as a Node add-on, for the desktop app's engine process."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cadp-engine-core = { path = "../core" }
+napi = { version = "3", default-features = false, features = ["napi6"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

@@ -59,7 +59,21 @@
 
 const path = require("node:path");
 const fs = require("node:fs");
-const { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, powerMonitor, protocol, screen, session, shell } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  MessageChannelMain,
+  nativeTheme,
+  powerMonitor,
+  protocol,
+  screen,
+  session,
+  shell,
+  utilityProcess,
+} = require("electron");
 const config = require("./config");
 const { createStore, createLog } = require("./store");
 const { createPointerSpeed, windowsBackend } = require("./pointer-speed");
@@ -76,6 +90,8 @@ const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
 const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
+const { addonPath, cacheDirFor, createScanEngine } = require("./scan-engine");
+const { checkEngine } = require("./engine-check");
 const {
   createSmallWindow,
   overRect,
@@ -149,6 +165,13 @@ if (smokeArg) {
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
       // 1.14: a sign-in window of the app's own, over a card, in front of it.
       result.signInWindow = await smokeSignInWindow();
+      // 1.19: the scan engine: a scan written here, indexed, opened again and asked of.
+      result.engine = await checkEngine({
+        utilityProcess,
+        MessageChannelMain,
+        dir: __dirname,
+        log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
+      });
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -285,6 +308,18 @@ function start() {
   const store = createStore(path.join(data, "desktop-settings.json"), log);
   let pointer = null;
   let mainWindow = null;
+  // 1.19: the scan engine, its process started when a page first asks.
+  const scanEngine = createScanEngine({
+    fork: (modulePath, args, options) => utilityProcess.fork(modulePath, args, options),
+    newChannel: () => new MessageChannelMain(),
+    statFile: (p) => fs.promises.stat(p).catch(() => null),
+    exists: (p) => fs.existsSync(p),
+    cacheDir: cacheDirFor(process.env, data),
+    addon: addonPath(__dirname),
+    hostPath: path.join(__dirname, "engine-host.js"),
+    log,
+  });
+  if (!scanEngine.available) log("scan engine: its add-on isn't here (scans go through the page)");
   // Updates: only the installed app has them (electron-updater needs the
   // packaged app's app-update.yml); `npm start` runs without.
   let updates = null;
@@ -493,6 +528,7 @@ function start() {
     browserSignIn.cancel();
     browserDrive.cancel();
     if (pointer) pointer.blur();
+    scanEngine.stop();
   });
   app.on("will-quit", () => pointer && pointer.blur());
   process.on("exit", () => pointer && pointer.blur());
@@ -581,6 +617,15 @@ function start() {
     ipcMain.handle("cadp:pointer-speed:get", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return pointer.status();
+    });
+    // 1.19: the scan engine, for scan files the person chose, and a port to it.
+    ipcMain.handle("cadp:engine:register", (event, filePath) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return scanEngine ? scanEngine.register(filePath) : null;
+    });
+    ipcMain.on("cadp:engine:connect", (event) => {
+      if (!fromApp(event) || !scanEngine) return;
+      scanEngine.connect(event.sender);
     });
     ipcMain.handle("cadp:pointer-speed:set", (event, value) => {
       if (!fromApp(event)) throw new Error("not allowed");

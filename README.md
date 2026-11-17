@@ -41,6 +41,8 @@ Each installer is built by GitHub Actions from the code in this repository ([the
 - **More room.** No tabs or address bar, and its own window and taskbar icon.
 - **Unsaved drawings are protected (1.18).** Closing the window with unsaved drawings, the app asks first: Save changes to 2 drawings? It lists each one and where it saves. **Save** puts each where it belongs (the vault, its .cadp in a job folder, its file on this computer; a new one asks where), **Don't Save** closes without them, and **Cancel** keeps the window open. The window waits, shown, however long you take ([`src/close-guard.js`](src/close-guard.js): `holding` has no time limit; saving and signing out after get their minute). With an app page older than web v867, it asks as the browser does: Leave or Stay.
 
+- **A scan engine of its own (1.19).** LAS and LAZ scans you attach from this computer are read by the app itself, in a background process on every core ([`engine/`](engine), Rust, run by [`src/engine-host.js`](src/engine-host.js)). Each scan's every point is filed by where it is, in an index in `%LOCALAPPDATA%\CAD Protocol\scan-engine`, so a scan opened before opens at once; snapping asks the engine for the points under the cursor along its line of sight, so nothing is drawn again after an orbit to find them. The page never names a path: it hands over a file you chose, and only a `.las` or `.laz` there is opened, read only, by a token ([`src/scan-engine.js`](src/scan-engine.js)).
+
 ## What it can and can't do
 
 The window is locked down the way Electron's [security guidance](https://www.electronjs.org/docs/latest/tutorial/security) recommends.
@@ -52,6 +54,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 - **A few things to the computer:** the app's page can reach the pointer-speed setting, start Sign in with your browser, read its update state and restart into a downloaded update, and answer before the window closes. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
 - **Permissions:** only clipboard, full screen, pointer lock and notifications are allowed, and only to the app. The camera, microphone and location are refused.
 - **Settings kept on the computer:** only the window's size and place, the pointer setting, and a short log, all in `%APPDATA%\CAD Protocol`. Drawings and files stay in your encrypted vault.
+- **Scans read only.** The scan engine opens only `.las` and `.laz` files you chose, read only; its indexes (copies of the points, filed by place) are in `%LOCALAPPDATA%\CAD Protocol\scan-engine`, and can be deleted at any time (they're made again).
 - **Hardened Electron options:** "run as Node" and debugging flags are switched off in the executable.
 
 ## Files
@@ -70,6 +73,8 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 | [`src/local-files.js`](src/local-files.js) | Drawings saved to and opened from this computer |
 | [`src/title-bar.js`](src/title-bar.js) | The purple title bar (Windows 11) |
 | [`src/graphics.js`](src/graphics.js) | Asking for the faster graphics card on a computer with two |
+| [`src/scan-engine.js`](src/scan-engine.js), [`src/engine-host.js`](src/engine-host.js) | The scan engine: its process, the scan files it's given, the page's port to it |
+| [`engine/`](engine) | The scan engine itself (Rust): `core` reads, indexes and searches; `node` is its add-on |
 | [`src/preload.js`](src/preload.js) | The small `window.cadpDesktop` object the app sees |
 | [`src/store.js`](src/store.js) | The settings file and log |
 | [`src/offline.html`](src/offline.html) | Shown when the app can't be reached |
@@ -77,10 +82,11 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 
 ## Building it yourself
 
-You need Node.js 22 and Windows.
+You need Node.js 22, Rust (stable) and Windows.
 
 ```
 npm ci
+npm run build:engine # the scan engine's add-on (engine/dist/cadp-engine.node)
 npm test
 npm start            # run it
 npm run dist         # build dist\CAD-Protocol-Setup.exe
