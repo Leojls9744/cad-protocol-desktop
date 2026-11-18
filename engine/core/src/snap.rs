@@ -26,6 +26,8 @@ pub struct ScanIn<'a> {
     pub index: &'a Index,
     pub affine: [f64; 12],
     pub allow: [u64; 4],
+    /// Only this setup's points (an E57 setup attached alone, 1.24).
+    pub setup: Option<u16>,
 }
 
 /// The view, the cursor and what's asked.
@@ -192,6 +194,9 @@ pub fn snap(scans: &[ScanIn], q: &SnapQuery) -> SnapAnswer {
                     continue;
                 }
                 if s.allow[(r.class >> 6) as usize] >> (r.class & 63) & 1 == 0 {
+                    continue;
+                }
+                if s.setup.is_some_and(|k| k != r.setup) {
                     continue;
                 }
                 let p = moved(&s.affine, ix.file_xyz(r.x, r.y, r.z));

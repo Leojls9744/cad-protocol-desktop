@@ -154,7 +154,7 @@ fn reads_laz() {
     write(&laz, true);
     let ix = build_or_open(&laz, &dir.join("cache"), &Progress::default()).unwrap();
     assert_eq!(ix.count as usize, site().len());
-    let a = snap(&[ScanIn { index: &ix, affine: IDENTITY, allow: ALL }], &plan(1003.0, 2003.0));
+    let a = snap(&[ScanIn { index: &ix, affine: IDENTITY, allow: ALL, setup: None }], &plan(1003.0, 2003.0));
     let best = a.near[0];
     assert!((best.p[0] - 1003.0).abs() < 1e-6 && (best.p[1] - 2003.0).abs() < 1e-6);
     assert_eq!(best.class, 2);
@@ -166,7 +166,7 @@ fn finds_the_point_under_the_cursor_in_plan_and_from_the_side() {
     let las = dir.join("site.las");
     write(&las, false);
     let ix = build_or_open(&las, &dir.join("cache"), &Progress::default()).unwrap();
-    let scans = [ScanIn { index: &ix, affine: IDENTITY, allow: ALL }];
+    let scans = [ScanIn { index: &ix, affine: IDENTITY, allow: ALL, setup: None }];
     // Plan, between floor points: the nearest four, 0.05 off (5 px) each way.
     let mut q = plan(1003.05, 2003.05);
     let a = snap(&scans, &q);
@@ -181,7 +181,7 @@ fn finds_the_point_under_the_cursor_in_plan_and_from_the_side() {
     // The post's class not taken: the floor under it.
     let mut no_post = ALL;
     no_post[0] &= !(1 << 5);
-    let a = snap(&[ScanIn { index: &ix, affine: IDENTITY, allow: no_post }], &q);
+    let a = snap(&[ScanIn { index: &ix, affine: IDENTITY, allow: no_post, setup: None }], &q);
     assert!(a.front.iter().all(|c| c.class != 5));
     assert_eq!(a.front[0].class, 2);
     // From the side, level, at the wall's face: the wall's points, the
@@ -216,7 +216,7 @@ fn moves_the_file_into_the_drawing() {
     let at = [1003.0 * k + 10.0, 2003.0 * k, 0.0];
     let mut q = plan(at[0], at[1]);
     q.units_per_pixel = 0.003;
-    let got = snap(&[ScanIn { index: &ix, affine: a, allow: ALL }], &q);
+    let got = snap(&[ScanIn { index: &ix, affine: a, allow: ALL, setup: None }], &q);
     let best = got.near[0];
     assert!((best.p[0] - at[0]).abs() < 1e-6 && (best.p[1] - at[1]).abs() < 1e-6, "{:?}", best.p);
     assert!((best.p[2] - 100.0 * k).abs() < 1e-6);
@@ -255,7 +255,7 @@ fn speed() {
     let t = std::time::Instant::now();
     let ix = build_or_open(&path, &dir.join("cache"), &Progress::default()).unwrap();
     eprintln!("indexed {} points in {:?}: {} cells, {} blocks", ix.count, t.elapsed(), ix.cells, ix.blocks);
-    let scans = [ScanIn { index: &ix, affine: IDENTITY, allow: ALL }];
+    let scans = [ScanIn { index: &ix, affine: IDENTITY, allow: ALL, setup: None }];
     for (name, q) in [("plan", plan(100.0, 50.0)), ("side, level, along the wall", side(100.0, 105.0))] {
         let mut q = q;
         q.units_per_pixel = 0.02;
@@ -280,7 +280,7 @@ fn gives_a_box_s_points_evenly_thinned() {
     write(&las, false);
     let ix = build_or_open(&las, &dir.join("cache"), &Progress::default()).unwrap();
     // The floor's 5 × 5 corner (0.1 apart: 51 × 51 points), every one.
-    let q = RegionQuery { min: [999.95, 1999.95, 99.9], max: [1005.05, 2005.05, 100.05], ring: None, most: 1_000_000 };
+    let q = RegionQuery { min: [999.95, 1999.95, 99.9], max: [1005.05, 2005.05, 100.05], ring: None, most: 1_000_000, setup: None };
     let r = region(&ix, &IDENTITY, &q);
     assert!(r.complete);
     assert_eq!(r.class.len(), 51 * 51);
@@ -291,7 +291,7 @@ fn gives_a_box_s_points_evenly_thinned() {
     let x0 = (0..r.class.len()).map(|i| r.xyz[i * 3] as f64 + o[0]).fold(f64::MAX, f64::min);
     assert!((x0 - 1000.0).abs() < 1e-3, "{x0}");
     // 1.22: a level slice's box is endless across; its points are still placed close by.
-    let band = RegionQuery { min: [-1e12, -1e12, 99.9], max: [1e12, 1e12, 100.05], ring: None, most: 10_000_000 };
+    let band = RegionQuery { min: [-1e12, -1e12, 99.9], max: [1e12, 1e12, 100.05], ring: None, most: 10_000_000, setup: None };
     let b = region(&ix, &IDENTITY, &band);
     assert!(b.class.len() > 51 * 51, "{}", b.class.len());
     assert!(b.origin[0] > 990.0 && b.origin[0] < 1030.0 && b.origin[1] > 1990.0 && b.origin[1] < 2030.0, "{:?}", b.origin);
@@ -305,7 +305,7 @@ fn gives_a_box_s_points_evenly_thinned() {
     let t = region(&ix, &IDENTITY, &tri);
     assert!(t.class.len() > 1200 && t.class.len() < 1450, "{}", t.class.len());
     // Thinned: about a tenth of the whole floor, spread over it.
-    let all = RegionQuery { min: [999.0, 1999.0, 99.0], max: [1021.0, 2021.0, 110.0], ring: None, most: 4_000 };
+    let all = RegionQuery { min: [999.0, 1999.0, 99.0], max: [1021.0, 2021.0, 110.0], ring: None, most: 4_000, setup: None };
     let a = region(&ix, &IDENTITY, &all);
     assert!(!a.complete);
     assert!(a.class.len() >= 4_000 && a.class.len() < 6_000, "{}", a.class.len());

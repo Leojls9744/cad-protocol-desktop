@@ -15,7 +15,9 @@
 //! worker threads, as the page's ALIGNSCANS and SCANCHECK do it. 1.23:
 //! netClassify(model, blob, points) runs Geo W. over a scan's points on a
 //! worker thread (every core), as the page runs it; netProgress() says how
-//! far the run in hand has come.
+//! far the run in hand has come. 1.24: E57 scans opened as LAS scans are
+//! (their setups kept; snap and region asked of one setup when given);
+//! writeE57 makes one (the app's own check).
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
 use cadp_engine_core::net;
@@ -50,6 +52,10 @@ pub struct ScanInfo {
     pub built: bool,
     pub ms: f64,
     pub has_rgb: bool,
+    /// Each point's setup kept (an E57 of several scans, 1.24).
+    pub setups: bool,
+    /// Made from an E57 file (1.24).
+    pub e57: bool,
     /// The file's own coordinates of its points' box.
     pub min: Vec<f64>,
     pub max: Vec<f64>,
@@ -81,6 +87,8 @@ impl Task for OpenTask {
             built: ix.built,
             ms: self.started.elapsed().as_secs_f64() * 1000.0,
             has_rgb: ix.has_rgb,
+            setups: ix.setups,
+            e57: ix.e57,
             min: lo.to_vec(),
             max: hi.to_vec(),
         };
@@ -126,6 +134,8 @@ pub struct SnapScan {
     pub affine: Vec<f64>,
     /// The classes a snap may take: 8 numbers of 32 bits (class c is bit c % 32 of number c / 32); all when missing.
     pub allow: Option<Vec<u32>>,
+    /// Only this setup's points (an E57 setup attached alone, 1.24).
+    pub setup: Option<u32>,
 }
 
 #[napi(object)]
@@ -215,7 +225,7 @@ pub fn snap(scans: Vec<SnapScan>, ask: SnapAsk) -> Result<SnapFound> {
         most: (ask.most as usize).min(20_000),
         front_most: (ask.front_most as usize).min(4_096),
     };
-    let held: Vec<(Arc<Index>, [f64; 12], [u64; 4])> = {
+    let held: Vec<(Arc<Index>, [f64; 12], [u64; 4], Option<u16>)> = {
         let open = INDEXES.lock().unwrap();
         let mut out = Vec::with_capacity(scans.len());
         for s in &scans {
@@ -236,13 +246,13 @@ pub fn snap(scans: Vec<SnapScan>, ask: SnapAsk) -> Result<SnapFound> {
                     *w = bits[k * 2] as u64 | (bits[k * 2 + 1] as u64) << 32;
                 }
             }
-            out.push((ix.clone(), a, allow));
+            out.push((ix.clone(), a, allow, s.setup.map(|k| k.min(u16::MAX as u32) as u16)));
         }
         out
     };
     let ins: Vec<ScanIn> = held
         .iter()
-        .map(|(ix, a, allow)| ScanIn { index: ix.as_ref(), affine: *a, allow: *allow })
+        .map(|(ix, a, allow, setup)| ScanIn { index: ix.as_ref(), affine: *a, allow: *allow, setup: *setup })
         .collect();
     let got = find(&ins, &q);
     Ok(SnapFound {
@@ -266,6 +276,8 @@ pub struct RegionFound {
     pub returns: Uint8Array,
     /// Bytes, three a point; none when the scan has no colour.
     pub rgb: Option<Uint8Array>,
+    /// Each point's setup (an E57 of several scans, 1.24); none otherwise.
+    pub setup_of: Option<Uint16Array>,
     /// Every point in the box came.
     pub complete: bool,
     pub tried: f64,
@@ -273,7 +285,7 @@ pub struct RegionFound {
     pub ms: f64,
 }
 
-/// A scan's points in a box of the drawing (and in a ring, flat x, y pairs, when given), about `most` at most.
+/// A scan's points in a box of the drawing (and in a ring, flat x, y pairs, when given), about `most` at most; one setup's alone when `setup` is given (1.24).
 #[napi]
 pub fn region(
     handle: u32,
@@ -282,6 +294,7 @@ pub fn region(
     max: Vec<f64>,
     ring: Option<Vec<f64>>,
     most: u32,
+    setup: Option<u32>,
 ) -> Result<RegionFound> {
     let started = Instant::now();
     let ix = INDEXES
@@ -307,6 +320,7 @@ pub fn region(
         max: three(&max, "max")?,
         ring,
         most: (most as usize).clamp(1, 50_000_000),
+        setup: setup.map(|k| k.min(u16::MAX as u32) as u16),
     };
     let got = within(&ix, &a, &q);
     Ok(RegionFound {
@@ -318,6 +332,7 @@ pub fn region(
         flags: Uint8Array::from(got.flags),
         returns: Uint8Array::from(got.returns),
         rgb: got.rgb.map(Uint8Array::from),
+        setup_of: got.setup.map(Uint16Array::from),
         complete: got.complete,
         tried: got.tried as f64,
         cells: got.cells as f64,
@@ -619,4 +634,97 @@ pub fn net_classify(model: NetModelJs, blob: Float32Array, points: NetPoints) ->
 #[napi]
 pub fn net_progress() -> f64 {
     net::progress()
+}
+
+#[napi(object)]
+pub struct E57WritePoint {
+    /// x, y, z (or range, azimuth, elevation), metres and radians.
+    pub at: Vec<f64>,
+    pub intensity: f64,
+    pub rgb: Option<Vec<u32>>,
+    pub invalid: Option<bool>,
+}
+
+#[napi(object)]
+pub struct E57WriteScan {
+    pub name: String,
+    /// w, x, y, z then x, y, z.
+    pub pose: Option<Vec<f64>>,
+    /// "float", "scaled" (a millimetre) or "spherical".
+    pub places: String,
+    pub points: Vec<E57WritePoint>,
+}
+
+/// An E57 file written (1.24: the app's own check of the engine, and checks against the page).
+#[napi]
+pub fn write_e57(path: String, scans: Vec<E57WriteScan>) -> Result<()> {
+    let list: Vec<cadp_engine_core::e57::WriteScan> = scans
+        .iter()
+        .map(|s| {
+            let pose = s.pose.as_ref().filter(|p| p.len() == 7).map(|p| ([p[0], p[1], p[2], p[3]], [p[4], p[5], p[6]]));
+            let colour = s.points.iter().any(|p| p.rgb.is_some());
+            cadp_engine_core::e57::WriteScan {
+                name: s.name.clone(),
+                pose,
+                places: match s.places.as_str() {
+                    "scaled" => cadp_engine_core::e57::Places::Scaled { scale: 0.001, min: -100_000_000, max: 100_000_000 },
+                    "spherical" => cadp_engine_core::e57::Places::Spherical,
+                    _ => cadp_engine_core::e57::Places::Float,
+                },
+                intensity_whole: Some(2047),
+                colour,
+                invalid_field: s.points.iter().any(|p| p.invalid.is_some()),
+                points: s
+                    .points
+                    .iter()
+                    .map(|p| cadp_engine_core::e57::WritePoint {
+                        at: [p.at.first().copied().unwrap_or(0.0), p.at.get(1).copied().unwrap_or(0.0), p.at.get(2).copied().unwrap_or(0.0)],
+                        intensity: p.intensity,
+                        rgb: p.rgb.as_ref().map(|c| [c.first().copied().unwrap_or(0).min(255) as u8, c.get(1).copied().unwrap_or(0).min(255) as u8, c.get(2).copied().unwrap_or(0).min(255) as u8]).unwrap_or([0, 0, 0]),
+                        invalid: p.invalid.unwrap_or(false),
+                    })
+                    .collect(),
+            }
+        })
+        .collect();
+    cadp_engine_core::e57::write(&PathBuf::from(path), &list).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+#[napi(object)]
+pub struct E57Read {
+    pub x: Float64Array,
+    pub y: Float64Array,
+    pub z: Float64Array,
+    pub intensity: Uint16Array,
+    pub rgb: Uint8Array,
+    pub setup: Uint16Array,
+    pub scans: u32,
+}
+
+/// Every valid point of an E57 file as the engine reads it, in the file's order (1.24: checks against the page's own reading).
+#[napi]
+pub fn read_e57_points(path: String) -> Result<E57Read> {
+    let (mut x, mut y, mut z, mut i, mut c, mut s) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let facts = cadp_engine_core::e57::read(
+        &PathBuf::from(path),
+        |p| {
+            x.push(p.x);
+            y.push(p.y);
+            z.push(p.z);
+            i.push(p.intensity);
+            c.extend_from_slice(&p.rgb);
+            s.push(p.setup);
+        },
+        |_, _| {},
+    )
+    .map_err(|e| Error::from_reason(e.to_string()))?;
+    Ok(E57Read {
+        x: Float64Array::from(x),
+        y: Float64Array::from(y),
+        z: Float64Array::from(z),
+        intensity: Uint16Array::from(i),
+        rgb: Uint8Array::from(c),
+        setup: Uint16Array::from(s),
+        scans: facts.scans as u32,
+    })
 }

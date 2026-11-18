@@ -18,6 +18,10 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cadp-engine-check-"));
   const scan = path.join(dir, "Check scan.las");
   fs.writeFileSync(scan, lasBytes(samplePoints([6000000, 2000000, 0]), { offset: [6000000, 2000000, 0] }));
+  // 1.24: an E57 of two setups.
+  const { e57Bytes, sampleSetups } = require("./e57-sample");
+  const e57 = path.join(dir, "Check scan.e57");
+  fs.writeFileSync(e57, e57Bytes(sampleSetups()));
   const result = { addon: addonPath(srcDir) };
   const once = async (round) => {
     const engine = createScanEngine({
@@ -33,6 +37,8 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     if (!engine.available) throw new Error(`The scan engine's add-on isn't in the app: ${result.addon}`);
     const reg = await engine.register(scan);
     if (!reg) throw new Error("The scan engine wouldn't take the check's scan.");
+    const regE57 = await engine.register(e57);
+    if (!regE57) throw new Error("The scan engine wouldn't take the check's E57 scan.");
     // This process plays the page: the port's other end kept here.
     const port = await new Promise((resolve, reject) => {
       const fake = { postMessage: (_channel, _msg, ports) => resolve(ports[0]) };
@@ -60,6 +66,12 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     const heardOpen = await waitFor((m) => ((m.kind === "opened" || m.kind === "failed") && m.token === reg.token) || said(m), 60000);
     const early = said(heardOpen);
     const opened = early ? { kind: early.state === "open" ? "opened" : "failed", info: early.info, error: early.error } : heardOpen;
+    const saidE57 = (m) =>
+      m.kind === "hello" ? (m.scans || []).find((x) => x.token === regE57.token && x.state !== "indexing") : null;
+    const heardE57 = await waitFor((m) => ((m.kind === "opened" || m.kind === "failed") && m.token === regE57.token) || saidE57(m), 60000);
+    const earlyE57 = saidE57(heardE57);
+    const openedE57 = earlyE57 ? { kind: earlyE57.state === "open" ? "opened" : "failed", info: earlyE57.info, error: earlyE57.error } : heardE57;
+    if (openedE57.kind === "failed") throw new Error(`The scan engine couldn't open the check's E57 scan: ${openedE57.error}`);
     if (opened.kind === "failed") throw new Error(`The scan engine couldn't open the check's scan: ${opened.error}`);
     const t0 = Date.now();
     port.postMessage({
@@ -106,6 +118,16 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     const net = netCheck();
     port.postMessage({ kind: "classify", id: 6, model: net.model, blob: net.blob, points: net.points });
     const classed = await waitFor((m) => m.kind === "classify" && m.id === 6, 60000);
+    // 1.24: the E57's second setup snapped to from above; the first setup's floor alone in a box.
+    port.postMessage({
+      kind: "snap",
+      id: 7,
+      scans: [{ token: regE57.token, affine: all }],
+      ask: { target: [1916032.5, 640002.5, 0], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.01, halfW: 200, halfH: 150, cursor: [200, 150], reach: 8, frontPx: 2, window: 0, most: 32, frontMost: 8 },
+    });
+    port.postMessage({ kind: "region", id: 8, token: regE57.token, affine: all, min: [1915990, 639990, -1000], max: [1916050, 640010, 1000], most: 1000000, setup: 0 });
+    const e57Snap = await waitFor((m) => m.kind === "snap" && m.id === 7, 20000);
+    const e57Box = await waitFor((m) => m.kind === "region" && m.id === 8, 20000);
     port.close();
     engine.stop();
     const front = answer.front || [];
@@ -124,6 +146,15 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
       align: { error: lined.error || null, east: lined.align ? lined.align[3] : null, refined: lined.refined === true },
       check: { error: measured.error || null, pairs: measured.pairs ? measured.pairs.length : 0, gaps: measured.gaps ? measured.gaps[0].length : 0 },
       classify: { error: classed.error || null, points: classed.cls ? classed.cls.length : 0, cubes: classed.cubes || 0 },
+      e57: {
+        count: openedE57.info ? openedE57.info.count : 0,
+        setups: openedE57.info ? openedE57.info.setups === true : false,
+        snapError: e57Snap.error || null,
+        frontZ: e57Snap.front && e57Snap.front.length >= 5 ? e57Snap.front[4] : null,
+        boxError: e57Box.error || null,
+        firstSetup: e57Box.count || 0,
+        setupOf: e57Box.setupOf ? [...new Set(e57Box.setupOf)] : null,
+      },
     };
   };
   try {

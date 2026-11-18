@@ -135,6 +135,10 @@ jobs:
           # 1.23: Geo W. over a floor's points.
           if ($e.first.classify.error) { throw "The scan engine's Geo W. failed: $($e.first.classify.error)" }
           if ($e.first.classify.points -ne 5000 -or $e.first.classify.cubes -lt 100) { throw "The scan engine's Geo W. classed $($e.first.classify.points) points in $($e.first.classify.cubes) cubes." }
+          # 1.24: an E57 of two setups: indexed, snapped to, one setup asked of alone.
+          if ($e.first.e57.count -ne 5202 -or -not $e.first.e57.setups) { throw "The scan engine read $($e.first.e57.count) points of the E57 (setups: $($e.first.e57.setups)), not 5202 in two setups." }
+          if ($e.first.e57.snapError -or [math]::Abs($e.first.e57.frontZ - 200) -gt 0.001) { throw "The scan engine's E57 snap found z $($e.first.e57.frontZ), not 200: $($e.first.e57.snapError)" }
+          if ($e.first.e57.boxError -or $e.first.e57.firstSetup -ne 2601 -or ($e.first.e57.setupOf -join ',') -ne '0') { throw "The scan engine's first E57 setup gave $($e.first.e57.firstSetup) points (setups $($e.first.e57.setupOf -join ',')), not 2601 of setup 0." }
           if (-not (Test-Path "dist/win-unpacked/resources/app.asar.unpacked/engine/dist/cadp-engine.node")) { throw "The scan engine's add-on isn't unpacked beside the app." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }

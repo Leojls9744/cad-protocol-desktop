@@ -21,8 +21,12 @@
 //!
 //! 1.23: Geo W., the trained scan classifier (`net`), on every core, as
 //! the page runs it.
+//!
+//! 1.24: E57 scans (`e57`), read as the page reads them, indexed as LAS
+//! scans are; each point's setup kept, a one-setup scan asked of alone.
 
 pub mod c2c;
+pub mod e57;
 pub mod index;
 pub mod net;
 pub mod region;

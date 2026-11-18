@@ -22,6 +22,8 @@ pub struct RegionQuery {
     pub ring: Option<Vec<[f64; 2]>>,
     /// About the most points to give.
     pub most: usize,
+    /// Only this setup's points (an E57 setup attached alone, 1.24).
+    pub setup: Option<u16>,
 }
 
 /// The points found, placed about the middle of what's found in the box (1.22; the box's middle before).
@@ -35,6 +37,8 @@ pub struct RegionPoints {
     pub returns: Vec<u8>,
     /// Bytes (16-bit colours by their high byte); none when the scan has no colour.
     pub rgb: Option<Vec<u8>>,
+    /// Each point's setup, when the scan keeps them (an E57 of several, 1.24).
+    pub setup: Option<Vec<u16>>,
     /// Every point in the box came (none left out for `most`).
     pub complete: bool,
     /// Points in the cells the box reaches, and cells.
@@ -103,6 +107,7 @@ struct Part {
     flags: Vec<u8>,
     returns: Vec<u8>,
     rgb: Vec<u8>,
+    setup: Vec<u16>,
 }
 
 /// The scan's points in a box of the drawing.
@@ -152,6 +157,7 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
     };
     let wide = ix.wide;
     let with_rgb = ix.has_rgb;
+    let with_setup = ix.setups;
     let take = |c: &usize| -> Part {
         let cell = ix.cell(*c);
         let n = if share >= 1.0 {
@@ -166,10 +172,14 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
             flags: Vec::with_capacity(n as usize),
             returns: Vec::with_capacity(n as usize),
             rgb: Vec::with_capacity(if with_rgb { n as usize * 3 } else { 0 }),
+            setup: Vec::with_capacity(if with_setup { n as usize } else { 0 }),
         };
         for i in cell.start..cell.start + n {
             let r = ix.point(i);
             if r.flags & WITHHELD != 0 {
+                continue;
+            }
+            if q.setup.is_some_and(|k| k != r.setup) {
                 continue;
             }
             let p = moved(affine, ix.file_xyz(r.x, r.y, r.z));
@@ -196,6 +206,9 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
                     part.rgb.push(((v >> s) as u32).min(255) as u8);
                 }
             }
+            if with_setup {
+                part.setup.push(r.setup);
+            }
         }
         part
     };
@@ -213,6 +226,7 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
         flags: Vec::with_capacity(n),
         returns: Vec::with_capacity(n),
         rgb: if with_rgb { Some(Vec::with_capacity(n * 3)) } else { None },
+        setup: if with_setup { Some(Vec::with_capacity(n)) } else { None },
         complete: share >= 1.0,
         tried: total,
         cells: hit.len() as u64,
@@ -225,6 +239,9 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
         out.returns.extend(p.returns);
         if let Some(rgb) = out.rgb.as_mut() {
             rgb.extend(p.rgb);
+        }
+        if let Some(setup) = out.setup.as_mut() {
+            setup.extend(p.setup);
         }
     }
     out

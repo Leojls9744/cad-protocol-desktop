@@ -287,3 +287,40 @@ test("1.23: a question's big lists put back together from their parts first", as
   assert.equal(page.out.filter((m) => m.kind === "part").length, 0);
   assert.equal(page.out.find((m) => m.kind === "check").id, 7);
 });
+
+test("1.24: the real engine opens an E57 of two setups, asked of each alone", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  const { e57Bytes, sampleSetups } = require("../src/e57-sample");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cadp-engine-e57-"));
+  const scan = path.join(dir, "site.e57");
+  fs.writeFileSync(scan, e57Bytes(sampleSetups()));
+  const parent = new EventEmitter();
+  createHost({ engine, parentPort: parent });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  parent.emit("message", { data: { kind: "open", token: "e", path: scan, cacheDir: path.join(dir, "cache") } });
+  for (let i = 0; i < 500 && !page.out.some((m) => m.kind === "opened" || m.kind === "failed"); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const opened = page.out.find((m) => m.kind === "opened");
+  assert.ok(opened, JSON.stringify(page.out.at(-1)));
+  assert.equal(opened.info.count, 5202);
+  assert.equal(opened.info.setups, true);
+  assert.equal(opened.info.e57, true);
+  const all = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
+  const box = { min: [1915990, 639990, -1000], max: [1916050, 640010, 1000], most: 100000 };
+  page.emit("message", { data: { kind: "region", id: 1, token: "e", affine: all, ...box } });
+  page.emit("message", { data: { kind: "region", id: 2, token: "e", affine: all, ...box, setup: 1 } });
+  const [every, second] = page.out.filter((m) => m.kind === "region");
+  assert.equal(every.count, 5202);
+  assert.ok(every.setupOf instanceof Uint16Array);
+  assert.deepEqual([...new Set(every.setupOf)].sort(), [0, 1]);
+  assert.equal(second.count, 2601);
+  assert.ok([...second.setupOf].every((k) => k === 1));
+  // Snapped to from above over the second setup: its floor, at 200; the first alone: nothing there.
+  const ask = { target: [1916032.5, 640002.5, 0], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.01, halfW: 200, halfH: 150, cursor: [200, 150], reach: 8, frontPx: 2, window: 0, most: 32, frontMost: 8 };
+  page.emit("message", { data: { kind: "snap", id: 3, scans: [{ token: "e", affine: all }], ask } });
+  page.emit("message", { data: { kind: "snap", id: 4, scans: [{ token: "e", affine: all, setup: 0 }], ask } });
+  const [both, first] = page.out.filter((m) => m.kind === "snap");
+  assert.ok(Math.abs(both.front[4] - 200) < 1e-3, String(both.front[4]));
+  assert.equal(first.front.length, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

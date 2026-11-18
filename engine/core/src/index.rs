@@ -14,13 +14,17 @@
 //!   numbers (i32), intensity (u16), class (u8), flags (u8: synthetic 1,
 //!   key-point 2, withheld 4, overlap 8), returns (u8: the return number in
 //!   the low 4 bits, the pulse's number of returns in the high 4), a spare
-//!   byte, then red, green and blue (u16 each). Within a cell the points
+//!   byte (1.24: an E57 point's setup, its low 8 bits; the high 4 in the
+//!   flags' high nibble), then red, green and blue (u16 each). Within a cell the points
 //!   are shuffled (1.20), so any first part of a cell is an even sample of
 //!   it: a view that wants fewer takes the same first share of each cell.
 //!
 //! Made in two passes: the file read once (LAZ on every core), each point
 //! counted to its cell and written in turn to a scratch file; then the
-//! scratch read back in order and each point put in its cell's place.
+//! scratch read back in order and each point put in its cell's place. An
+//! E57 file (1.24, e57.rs) has no bounds ahead, so its scratch is read once
+//! more between, to count its cells. The head's flags: colour 1, 16-bit
+//! colour 2, setups 4 (an E57 of several), E57 8.
 
 use crate::fx::FxMap;
 use memmap2::{Mmap, MmapMut};
@@ -121,9 +125,12 @@ pub struct PointRec {
     pub z: i32,
     pub intensity: u16,
     pub class: u8,
+    /// Synthetic 1, key-point 2, withheld 4, overlap 8.
     pub flags: u8,
     pub returns: u8,
     pub rgb: [u16; 3],
+    /// An E57 point's setup (its scan's place in the file, 1.24); 0 for LAS.
+    pub setup: u16,
 }
 
 /// A scan's index, open (read-only, mapped).
@@ -138,6 +145,10 @@ pub struct Index {
     pub has_rgb: bool,
     /// Colours of 16 bits (any channel past 255): read as bytes by their high byte.
     pub wide: bool,
+    /// Each point's setup is kept (an E57 of several scans, 1.24).
+    pub setups: bool,
+    /// Made from an E57 file (1.24).
+    pub e57: bool,
     pub source_size: u64,
     pub source_mtime: u64,
     pub cells: usize,
@@ -211,6 +222,8 @@ impl Index {
             max: i3(172),
             has_rgb: u32_at(&map, 12) & 1 == 1,
             wide: u32_at(&map, 12) & 2 == 2,
+            setups: u32_at(&map, 12) & 4 == 4,
+            e57: u32_at(&map, 12) & 8 == 8,
             source_size: u64_at(&map, 16),
             source_mtime: u64_at(&map, 24),
             cells,
@@ -249,17 +262,7 @@ impl Index {
     #[inline]
     pub fn point(&self, i: u64) -> PointRec {
         let at = self.points_at + i as usize * RECORD;
-        let b = &self.map[at..at + RECORD];
-        PointRec {
-            x: i32_at(b, 0),
-            y: i32_at(b, 4),
-            z: i32_at(b, 8),
-            intensity: u16_at(b, 12),
-            class: b[14],
-            flags: b[15],
-            returns: b[16],
-            rgb: [u16_at(b, 18), u16_at(b, 20), u16_at(b, 22)],
-        }
+        decode(&self.map[at..at + RECORD])
     }
 
     /// A point's place in the file's own coordinates.
@@ -355,14 +358,15 @@ fn encode(out: &mut [u8], p: &PointRec) {
     out[8..12].copy_from_slice(&p.z.to_le_bytes());
     out[12..14].copy_from_slice(&p.intensity.to_le_bytes());
     out[14] = p.class;
-    out[15] = p.flags;
+    out[15] = (p.flags & 15) | (((p.setup >> 8) & 15) as u8) << 4;
     out[16] = p.returns;
-    out[17] = 0;
+    out[17] = (p.setup & 255) as u8;
     out[18..20].copy_from_slice(&p.rgb[0].to_le_bytes());
     out[20..22].copy_from_slice(&p.rgb[1].to_le_bytes());
     out[22..24].copy_from_slice(&p.rgb[2].to_le_bytes());
 }
 
+#[inline]
 fn decode(b: &[u8]) -> PointRec {
     PointRec {
         x: i32_at(b, 0),
@@ -370,9 +374,10 @@ fn decode(b: &[u8]) -> PointRec {
         z: i32_at(b, 8),
         intensity: u16_at(b, 12),
         class: b[14],
-        flags: b[15],
+        flags: b[15] & 15,
         returns: b[16],
         rgb: [u16_at(b, 18), u16_at(b, 20), u16_at(b, 22)],
+        setup: b[17] as u16 | ((b[15] >> 4) as u16) << 8,
     }
 }
 
@@ -381,8 +386,12 @@ fn whole(v: f64, offset: f64, scale: f64) -> i32 {
     w.clamp(i32::MIN as f64, i32::MAX as f64) as i32
 }
 
-/// The scan file's points into a new index file at `path`.
+/// The scan file's points into a new index file at `path` (an E57 file by its name, else LAS or LAZ).
 pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress) -> Result<(), IndexError> {
+    let e57 = src.extension().map(|e| e.to_string_lossy().eq_ignore_ascii_case("e57")).unwrap_or(false);
+    if e57 {
+        return build_e57(src, path, size, mtime, progress);
+    }
     let mut reader = las::Reader::from_path(src)?;
     let header = reader.header().clone();
     let t = header.transforms();
@@ -396,25 +405,8 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
     let has_rgb = header.point_format().has_color;
     let lo = [bounds.min.x, bounds.min.y, bounds.min.z];
     let hi = [bounds.max.x, bounds.max.y, bounds.max.z];
-    let mut origin = [0i64; 3];
-    let mut extent = [1i64; 3];
-    for a in 0..3 {
-        let l = if lo[a].is_finite() { lo[a] } else { offset[a] };
-        let h = if hi[a].is_finite() && hi[a] >= l { hi[a] } else { l };
-        origin[a] = whole(l, offset[a], scale[a]) as i64;
-        extent[a] = (whole(h, offset[a], scale[a]) as i64 - origin[a]).max(1);
-    }
     // Cells of about TARGET points, the points taken as lying on surfaces.
-    let area = ((hi[0] - lo[0]) * (hi[1] - lo[1])).abs();
-    let area = if area.is_finite() && area > 0.0 { area } else { 1.0 };
-    let side = (area * TARGET / expect as f64).sqrt();
-    let mut cell = [1i64; 3];
-    for a in 0..3 {
-        let c = (side / scale[a]).ceil();
-        let c = if c.is_finite() && c >= 1.0 { c as i64 } else { 1 };
-        // At most a million cells each way.
-        cell[a] = c.max(extent[a] / 1_000_000 + 1);
-    }
+    let (origin, cell) = cells_for(lo, hi, expect, offset, scale);
 
     // Pass 1: each point counted to its cell and written to the scratch file.
     let scratch = path.with_extension("scratch");
@@ -444,6 +436,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
                         | (p.is_overlap as u8) << 3,
                     returns: (p.return_number & 15) | (p.number_of_returns & 15) << 4,
                     rgb: p.color.map(|c| [c.red, c.green, c.blue]).unwrap_or([0, 0, 0]),
+                    setup: 0,
                 };
                 let key = key_of(cell_of([r.x, r.y, r.z], origin, cell));
                 let acc = cells.entry(key).or_insert(Acc {
@@ -467,6 +460,160 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         }
         out.flush()?;
     }
+    let head = Head {
+        scale,
+        offset,
+        origin,
+        cell,
+        flags: (has_rgb as u32) | (wide as u32) << 1,
+        point_format: header.point_format().to_u8().unwrap_or(0),
+        size,
+        mtime,
+    };
+    lay_out(path, &scratch, total, &cells, &head, progress)
+}
+
+/// What the index's head says of the scan, and how its cells are laid.
+struct Head {
+    scale: [f64; 3],
+    offset: [f64; 3],
+    origin: [i64; 3],
+    cell: [i64; 3],
+    flags: u32,
+    point_format: u8,
+    size: u64,
+    mtime: u64,
+}
+
+/// The cells' sizes for points from `lo` to `hi` (the file's whole numbers), about `expect` of them.
+fn cells_for(lo: [f64; 3], hi: [f64; 3], expect: u64, offset: [f64; 3], scale: [f64; 3]) -> ([i64; 3], [i64; 3]) {
+    let mut origin = [0i64; 3];
+    let mut extent = [1i64; 3];
+    for a in 0..3 {
+        let l = if lo[a].is_finite() { lo[a] } else { offset[a] };
+        let h = if hi[a].is_finite() && hi[a] >= l { hi[a] } else { l };
+        origin[a] = whole(l, offset[a], scale[a]) as i64;
+        extent[a] = (whole(h, offset[a], scale[a]) as i64 - origin[a]).max(1);
+    }
+    let area = ((hi[0] - lo[0]) * (hi[1] - lo[1])).abs();
+    let area = if area.is_finite() && area > 0.0 { area } else { 1.0 };
+    let side = (area * TARGET / expect.max(1) as f64).sqrt();
+    let mut cell = [1i64; 3];
+    for a in 0..3 {
+        let c = (side / scale[a]).ceil();
+        let c = if c.is_finite() && c >= 1.0 { c as i64 } else { 1 };
+        cell[a] = c.max(extent[a] / 1_000_000 + 1);
+    }
+    (origin, cell)
+}
+
+/// The E57 grid: a tenth of a millimetre.
+const E57_SCALE: f64 = 0.0001;
+
+/// An E57 file's points into a new index file at `path` (1.24): read once
+/// to the scratch (their bounds found as they come), the scratch read once
+/// to count each cell, then laid out as a LAS file's.
+fn build_e57(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress) -> Result<(), IndexError> {
+    let scratch = path.with_extension("scratch");
+    let scale = [E57_SCALE; 3];
+    let mut offset: Option<[f64; 3]> = None;
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    let mut total: u64 = 0;
+    let facts;
+    {
+        let mut out = BufWriter::with_capacity(8 << 20, File::create(&scratch)?);
+        let mut rec = [0u8; RECORD];
+        let mut failed: Option<std::io::Error> = None;
+        facts = crate::e57::read(
+            src,
+            |p| {
+                if failed.is_some() {
+                    return;
+                }
+                // The grid from the first point, in whole metres: ±214 km round it.
+                let o = *offset.get_or_insert([p.x.round(), p.y.round(), p.z.round()]);
+                let r = PointRec {
+                    x: whole(p.x, o[0], scale[0]),
+                    y: whole(p.y, o[1], scale[1]),
+                    z: whole(p.z, o[2], scale[2]),
+                    intensity: p.intensity,
+                    class: 1,
+                    flags: 0,
+                    returns: 0,
+                    rgb: [p.rgb[0] as u16, p.rgb[1] as u16, p.rgb[2] as u16],
+                    setup: p.setup,
+                };
+                for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[a] = lo[a].min(v);
+                    hi[a] = hi[a].max(v);
+                }
+                encode(&mut rec, &r);
+                if let Err(e) = out.write_all(&rec) {
+                    failed = Some(e);
+                }
+                total += 1;
+            },
+            |done, all| progress.set(0.5 * (done as f64 / all.max(1) as f64).min(1.0)),
+        );
+        if let Some(e) = failed {
+            let _ = fs::remove_file(&scratch);
+            return Err(e.into());
+        }
+        out.flush()?;
+    }
+    let facts = match facts {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = fs::remove_file(&scratch);
+            return Err(IndexError::Bad(e.to_string()));
+        }
+    };
+    if total == 0 {
+        let _ = fs::remove_file(&scratch);
+        return Err(IndexError::Bad("The E57 scan has no valid points.".into()));
+    }
+    let offset = offset.unwrap_or([0.0; 3]);
+    let (origin, cell) = cells_for(lo, hi, total, offset, scale);
+    // Each cell counted from the scratch.
+    let mut cells: FxMap<u64, Acc> = FxMap::default();
+    {
+        let mut input = BufReader::with_capacity(8 << 20, File::open(&scratch)?);
+        let mut buf = vec![0u8; CHUNK as usize * RECORD];
+        let mut done: u64 = 0;
+        while done < total {
+            let n = ((total - done).min(CHUNK)) as usize;
+            let bytes = &mut buf[..n * RECORD];
+            input.read_exact(bytes)?;
+            for r in bytes.chunks_exact(RECORD) {
+                let p = decode(r);
+                let key = key_of(cell_of([p.x, p.y, p.z], origin, cell));
+                let acc = cells.entry(key).or_insert(Acc { count: 0, min: [i32::MAX; 3], max: [i32::MIN; 3] });
+                acc.count += 1;
+                for (a, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    acc.min[a] = acc.min[a].min(v);
+                    acc.max[a] = acc.max[a].max(v);
+                }
+            }
+            done += n as u64;
+            progress.set(0.5 + 0.1 * (done as f64 / total as f64));
+        }
+    }
+    let head = Head {
+        scale,
+        offset,
+        origin,
+        cell,
+        flags: (facts.colour as u32) | ((facts.scans > 1) as u32) << 2 | 1 << 3,
+        point_format: 0,
+        size,
+        mtime,
+    };
+    lay_out(path, &scratch, total, &cells, &head, progress)
+}
+
+/// The index file laid out from the scratch: its head and tables, each point in its cell's place, each cell shuffled.
+fn lay_out(path: &Path, scratch: &Path, total: u64, cells: &FxMap<u64, Acc>, head: &Head, progress: &Progress) -> Result<(), IndexError> {
+    let Head { scale, offset, origin, cell, flags, point_format, size, mtime } = *head;
 
     // The cells in order, each its place; the blocks over them.
     let mut order: Vec<(u64, u64, Acc)> = cells.iter().map(|(k, a)| (order_of(*k), *k, *a)).collect();
@@ -525,7 +672,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         h.fill(0);
         h[0..8].copy_from_slice(MAGIC);
         h[8..12].copy_from_slice(&VERSION.to_le_bytes());
-        h[12..16].copy_from_slice(&((has_rgb as u32) | (wide as u32) << 1).to_le_bytes());
+        h[12..16].copy_from_slice(&flags.to_le_bytes());
         h[16..24].copy_from_slice(&size.to_le_bytes());
         h[24..32].copy_from_slice(&mtime.to_le_bytes());
         h[32..40].copy_from_slice(&total.to_le_bytes());
@@ -542,7 +689,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         h[136..144].copy_from_slice(&(cells_at as u64).to_le_bytes());
         h[144..152].copy_from_slice(&(blocks_at as u64).to_le_bytes());
         h[152..160].copy_from_slice(&(points_at as u64).to_le_bytes());
-        h[184] = header.point_format().to_u8().unwrap_or(0);
+        h[184] = point_format;
     }
     for (k, (_, _, acc)) in order.iter().enumerate() {
         let at = cells_at + k * CELL;
@@ -571,7 +718,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
     // Pass 2: the scratch read back in order, each point to its cell's place.
     {
         let mut fill: Vec<u64> = vec![0; order.len()];
-        let mut input = BufReader::with_capacity(8 << 20, File::open(&scratch)?);
+        let mut input = BufReader::with_capacity(8 << 20, File::open(scratch)?);
         let mut buf = vec![0u8; CHUNK as usize * RECORD];
         let mut done: u64 = 0;
         while done < total {
@@ -618,7 +765,7 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
     map.flush_range(0, HEAD)?;
     drop(map);
     drop(file);
-    let _ = fs::remove_file(&scratch);
+    let _ = fs::remove_file(scratch);
     if path.exists() {
         let _ = fs::remove_file(path);
     }

@@ -61,7 +61,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         stop(timer);
         s.handle = info.handle;
         s.fraction = 1;
-        s.info = { count: info.count, built: info.built, ms: info.ms, hasRgb: info.hasRgb, min: info.min, max: info.max };
+        s.info = { count: info.count, built: info.built, ms: info.ms, hasRgb: info.hasRgb, setups: info.setups === true, e57: info.e57 === true, min: info.min, max: info.max };
         log(`scan engine: ${info.built ? "indexed" : "opened"} ${info.count} points in ${Math.round(info.ms)} ms`);
         tell({ kind: "opened", token, info: s.info });
       },
@@ -141,7 +141,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         return;
       }
       try {
-        const got = engine.region(held.handle, msg.affine, msg.min, msg.max, msg.ring ?? undefined, msg.most);
+        const setup = Number.isInteger(msg.setup) && msg.setup >= 0 ? msg.setup : undefined;
+        const got = engine.region(held.handle, msg.affine, msg.min, msg.max, msg.ring ?? undefined, msg.most, setup);
         port.postMessage({
           kind: "region",
           id,
@@ -153,6 +154,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           flags: got.flags,
           returns: got.returns,
           rgb: got.rgb ?? null,
+          setupOf: got.setupOf ?? null,
           complete: got.complete,
           tried: got.tried,
           ms: got.ms,
@@ -236,7 +238,14 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     for (const s of list) {
       const held = s && scans.get(s.token);
       if (!held || held.handle == null) missing.push(s && s.token);
-      else asked.push({ handle: held.handle, affine: s.affine, allow: s.allow ?? undefined });
+      else
+        asked.push({
+          handle: held.handle,
+          affine: s.affine,
+          allow: s.allow ?? undefined,
+          // 1.24: an E57 setup attached alone.
+          setup: Number.isInteger(s.setup) && s.setup >= 0 ? s.setup : undefined,
+        });
     }
     if (missing.length || !asked.length) {
       port.postMessage({ kind: "snap", id, missing });

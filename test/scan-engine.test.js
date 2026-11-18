@@ -47,12 +47,15 @@ function engine(over = {}) {
   return { e, hosts, timers };
 }
 
-test("only an absolute .las or .laz path is a scan the engine opens", () => {
+test("only an absolute .las, .laz or .e57 path is a scan the engine opens", () => {
   assert.equal(scanPathOk("C:\\Jobs\\scan.las"), true);
   assert.equal(scanPathOk("C:\\Jobs\\scan.LAZ"), true);
   assert.equal(scanPathOk("/home/leo/scan.las"), true);
   assert.equal(scanPathOk("scan.las"), false);
-  assert.equal(scanPathOk("C:\\Jobs\\scan.e57"), false);
+  // 1.24: E57 too.
+  assert.equal(scanPathOk("C:\\Jobs\\scan.e57"), true);
+  assert.equal(scanPathOk("C:\\Jobs\\scan.E57"), true);
+  assert.equal(scanPathOk("C:\\Jobs\\scan.e58"), false);
   assert.equal(scanPathOk("C:\\Jobs\\drawing.cadp"), false);
   assert.equal(scanPathOk("C:\\Jobs\\scan.las\u0000.exe"), false);
   assert.equal(scanPathOk(""), false);

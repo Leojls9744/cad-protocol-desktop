@@ -12,15 +12,15 @@
 //
 // The page never names a path. It hands over a scan file the person chose
 // (an Open window, a dropped file, a linked folder's file): the preload
-// asks Electron where that file is, and only a .las or .laz file that's
+// asks Electron where that file is, and only a .las, .laz or .e57 file that's
 // there is opened, read only, given a token. The page then talks to the
 // engine's process over a port of its own, by tokens.
 
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-/** The scan files the engine reads (E57 still goes through the page). */
-const SCAN_EXTENSIONS = [".las", ".laz"];
+/** The scan files the engine reads (1.24: E57 too). */
+const SCAN_EXTENSIONS = [".las", ".laz", ".e57"];
 /** At most this many scans opened in a session. */
 const MOST_SCANS = 500;
 /** After a crash, the engine's process is started again at most this many times. */
