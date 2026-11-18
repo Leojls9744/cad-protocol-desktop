@@ -73,25 +73,6 @@ test("the offline page shows at once", () => {
   assert.deepEqual(shown, ["failed"]);
 });
 
-test("while an update's looked for, the app waits behind the card, then shows if it's ready", () => {
-  const { launch, shown, closed } = launchWith();
-  launch.hold();
-  launch.loading();
-  launch.loaded();
-  launch.ready();
-  assert.deepEqual(shown, []);
-  assert.equal(closed(), 0);
-  launch.release();
-  assert.deepEqual(shown, ["ready"]);
-  // Released before it was ready: it shows when it is.
-  const later = launchWith();
-  later.launch.hold();
-  later.launch.release();
-  assert.deepEqual(later.shown, []);
-  later.launch.ready();
-  assert.deepEqual(later.shown, ["ready"]);
-});
-
 class FakeWindow extends EventEmitter {
   static made = [];
   constructor(options) {

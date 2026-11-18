@@ -8,9 +8,8 @@
 //   said so), or
 // - the page couldn't load (the offline page shows), or
 // - MAX_MS has passed since it started loading, whatever else.
-// While an update's being looked for or installed (`hold`), the app loads
-// behind the card but isn't shown; `release` shows it if it's ready by
-// then (or as soon as it is).
+// (1.26: no longer held back while an update's looked for; updates come in
+// behind the open app.)
 // Plain data and timers, so it's tested without Electron.
 
 const FALLBACK_MS = 4000;
@@ -27,14 +26,13 @@ function createLaunch({
   let shown = false;
   let fallback = null;
   let max = null;
-  let held = false;
   // Signed out (1.10): the sign-in card's up; the window waits for it.
   let gated = false;
   let wanted = null;
 
   function reveal(why) {
     if (shown) return;
-    if (held || gated) {
+    if (gated) {
       if (!wanted) wanted = why;
       return;
     }
@@ -66,15 +64,6 @@ function createLaunch({
     failed() {
       reveal("failed");
     },
-    /** An update's being looked for or installed: not shown meanwhile. */
-    hold() {
-      held = true;
-    },
-    /** No update to install after all: shown, now or once it's ready. */
-    release() {
-      held = false;
-      if (wanted && !gated) reveal(wanted);
-    },
     /** Signed out: the sign-in card shows; the window waits (1.10). */
     gate() {
       gated = true;
@@ -82,7 +71,7 @@ function createLaunch({
     /** Signed in, or Spatial Canvas offline chosen: the window may show. */
     ungate() {
       gated = false;
-      if (wanted && !held) reveal(wanted);
+      if (wanted) reveal(wanted);
     },
     get shown() {
       return shown;

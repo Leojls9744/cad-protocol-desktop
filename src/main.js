@@ -15,6 +15,8 @@
 //   Save, Cancel), the window waiting while you answer;
 // - 1.3: it updates itself (auto-update.js): checked on the update screen at
 //   launch and every 6 hours, installed without running the installer again.
+//   1.26: checked behind the open app; the badge's Restart to update installs
+//   it with the installer's progress shown.
 // - 1.4: a purple title bar on Windows 11 instead of the accent color
 //   (title-bar.js).
 // - 1.5: drawings saved to and opened from this computer, online or offline
@@ -82,7 +84,7 @@ const { createBrowserDrive } = require("./browser-drive");
 const { createSignInCard } = require("./signin-card");
 const { createSignInWindows, signInWindowOptions } = require("./signin-window");
 const { createCloseGuard } = require("./close-guard");
-const { EVERY_MS, createAutoUpdate, launchDecision } = require("./auto-update");
+const { EVERY_MS, createAutoUpdate } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles, launchedPaths } = require("./local-files");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
@@ -333,11 +335,16 @@ function start() {
       updater: autoUpdater,
       current: app.getVersion(),
       log,
-      onChange: (state) => updateScreen(state),
+      onChange: (state) => tellUpdate(state),
     });
   }
-  /** While the update screen shows: what it says. */
-  let onUpdateScreen = false;
+  /** The app's window told each change of the update's state (1.26): the badge's progress as it comes. */
+  function tellUpdate(state) {
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return;
+    const contents = win.webContents;
+    if (config.isAppUrl(contents.getURL())) contents.send("cadp:update:state", state);
+  }
   /** The small card window, and when the app's window shows (1.7). */
   let splash = null;
   let launch = null;
@@ -512,7 +519,7 @@ function start() {
       },
     });
     splash.open();
-    splash.say(updates ? "Checking for updates…" : "Starting CAD Protocol…", "CAD Protocol for Windows");
+    splash.say("Starting CAD Protocol…", "CAD Protocol for Windows");
     mainWindow = createMainWindow();
     void openApp(mainWindow);
 
@@ -660,6 +667,11 @@ function start() {
     ipcMain.handle("cadp:update:restart", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return updates ? updates.installNow() : false;
+    });
+    // 1.26: checked now, from the badge (a newer one starts downloading).
+    ipcMain.handle("cadp:update:check", async (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return updates ? updates.check() : { current: app.getVersion(), latest: null, newer: false, url: "", phase: "off", percent: 0 };
     });
     // Drawings on this computer (1.5): Windows' Save and Open windows, shown
     // over the window that asked.
@@ -887,31 +899,18 @@ function start() {
   }
 
   /**
-   * The launch: the update screen checks first (at most 8 s). A new version
-   * is installed there and the app restarts into it; otherwise the app opens.
-   * Then a check every 6 hours: downloaded quietly, the badge says so, and it
-   * installs on the next restart or close.
+   * The launch (1.26; Leo, 2026-11-17 20:32: it had updated as it started,
+   * closed and installed out of sight): the app opens at once; updates are
+   * looked for behind it, now and every 6 hours, and downloaded quietly. The
+   * badge shows the download's progress, then Restart to update (the
+   * installer's progress shown, the app opened again); closing installs one
+   * that's ready.
    */
-  async function openApp(win) {
-    if (!updates) {
-      loadApp(win);
-      return;
-    }
-    // The app loads behind the card while the update's looked for (1.7),
-    // shown only once there's none to install.
-    onUpdateScreen = true;
-    if (launch) launch.hold();
+  function openApp(win) {
     loadApp(win);
-    if (splash) splash.say("Starting CAD Protocol…", "Checking for updates");
+    if (!updates) return;
+    void updates.check();
     setInterval(() => void updates.check(), EVERY_MS).unref();
-    const decision = await launchDecision(updates);
-    if (decision === "update") {
-      updateScreen(updates.state);
-      return; // installNow() runs when the download is in (updateScreen)
-    }
-    onUpdateScreen = false;
-    if (splash) splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
-    if (launch) launch.release();
   }
 
   /** The app loads out of sight; the card says so (1.7). */
@@ -920,24 +919,6 @@ function start() {
     if (splash) splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
     if (launch) launch.loading();
     win.loadURL(config.APP_URL);
-  }
-
-  function updateScreen(state) {
-    if (!onUpdateScreen || !splash) return;
-    const say = (title, detail, percent, note) => splash.say(title, detail, percent, note);
-    if (state.phase === "downloading") {
-      say(`Updating to ${state.latest || "the newest version"}…`, `You have ${state.current}. CAD Protocol restarts by itself when it's done.`, state.percent, "");
-    } else if (state.phase === "ready") {
-      say("Installing the update…", "CAD Protocol restarts by itself in a moment.", 100, "");
-      setTimeout(() => updates.installNow(), 800);
-    } else if (state.phase === "error" && state.newer) {
-      // The update couldn't finish: open the app as it is; the next launch tries again.
-      say("Couldn't update right now", "Opening CAD Protocol; it tries again next time.", null, "");
-      setTimeout(() => {
-        onUpdateScreen = false;
-        if (launch) launch.release();
-      }, 1500);
-    }
   }
 
   /** The saved size and place, if it still fits on one of the screens. */

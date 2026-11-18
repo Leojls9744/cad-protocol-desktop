@@ -8,10 +8,16 @@
 // electron-updater reads latest.yml from the newest published GitHub release
 // (drafts never), downloads the new installer and checks it against the
 // SHA-512 there, and runs it silently.
-// - At launch the update screen checks first; if there's a new version it
-//   installs it and restarts before the app opens.
-// - While open it checks every 6 hours, downloads quietly, and the app's
-//   badge says "Update ready – Restart"; closing installs it anyway.
+// - 1.3–1.25: at launch the update screen checked first and installed a new
+//   version before the app opened. 1.26: the app opens at once; it checks
+//   then and every 6 hours, downloads quietly, and the app's badge says
+//   "Restart to update"; closing installs it anyway.
+// - 1.26 (Leo, 2026-11-17 20:32: "can the user just click update at the top
+//   bar ... from their is has a progress bar and does the whole update"):
+//   the badge checks when clicked, shows the download's progress as it
+//   comes (told, not asked every half minute), and the install shows the
+//   installer's own progress window before the app opens again (it had run
+//   unseen, the app gone for a while).
 //
 // This file keeps the state the app's badge shows; main.js wires it up.
 
@@ -68,31 +74,13 @@ function createAutoUpdate({ updater, current, log = () => {}, onChange = () => {
       }
       return state;
     },
-    /** Restart into the new version, once it's downloaded. */
+    /** Restart into the new version, once it's downloaded: the installer's progress shown (1.26), then the app again. */
     installNow() {
       if (state.phase !== "ready") return false;
-      updater.quitAndInstall(true, true);
+      updater.quitAndInstall(false, true);
       return true;
     },
   };
 }
 
-/**
- * The launch: check first, for at most `waitMs`. Resolves "update" when a new
- * version is on its way (the update screen stays and installs it), else "app".
- */
-function launchDecision(auto, waitMs = 8000) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const done = (answer) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve(answer);
-    };
-    const timer = setTimeout(() => done(auto.state.phase === "downloading" || auto.state.phase === "ready" ? "update" : "app"), waitMs);
-    auto.check().then((state) => done(state.phase === "downloading" || state.phase === "ready" ? "update" : "app"));
-  });
-}
-
-module.exports = { createAutoUpdate, launchDecision, RELEASES_URL, EVERY_MS };
+module.exports = { createAutoUpdate, RELEASES_URL, EVERY_MS };

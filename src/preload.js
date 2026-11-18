@@ -63,11 +63,20 @@ if (appOrigin && window.location.origin === appOrigin) {
     /**
      * 1.3: { current, latest, newer, url, phase, percent }, phase being
      * checking, up-to-date, downloading, ready, error or off; restart() puts
-     * a downloaded update in now.
+     * a downloaded update in now. 1.26: check() looks now (resolving with
+     * the state); onChange(fn) hears each change as it comes (the
+     * download's percent too), and returns how to stop hearing it.
      */
     update: {
       get: () => ipcRenderer.invoke("cadp:update:get"),
       restart: () => ipcRenderer.invoke("cadp:update:restart"),
+      check: () => ipcRenderer.invoke("cadp:update:check"),
+      onChange: (fn) => {
+        if (typeof fn !== "function") return () => {};
+        const heard = (_event, state) => fn(state);
+        ipcRenderer.on("cadp:update:state", heard);
+        return () => ipcRenderer.removeListener("cadp:update:state", heard);
+      },
     },
     /** 1.7: the app's first screen is up, so its window shows (the start-up card goes). */
     ready: () => ipcRenderer.send("cadp:ready"),
