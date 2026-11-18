@@ -87,6 +87,7 @@ const { createCloseGuard } = require("./close-guard");
 const { EVERY_MS, createAutoUpdate } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles, launchedPaths } = require("./local-files");
+const { createJobsFile, createPlaces, fillInput, opensOutside } = require("./places");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
 const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
@@ -384,6 +385,9 @@ function start() {
     documentsDir: documentsFolder(),
     log,
   });
+  // 1.27: files remembered by their place on this computer, and the jobs.
+  const places = createPlaces({ file: path.join(data, "places.json"), fs, dialog, log });
+  const jobs = createJobsFile({ file: path.join(data, "jobs.json"), fs, log });
   /** Double-clicked drawings queued for the page; how many wait. */
   const launchFiles = (argv) => {
     const found = launchedPaths(argv);
@@ -692,6 +696,84 @@ function start() {
     ipcMain.handle("cadp:files:open", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return files.open(windowOf(event));
+    });
+    // 1.27: files remembered by their place (places.js). `add` takes the
+    // paths the preload read from the page's own File objects (picked or
+    // dropped there); the rest take ids.
+    ipcMain.handle("cadp:places:add", (event, paths) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.add(paths);
+    });
+    ipcMain.handle("cadp:places:pick", (event, options) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.pick(windowOf(event), options && typeof options === "object" ? options : {});
+    });
+    ipcMain.handle("cadp:places:stat", (event, ids) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.stat(ids);
+    });
+    ipcMain.handle("cadp:places:save-as", (event, options, bytes) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.saveAs(windowOf(event), options, bytes);
+    });
+    ipcMain.handle("cadp:places:find", (event, id) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.find(windowOf(event), id);
+    });
+    ipcMain.handle("cadp:places:forget", (event, ids) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return places.forget(ids);
+    });
+    // The files put into the page's own <input data-cadp-fill> (a drop's
+    // files, read from disk); which ids were and which weren't there.
+    ipcMain.handle("cadp:places:fill", async (event, marker, ids) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const { filled, missing } = places.pathsOf(ids);
+      await fillInput(event.sender.debugger, marker, filled.map((f) => f.path));
+      return { filled: filled.map((f) => f.id), missing };
+    });
+    // A drawing opened or saved here, kept by its place.
+    ipcMain.handle("cadp:places:of-token", (event, token) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const file = files.pathOf(token);
+      return file ? places.add([file])[0] || null : null;
+    });
+    // A drawing kept by its place opened (a token like Open's), or why not.
+    ipcMain.handle("cadp:places:open-drawing", async (event, id) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const file = places.pathOf(id);
+      if (!file) return { error: "That drawing isn't kept on this computer." };
+      try {
+        const opened = await files.openPath(file);
+        if (!opened) return { error: "That isn't a CAD Protocol drawing." };
+        places.add([file]);
+        return opened;
+      } catch (err) {
+        return { error: err && err.code === "ENOENT" ? "The file isn't there any more." : "It couldn't be read." };
+      }
+    });
+    // Shown in File Explorer, or opened in its own program (a PDF, a
+    // picture, a sheet or a document only: opensOutside).
+    ipcMain.handle("cadp:places:reveal", (event, id) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const file = places.pathOf(id);
+      if (!file || !fs.existsSync(file)) return false;
+      shell.showItemInFolder(file);
+      return true;
+    });
+    ipcMain.handle("cadp:places:open-outside", async (event, id) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const file = places.pathOf(id);
+      if (!file || !opensOutside(file) || !fs.existsSync(file)) return false;
+      return (await shell.openPath(file)) === "";
+    });
+    ipcMain.handle("cadp:jobs:load", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return jobs.load();
+    });
+    ipcMain.handle("cadp:jobs:save", (event, text) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return jobs.save(text);
     });
     // 1.11: double-clicked drawings, read and handed over once each.
     ipcMain.handle("cadp:files:launched-count", (event) => {

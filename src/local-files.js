@@ -20,6 +20,9 @@
 // 1.12: a drawing's DWG copy beside it (the app's Companion .dwg). The page
 // still names no path: it gives a drawing's token, and only the file of the
 // same name ending .dwg in the same folder is written.
+//
+// 1.27: a drawing opened again by its place (places.js: one the person
+// opened, saved or picked before), and a token's file, to keep it by its place.
 
 const path = require("node:path");
 const { hasAppLink } = require("./app-link");
@@ -185,6 +188,22 @@ function createLocalFiles({ dialog, fs, documentsDir, log = () => {} }) {
       const opened = await read(file);
       log(`opened a drawing from ${file}`);
       return opened;
+    },
+
+    /**
+     * 1.27: a drawing kept by its place (places.js) opened: read and given a
+     * token like Open's, so Save writes it again; null when it isn't a .cadp.
+     */
+    async openPath(file) {
+      if (typeof file !== "string" || !file.toLowerCase().endsWith(EXTENSION)) return null;
+      const opened = await read(file);
+      log(`opened a drawing kept by its place: ${file}`);
+      return opened;
+    },
+
+    /** 1.27: the file a token names (to keep it by its place), or null. */
+    pathOf(token) {
+      return (typeof token === "string" && known.get(token)) || null;
     },
 
     /**

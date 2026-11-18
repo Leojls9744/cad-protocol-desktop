@@ -106,6 +106,49 @@ if (appOrigin && window.location.origin === appOrigin) {
       },
     },
     /**
+     * 1.27: files remembered by their place on this computer (src/places.js).
+     * add(files) keeps File objects the page has (picked or dropped there),
+     * by their paths, read here; pick({ kind, multiple, title }) shows
+     * Windows' Open window; stat(ids) says whether each is still there;
+     * fill(marker, ids) puts the files into the page's
+     * <input type=file data-cadp-fill=marker>, as a drop would; find(id)
+     * looks for a moved one; ofToken(token) keeps a drawing opened or saved
+     * here; openDrawing(id) opens a kept drawing as Open does; reveal(id)
+     * shows it in File Explorer; openOutside(id) opens a PDF, picture,
+     * sheet or document in its own program; saveAs({ name, beside, kind },
+     * bytes) saves a file the page made (a cut scan) in Windows' Save
+     * window, beside a place, and keeps it.
+     */
+    places: {
+      add: (list) => {
+        const paths = [];
+        for (const f of Array.isArray(list) ? list : []) {
+          try {
+            const where = webUtils.getPathForFile(f);
+            if (where) paths.push(where);
+          } catch {
+            // Not a file from this computer.
+          }
+        }
+        return paths.length ? ipcRenderer.invoke("cadp:places:add", paths) : Promise.resolve([]);
+      },
+      pick: (options) => ipcRenderer.invoke("cadp:places:pick", options),
+      stat: (ids) => ipcRenderer.invoke("cadp:places:stat", ids),
+      fill: (marker, ids) => ipcRenderer.invoke("cadp:places:fill", marker, ids),
+      find: (id) => ipcRenderer.invoke("cadp:places:find", id),
+      forget: (ids) => ipcRenderer.invoke("cadp:places:forget", ids),
+      ofToken: (token) => ipcRenderer.invoke("cadp:places:of-token", token),
+      openDrawing: (id) => ipcRenderer.invoke("cadp:places:open-drawing", id),
+      saveAs: (options, bytes) => ipcRenderer.invoke("cadp:places:save-as", options, bytes),
+      reveal: (id) => ipcRenderer.invoke("cadp:places:reveal", id),
+      openOutside: (id) => ipcRenderer.invoke("cadp:places:open-outside", id),
+    },
+    /** 1.27: the jobs (JSON text), kept in this computer's app data. */
+    jobs: {
+      load: () => ipcRenderer.invoke("cadp:jobs:load"),
+      save: (text) => ipcRenderer.invoke("cadp:jobs:save", text),
+    },
+    /**
      * 1.19: the scan engine (src/scan-engine.js), for LAS, LAZ and E57 scans
      * read from this computer. register(file) hands it a scan file the
      * person chose (a File from an Open window, a drop or a linked folder):
