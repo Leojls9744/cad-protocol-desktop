@@ -127,3 +127,77 @@ test("the real engine: a scan written here, indexed, asked of, opened again", { 
   assert.equal(again.built, false);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("1.22: cloud to cloud asked with the page's points, answered by id when the engine's done, errors said", async () => {
+  const parent = new EventEmitter();
+  let finish;
+  const engine = {
+    ...fakeEngine(),
+    alignClouds: (fixed, moving, ask) =>
+      new Promise((resolve) => {
+        finish = () => resolve({ align: ask.fit, before: { rms: 1 }, after: { rms: 0.1 }, iterations: 4, refined: true, ms: 2, sizes: [fixed.length, moving.length] });
+      }),
+    checkClouds: (scans) => {
+      if (scans.length < 2) throw new Error("two scans or more");
+      return Promise.resolve({ samples: scans, pairs: [], gaps: scans.map((s) => new Float32Array(s.length / 3)), ms: 1 });
+    },
+  };
+  createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  const fit = [1, 0, 0, 0.5, 0, 1, 0, 0, 0, 0, 1, 0];
+  page.emit("message", { data: { kind: "align", id: 9, fixed: new Float64Array(6), moving: new Float64Array(3), ask: { fit, fitRms: 0.02, level: false, refine: true, foot: 1, tolerance: 0.05 } } });
+  // A snap's answered while the align works.
+  parent.emit("message", { data: { kind: "open", token: "t", path: "C:\\a.las", cacheDir: "C:\\c" } });
+  await tick();
+  page.emit("message", { data: { kind: "snap", id: 10, scans: [{ token: "t", affine: [1] }], ask: {} } });
+  assert.equal(page.out.at(-1).id, 10);
+  assert.equal(page.out.some((m) => m.kind === "align"), false);
+  finish();
+  await tick();
+  const a = page.out.find((m) => m.kind === "align");
+  assert.equal(a.id, 9);
+  assert.deepEqual(a.align, fit);
+  assert.deepEqual(a.sizes, [6, 3]);
+  page.emit("message", { data: { kind: "check", id: 11, scans: [new Float64Array(3)], foot: 1, tolerance: 0.05 } });
+  await tick();
+  assert.deepEqual(page.out.find((m) => m.kind === "check"), { kind: "check", id: 11, error: "two scans or more" });
+  page.emit("message", { data: { kind: "check", id: 12, scans: [new Float64Array(3), new Float64Array(6)], foot: 1, tolerance: 0.05 } });
+  await tick();
+  const c = page.out.filter((m) => m.kind === "check")[1];
+  assert.equal(c.id, 12);
+  assert.deepEqual(c.gaps.map((g) => g.length), [1, 2]);
+});
+
+test("1.22: the real engine lines up two scans and measures them", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  let seed = 9;
+  const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const scene = (n) => {
+    const out = new Float64Array(n * 3);
+    for (let i = 0; i < n; i += 1) {
+      const k = rnd();
+      const p = k < 0.5 ? [rnd() * 30, rnd() * 30, 100] : k < 0.75 ? [0, rnd() * 30, 100 + rnd() * 8] : [rnd() * 30, 0, 100 + rnd() * 8];
+      for (let a = 0; a < 3; a += 1) out[i * 3 + a] = p[a] + (rnd() - 0.5) * 0.01;
+    }
+    return out;
+  };
+  const fixed = scene(30000);
+  const moving = scene(30000).map((v, i) => v + (i % 3 === 0 ? -0.2 : 0));
+  const parent = new EventEmitter();
+  createHost({ engine, parentPort: parent });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  page.emit("message", { data: { kind: "align", id: 1, fixed, moving, ask: { fit: [1, 0, 0, 0.17, 0, 1, 0, 0, 0, 0, 1, 0], fitRms: 0.03, level: true, refine: true, foot: 1, tolerance: 0.05 } } });
+  page.emit("message", { data: { kind: "check", id: 2, scans: [fixed, fixed], foot: 1, tolerance: 0.05 } });
+  for (let i = 0; i < 1000 && page.out.filter((m) => m.kind === "align" || m.kind === "check").length < 2; i += 1) await new Promise((r) => setTimeout(r, 10));
+  const a = page.out.find((m) => m.kind === "align");
+  assert.equal(a.error, undefined);
+  assert.ok(Math.abs(a.align[3] - 0.2) < 0.005, String(a.align[3]));
+  assert.ok(a.after.rms < a.before.rms);
+  const c = page.out.find((m) => m.kind === "check");
+  assert.equal(c.error, undefined);
+  assert.equal(c.pairs.length, 1);
+  assert.ok(c.pairs[0].ab instanceof Float32Array);
+  assert.equal(c.gaps[0].length, 30000);
+});

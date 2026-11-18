@@ -8,8 +8,13 @@
 //! cursor, nearness to the eye, class, flags, intensity, returns, red,
 //! green, blue); closeScan(handle) lets one go. 1.20: region(handle,
 //! affine, min, max, ring, most) gives a scan's points in a box of the
-//! drawing, evenly thinned to about `most`.
+//! drawing, evenly thinned to about `most`. 1.22: alignClouds(fixed,
+//! moving, ask) lines one scan's points up on another's after the picked
+//! points' fit (point to plane), and checkClouds(scans, foot, tolerance)
+//! measures each pair that meets both ways and each scan's points' gaps, on
+//! worker threads, as the page's ALIGNSCANS and SCANCHECK do it.
 
+use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
 use cadp_engine_core::{
     build_or_open, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
 };
@@ -314,4 +319,169 @@ pub fn region(
         cells: got.cells as f64,
         ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+#[napi(object)]
+pub struct Gaps {
+    pub checked: f64,
+    pub overlap: f64,
+    pub mean: f64,
+    pub rms: f64,
+    pub p95: f64,
+    pub within: f64,
+    pub alone: f64,
+}
+
+fn gaps_js(g: &GapStats) -> Gaps {
+    Gaps { checked: g.checked, overlap: g.overlap, mean: g.mean, rms: g.rms, p95: g.p95, within: g.within, alone: g.alone }
+}
+
+#[napi(object)]
+pub struct AlignAsk {
+    /// The picked points' fit (12 numbers) and how far its pairs missed (root mean square).
+    pub fit: Vec<f64>,
+    pub fit_rms: f64,
+    /// About the vertical only (a levelled scanner).
+    pub level: bool,
+    /// Cloud to cloud after the fit.
+    pub refine: bool,
+    /// One foot in the drawing's units.
+    pub foot: f64,
+    pub tolerance: f64,
+}
+
+#[napi(object)]
+pub struct AlignFound {
+    pub align: Vec<f64>,
+    pub before: Gaps,
+    pub after: Gaps,
+    pub iterations: u32,
+    /// The direction the overlap barely holds: its ratio and which unknown (none when it holds them all).
+    pub degenerate_ratio: Option<f64>,
+    pub degenerate_along: Option<u32>,
+    pub refined: bool,
+    pub ms: f64,
+}
+
+pub struct AlignTask {
+    fixed: Vec<f64>,
+    moving: Vec<f64>,
+    opts: AlignOpts,
+    started: Instant,
+}
+
+impl Task for AlignTask {
+    type Output = c2c::Aligned;
+    type JsValue = AlignFound;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(c2c::align(&self.fixed, &self.moving, &self.opts))
+    }
+
+    fn resolve(&mut self, _env: Env, a: Self::Output) -> Result<Self::JsValue> {
+        Ok(AlignFound {
+            align: a.align.to_vec(),
+            before: gaps_js(&a.before),
+            after: gaps_js(&a.after),
+            iterations: a.iterations as u32,
+            degenerate_ratio: a.degenerate.map(|d| d.0),
+            degenerate_along: a.degenerate.map(|d| d.1 as u32),
+            refined: a.refined,
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+fn points(v: &[f64], what: &str) -> Result<Vec<f64>> {
+    if v.len() % 3 != 0 || v.iter().any(|x| !x.is_finite()) {
+        return Err(Error::from_reason(format!("{what} needs x, y, z numbers")));
+    }
+    Ok(v.to_vec())
+}
+
+/// The moving scan's points lined up on the held one's, after the picked points' fit, on a worker thread.
+#[napi]
+pub fn align_clouds(fixed: Float64Array, moving: Float64Array, ask: AlignAsk) -> Result<AsyncTask<AlignTask>> {
+    if ask.fit.len() != 12 || ask.fit.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("fit needs twelve numbers"));
+    }
+    if !(ask.foot > 0.0) || !(ask.tolerance > 0.0) || !ask.fit_rms.is_finite() {
+        return Err(Error::from_reason("foot and tolerance need to be above zero"));
+    }
+    let mut fit = [0.0; 12];
+    fit.copy_from_slice(&ask.fit);
+    Ok(AsyncTask::new(AlignTask {
+        fixed: points(&fixed, "fixed")?,
+        moving: points(&moving, "moving")?,
+        opts: AlignOpts { fit, fit_rms: ask.fit_rms, level: ask.level, refine: ask.refine, foot: ask.foot, tolerance: ask.tolerance },
+        started: Instant::now(),
+    }))
+}
+
+#[napi(object)]
+pub struct PairFound {
+    pub i: u32,
+    pub j: u32,
+    /// The first's sample against the second's surfaces, and each one's surface's facing; then the other way.
+    pub ab: Float32Array,
+    pub fab: Uint8Array,
+    pub ba: Float32Array,
+    pub fba: Uint8Array,
+}
+
+#[napi(object)]
+pub struct CheckFound {
+    pub samples: Vec<Float64Array>,
+    pub pairs: Vec<PairFound>,
+    pub gaps: Vec<Float32Array>,
+    pub ms: f64,
+}
+
+pub struct CheckTask {
+    scans: Vec<Vec<f64>>,
+    foot: f64,
+    tolerance: f64,
+    started: Instant,
+}
+
+impl Task for CheckTask {
+    type Output = c2c::Checked;
+    type JsValue = CheckFound;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(c2c::check(&self.scans, self.foot, self.tolerance))
+    }
+
+    fn resolve(&mut self, _env: Env, c: Self::Output) -> Result<Self::JsValue> {
+        Ok(CheckFound {
+            samples: c.samples.into_iter().map(Float64Array::from).collect(),
+            pairs: c
+                .pairs
+                .into_iter()
+                .map(|p| PairFound {
+                    i: p.i as u32,
+                    j: p.j as u32,
+                    ab: Float32Array::from(p.ab),
+                    fab: Uint8Array::from(p.fab),
+                    ba: Float32Array::from(p.ba),
+                    fba: Uint8Array::from(p.fba),
+                })
+                .collect(),
+            gaps: c.gaps.into_iter().map(Float32Array::from).collect(),
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+/// Every pair of the scans that meet measured both ways, and each scan's points' gaps, on a worker thread.
+#[napi]
+pub fn check_clouds(scans: Vec<Float64Array>, foot: f64, tolerance: f64) -> Result<AsyncTask<CheckTask>> {
+    if !(foot > 0.0) || !(tolerance > 0.0) {
+        return Err(Error::from_reason("foot and tolerance need to be above zero"));
+    }
+    let mut list = Vec::with_capacity(scans.len());
+    for (k, s) in scans.iter().enumerate() {
+        list.push(points(s, &format!("scan {k}"))?);
+    }
+    Ok(AsyncTask::new(CheckTask { scans: list, foot, tolerance, started: Instant::now() }))
 }

@@ -7,8 +7,9 @@
 // From the app's main process it hears which scan files the page was given
 // (each a token and its path: `open`), and gets a port for each page that
 // asks (`page`). Over a page's port it says what's open (`hello`, `opened`,
-// `progress`, `failed`) and answers what's asked (`snap`, `status`). A page
-// names scans only by their tokens: it never gives a path.
+// `progress`, `failed`) and answers what's asked (`snap`, `status`; 1.20
+// `region`; 1.22 `align` and `check`, cloud to cloud on points the page
+// gives). A page names scans only by their tokens: it never gives a path.
 
 /** How often a scan being indexed says how far it's come. */
 const PROGRESS_MS = 300;
@@ -114,6 +115,37 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       } catch (err) {
         port.postMessage({ kind: "region", id, error: String((err && err.message) || err) });
       }
+      return;
+    }
+    // 1.22: cloud to cloud (ALIGNSCANS, SCANCHECK), the page's points given;
+    // worked on the engine's own threads, so snaps are answered meanwhile.
+    if (msg.kind === "align" || msg.kind === "check") {
+      const kind = msg.kind;
+      let work;
+      try {
+        work =
+          kind === "align"
+            ? engine.alignClouds(msg.fixed, msg.moving, msg.ask)
+            : engine.checkClouds(Array.isArray(msg.scans) ? msg.scans : [], msg.foot, msg.tolerance);
+      } catch (err) {
+        work = Promise.reject(err);
+      }
+      Promise.resolve(work).then(
+        (got) => {
+          try {
+            port.postMessage({ kind, id, ...got });
+          } catch {
+            ports.delete(port);
+          }
+        },
+        (err) => {
+          try {
+            port.postMessage({ kind, id, error: String((err && err.message) || err) });
+          } catch {
+            ports.delete(port);
+          }
+        },
+      );
       return;
     }
     if (msg.kind !== "snap") return;

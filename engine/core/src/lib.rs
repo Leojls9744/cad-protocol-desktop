@@ -15,7 +15,11 @@
 //! 1.20: a scan's points in a box of the drawing (`region`), for the
 //! views' close-ups and the commands' regions, evenly thinned to what's
 //! asked.
+//!
+//! 1.22: cloud to cloud (`c2c`): one scan lined up on another (point to
+//! plane), and how far apart they are, on every core, as the page does it.
 
+pub mod c2c;
 pub mod index;
 pub mod region;
 pub mod snap;

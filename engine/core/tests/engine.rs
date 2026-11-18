@@ -286,10 +286,18 @@ fn gives_a_box_s_points_evenly_thinned() {
     assert_eq!(r.class.len(), 51 * 51);
     assert!(r.class.iter().all(|c| *c == 2));
     assert_eq!(r.xyz.len(), r.class.len() * 3);
-    // Placed about the box's middle.
+    // Placed about the middle of what's found.
     let o = r.origin;
     let x0 = (0..r.class.len()).map(|i| r.xyz[i * 3] as f64 + o[0]).fold(f64::MAX, f64::min);
     assert!((x0 - 1000.0).abs() < 1e-3, "{x0}");
+    // 1.22: a level slice's box is endless across; its points are still placed close by.
+    let band = RegionQuery { min: [-1e12, -1e12, 99.9], max: [1e12, 1e12, 100.05], ring: None, most: 10_000_000 };
+    let b = region(&ix, &IDENTITY, &band);
+    assert!(b.class.len() > 51 * 51, "{}", b.class.len());
+    assert!(b.origin[0] > 990.0 && b.origin[0] < 1030.0 && b.origin[1] > 1990.0 && b.origin[1] < 2030.0, "{:?}", b.origin);
+    assert!(b.xyz.iter().all(|v| v.abs() < 50.0));
+    let back = (0..b.class.len()).map(|i| b.xyz[i * 3] as f64 + b.origin[0]).fold(f64::MAX, f64::min);
+    assert!((back - 1000.0).abs() < 1e-3, "{back}");
     assert_eq!(r.rgb.as_ref().map(|v| v.len()), Some(r.class.len() * 3));
     assert_eq!(&r.rgb.as_ref().unwrap()[0..3], &[1, 2, 3]);
     // A ring: a triangle in plan, about half the square.

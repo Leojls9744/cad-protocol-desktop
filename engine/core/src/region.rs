@@ -1,5 +1,6 @@
 //! A scan's points in a box of the drawing (desktop 1.20): what a view
-//! close up draws, and what a command asks for (every point in a region).
+//! close up draws, and what a command asks for (every point in a region);
+//! 1.22: a slice's (a level band, or a strip along a line, its ring).
 //!
 //! The cells the box reaches (their boxes moved into the drawing) are
 //! found by the blocks first. If they hold more than `most`, the same
@@ -23,7 +24,7 @@ pub struct RegionQuery {
     pub most: usize,
 }
 
-/// The points found, placed about the box's middle.
+/// The points found, placed about the middle of what's found in the box (1.22; the box's middle before).
 #[derive(Clone, Debug, Default)]
 pub struct RegionPoints {
     pub origin: [f64; 3],
@@ -106,13 +107,12 @@ struct Part {
 
 /// The scan's points in a box of the drawing.
 pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
-    let origin = [
-        (q.min[0] + q.max[0]) / 2.0,
-        (q.min[1] + q.max[1]) / 2.0,
-        (q.min[2] + q.max[2]) / 2.0,
-    ];
     let mut hit: Vec<usize> = Vec::new();
     let mut total: u64 = 0;
+    // What's found, in the box: its middle is where the points are placed
+    // from (1.22: a slice's box is endless across, and its middle far from
+    // the points would leave them few places in 32 bits).
+    let (mut found_lo, mut found_hi) = ([f64::MAX; 3], [f64::MIN; 3]);
     for b in 0..ix.blocks {
         let blk = ix.block(b);
         let (lo, hi) = moved_box(ix, affine, blk.min, blk.max);
@@ -125,9 +125,26 @@ pub fn region(ix: &Index, affine: &[f64; 12], q: &RegionQuery) -> RegionPoints {
             if overlaps(lo, hi, q) {
                 hit.push(c);
                 total += cell.count as u64;
+                for k in 0..3 {
+                    found_lo[k] = found_lo[k].min(lo[k].max(q.min[k]));
+                    found_hi[k] = found_hi[k].max(hi[k].min(q.max[k]));
+                }
             }
         }
     }
+    let origin = if hit.is_empty() {
+        [
+            (q.min[0] + q.max[0]) / 2.0,
+            (q.min[1] + q.max[1]) / 2.0,
+            (q.min[2] + q.max[2]) / 2.0,
+        ]
+    } else {
+        [
+            (found_lo[0] + found_hi[0]) / 2.0,
+            (found_lo[1] + found_hi[1]) / 2.0,
+            (found_lo[2] + found_hi[2]) / 2.0,
+        ]
+    };
     let share = if total as usize > q.most && total > 0 {
         q.most as f64 / total as f64
     } else {
