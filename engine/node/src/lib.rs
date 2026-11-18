@@ -12,9 +12,13 @@
 //! moving, ask) lines one scan's points up on another's after the picked
 //! points' fit (point to plane), and checkClouds(scans, foot, tolerance)
 //! measures each pair that meets both ways and each scan's points' gaps, on
-//! worker threads, as the page's ALIGNSCANS and SCANCHECK do it.
+//! worker threads, as the page's ALIGNSCANS and SCANCHECK do it. 1.23:
+//! netClassify(model, blob, points) runs Geo W. over a scan's points on a
+//! worker thread (every core), as the page runs it; netProgress() says how
+//! far the run in hand has come.
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
+use cadp_engine_core::net;
 use cadp_engine_core::{
     build_or_open, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
 };
@@ -484,4 +488,135 @@ pub fn check_clouds(scans: Vec<Float64Array>, foot: f64, tolerance: f64) -> Resu
         list.push(points(s, &format!("scan {k}"))?);
     }
     Ok(AsyncTask::new(CheckTask { scans: list, foot, tolerance, started: Instant::now() }))
+}
+
+#[napi(object)]
+pub struct NetLayerJs {
+    pub inp: u32,
+    pub out: u32,
+    pub w: u32,
+    pub b: u32,
+}
+
+#[napi(object)]
+pub struct NetModelJs {
+    pub branches: Vec<Vec<NetLayerJs>>,
+    pub head: Vec<NetLayerJs>,
+    pub classes: u32,
+    /// A version 2 model's extra inputs, by name (returns, normal, curvature, break).
+    pub inputs: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NetPoints {
+    /// Feet.
+    pub px: Float64Array,
+    pub py: Float64Array,
+    pub pz: Float64Array,
+    /// 0 to 1.
+    pub intensity: Float64Array,
+    /// 0 to 255, three a point; none without colour.
+    pub rgb: Option<Float64Array>,
+    pub return_number: Option<Uint8Array>,
+    pub number_of_returns: Option<Uint8Array>,
+}
+
+#[napi(object)]
+pub struct NetFound {
+    pub cls: Uint8Array,
+    pub sure: Float32Array,
+    pub cubes: u32,
+    pub ms: f64,
+}
+
+pub struct NetTask {
+    model: net::Model,
+    px: Vec<f64>,
+    py: Vec<f64>,
+    pz: Vec<f64>,
+    intensity: Vec<f64>,
+    rgb: Option<Vec<f64>>,
+    returns: Option<(Vec<u8>, Vec<u8>)>,
+    started: Instant,
+}
+
+impl Task for NetTask {
+    type Output = (Vec<u8>, Vec<f32>, usize);
+    type JsValue = NetFound;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let returns = self.returns.as_ref().map(|(n, o)| net::Returns { number: n, of: o });
+        Ok(net::classify(&self.model, &self.px, &self.py, &self.pz, &self.intensity, self.rgb.as_deref(), returns, 2048))
+    }
+
+    fn resolve(&mut self, _env: Env, (cls, sure, cubes): Self::Output) -> Result<Self::JsValue> {
+        Ok(NetFound {
+            cls: Uint8Array::from(cls),
+            sure: Float32Array::from(sure),
+            cubes: cubes as u32,
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+fn layers(list: &[NetLayerJs]) -> Vec<net::Layer> {
+    list.iter().map(|l| net::Layer { inp: l.inp as usize, out: l.out as usize, w: l.w as usize, b: l.b as usize }).collect()
+}
+
+/// Geo W. run over a scan's points on a worker thread (every core): each point's class and how sure.
+#[napi]
+pub fn net_classify(model: NetModelJs, blob: Float32Array, points: NetPoints) -> Result<AsyncTask<NetTask>> {
+    if model.branches.len() != 3 {
+        return Err(Error::from_reason("the model needs three branches"));
+    }
+    for name in &model.inputs {
+        if !["returns", "normal", "curvature", "break"].contains(&name.as_str()) {
+            return Err(Error::from_reason(format!("the model asks for an input the engine doesn't make: {name}")));
+        }
+    }
+    let has = |n: &str| model.inputs.iter().any(|i| i == n);
+    let m = net::Model {
+        branches: [layers(&model.branches[0]), layers(&model.branches[1]), layers(&model.branches[2])],
+        head: layers(&model.head),
+        classes: model.classes as usize,
+        returns: has("returns"),
+        normal: has("normal"),
+        curvature: has("curvature"),
+        brk: has("break"),
+        blob: blob.to_vec(),
+    };
+    m.check().map_err(Error::from_reason)?;
+    let n = points.px.len();
+    if points.py.len() != n || points.pz.len() != n || points.intensity.len() != n {
+        return Err(Error::from_reason("each point needs x, y, z and intensity"));
+    }
+    if points.px.iter().chain(points.py.iter()).chain(points.pz.iter()).any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("the points need finite places"));
+    }
+    let rgb = match &points.rgb {
+        Some(c) if c.len() == n * 3 => Some(c.to_vec()),
+        Some(_) => return Err(Error::from_reason("colour needs three numbers a point")),
+        None => None,
+    };
+    let returns = match (&points.return_number, &points.number_of_returns) {
+        (Some(a), Some(b)) if a.len() == n && b.len() == n => Some((a.to_vec(), b.to_vec())),
+        (None, None) => None,
+        _ => return Err(Error::from_reason("returns need two numbers a point")),
+    };
+    Ok(AsyncTask::new(NetTask {
+        model: m,
+        px: points.px.to_vec(),
+        py: points.py.to_vec(),
+        pz: points.pz.to_vec(),
+        intensity: points.intensity.to_vec(),
+        rgb,
+        returns,
+        started: Instant::now(),
+    }))
+}
+
+/// How far the classification in hand has come, 0 to 1.
+#[napi]
+pub fn net_progress() -> f64 {
+    net::progress()
 }

@@ -1,6 +1,6 @@
 [package]
 name = "cadp-engine-core"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "CAD Protocol's scan engine: LAS and LAZ files read from disk, every point indexed, the scan's points under the cursor found."

@@ -102,6 +102,10 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     port.postMessage({ kind: "check", id: 5, scans: [pair.fixed, pair.fixed], foot: 1, tolerance: 0.05 });
     const lined = await waitFor((m) => m.kind === "align" && m.id === 4, 60000);
     const measured = await waitFor((m) => m.kind === "check" && m.id === 5, 60000);
+    // 1.23: Geo W.: a small model over a floor's points.
+    const net = netCheck();
+    port.postMessage({ kind: "classify", id: 6, model: net.model, blob: net.blob, points: net.points });
+    const classed = await waitFor((m) => m.kind === "classify" && m.id === 6, 60000);
     port.close();
     engine.stop();
     const front = answer.front || [];
@@ -119,6 +123,7 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
       thinned: { count: tenth.count, complete: tenth.complete },
       align: { error: lined.error || null, east: lined.align ? lined.align[3] : null, refined: lined.refined === true },
       check: { error: measured.error || null, pairs: measured.pairs ? measured.pairs.length : 0, gaps: measured.gaps ? measured.gaps[0].length : 0 },
+      classify: { error: classed.error || null, points: classed.cls ? classed.cls.length : 0, cubes: classed.cubes || 0 },
     };
   };
   try {
@@ -152,4 +157,22 @@ function c2cPair(n = 20000) {
   return { fixed: scene(0), moving: scene(0.2) };
 }
 
-module.exports = { checkEngine, c2cPair };
+/** A small Geo W. model (version 1, nine classes) and a floor's 5000 points (1.23's check). */
+function netCheck(n = 5000) {
+  let floats = 0;
+  const layer = (i, o) => {
+    const L = { inp: i, out: o, w: floats, b: floats + i * o };
+    floats += i * o + o;
+    return L;
+  };
+  const branches = [8, 4, 4].map((c) => [layer(c, 8), layer(8, 8)]);
+  const head = [layer(8 * 3 + 2, 8), layer(8, 9)];
+  const blob = new Float32Array(floats).map((_, i) => Math.sin(i) * 0.3);
+  const px = new Float64Array(n).map((_, i) => (i % 70) * 0.3);
+  const py = new Float64Array(n).map((_, i) => Math.floor(i / 70) * 0.3);
+  const pz = new Float64Array(n).map((_, i) => 100 + (i % 7) * 0.05);
+  const intensity = new Float64Array(n).fill(0.5);
+  return { model: { branches, head, classes: 9, inputs: [] }, blob, points: { px, py, pz, intensity } };
+}
+
+module.exports = { checkEngine, c2cPair, netCheck };

@@ -201,3 +201,89 @@ test("1.22: the real engine lines up two scans and measures them", { skip: !fs.e
   assert.ok(c.pairs[0].ab instanceof Float32Array);
   assert.equal(c.gaps[0].length, 30000);
 });
+
+test("1.23: Geo W. asked with the page's points and model, how far it's come said, answered by id", async () => {
+  const parent = new EventEmitter();
+  let finish;
+  let progress = 0;
+  const timers = [];
+  const engine = {
+    ...fakeEngine(),
+    netProgress: () => progress,
+    netClassify: (model, blob, points) =>
+      new Promise((resolve, reject) => {
+        if (model.classes < 1) reject(new Error("no classes"));
+        finish = () => resolve({ cls: new Uint8Array(points.px.length).fill(2), sure: new Float32Array(points.px.length).fill(0.9), cubes: 1, ms: 3 });
+      }),
+  };
+  createHost({ engine, parentPort: parent, every: (f) => (timers.push(f), timers.length), stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  const points = { px: new Float64Array(3), py: new Float64Array(3), pz: new Float64Array(3), intensity: new Float64Array(3) };
+  page.emit("message", { data: { kind: "classify", id: 5, model: { classes: 9 }, blob: new Float32Array(4), points } });
+  progress = 0.4;
+  timers.at(-1)();
+  assert.deepEqual(page.out.at(-1), { kind: "classify-progress", id: 5, done: 0.4 });
+  timers.at(-1)();
+  assert.equal(page.out.filter((m) => m.kind === "classify-progress").length, 1);
+  finish();
+  await tick();
+  const done = page.out.find((m) => m.kind === "classify");
+  assert.equal(done.id, 5);
+  assert.deepEqual([...done.cls], [2, 2, 2]);
+  page.emit("message", { data: { kind: "classify", id: 6, model: { classes: 0 }, blob: new Float32Array(4), points } });
+  await tick();
+  assert.deepEqual(page.out.filter((m) => m.kind === "classify")[1], { kind: "classify", id: 6, error: "no classes" });
+});
+
+test("1.23: the real engine runs a Geo W. model over points", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  // A version 1 model: two layers a branch, two in the head, nine classes; weights small and steady.
+  let floats = 0;
+  const layer = (i, o) => {
+    const L = { inp: i, out: o, w: floats, b: floats + i * o };
+    floats += i * o + o;
+    return L;
+  };
+  const branches = [8, 4, 4].map((c) => [layer(c, 8), layer(8, 8)]);
+  const head = [layer(8 * 3 + 2, 8), layer(8, 9)];
+  const blob = new Float32Array(floats).map((_, i) => Math.sin(i) * 0.3);
+  const n = 5000;
+  const px = new Float64Array(n).map((_, i) => (i % 70) * 0.3);
+  const py = new Float64Array(n).map((_, i) => Math.floor(i / 70) * 0.3);
+  const pz = new Float64Array(n).map((_, i) => 100 + (i % 7) * 0.05);
+  const intensity = new Float64Array(n).fill(0.5);
+  const parent = new EventEmitter();
+  createHost({ engine, parentPort: parent });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  page.emit("message", { data: { kind: "classify", id: 1, model: { branches, head, classes: 9, inputs: [] }, blob, points: { px, py, pz, intensity } } });
+  for (let i = 0; i < 1000 && !page.out.some((m) => m.kind === "classify"); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const r = page.out.find((m) => m.kind === "classify");
+  assert.equal(r.error, undefined);
+  assert.equal(r.cls.length, n);
+  assert.ok(r.cubes > 100 && r.cubes <= n, String(r.cubes));
+  assert.ok([...r.sure].every((v) => v > 0 && v <= 1));
+  assert.ok([...r.cls].every((c) => c < 9));
+});
+
+test("1.23: a question's big lists put back together from their parts first", async () => {
+  const parent = new EventEmitter();
+  let got;
+  const engine = { ...fakeEngine(), checkClouds: (scans, foot) => ((got = { scans, foot }), Promise.resolve({ samples: [], pairs: [], gaps: [], ms: 0 })) };
+  createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  const big = new Float64Array([1.5, 2.5, 3.5, 4.5]);
+  const bytes = new Uint8Array(big.buffer);
+  page.emit("message", { data: { kind: "part", id: 7, part: 0, at: 16, total: 32, bytes: bytes.slice(16) } });
+  page.emit("message", { data: { kind: "part", id: 7, part: 0, at: 0, total: 32, bytes: bytes.slice(0, 16) } });
+  page.emit("message", { data: { kind: "check", id: 7, scans: [{ __part: 0, type: "Float64Array", length: 4 }, new Float64Array([9])], foot: 1, tolerance: 0.05 } });
+  await tick();
+  assert.ok(got.scans[0] instanceof Float64Array);
+  assert.deepEqual([...got.scans[0]], [1.5, 2.5, 3.5, 4.5]);
+  assert.deepEqual([...got.scans[1]], [9]);
+  // Parts aren't questions: nothing said back for them.
+  assert.equal(page.out.filter((m) => m.kind === "part").length, 0);
+  assert.equal(page.out.find((m) => m.kind === "check").id, 7);
+});

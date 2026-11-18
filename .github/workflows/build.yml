@@ -132,6 +132,9 @@ jobs:
           if (-not $e.first.align.refined -or [math]::Abs($e.first.align.east - 0.2) -gt 0.005) { throw "The scan engine lined the scans up $($e.first.align.east) east, not 0.2." }
           if ($e.first.check.error) { throw "The scan engine's measuring failed: $($e.first.check.error)" }
           if ($e.first.check.pairs -ne 1 -or $e.first.check.gaps -ne 20000) { throw "The scan engine measured $($e.first.check.pairs) pairs and $($e.first.check.gaps) points." }
+          # 1.23: Geo W. over a floor's points.
+          if ($e.first.classify.error) { throw "The scan engine's Geo W. failed: $($e.first.classify.error)" }
+          if ($e.first.classify.points -ne 5000 -or $e.first.classify.cubes -lt 100) { throw "The scan engine's Geo W. classed $($e.first.classify.points) points in $($e.first.classify.cubes) cubes." }
           if (-not (Test-Path "dist/win-unpacked/resources/app.asar.unpacked/engine/dist/cadp-engine.node")) { throw "The scan engine's add-on isn't unpacked beside the app." }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }

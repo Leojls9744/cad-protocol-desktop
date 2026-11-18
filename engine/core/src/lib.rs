@@ -18,9 +18,13 @@
 //!
 //! 1.22: cloud to cloud (`c2c`): one scan lined up on another (point to
 //! plane), and how far apart they are, on every core, as the page does it.
+//!
+//! 1.23: Geo W., the trained scan classifier (`net`), on every core, as
+//! the page runs it.
 
 pub mod c2c;
 pub mod index;
+pub mod net;
 pub mod region;
 pub mod snap;
 

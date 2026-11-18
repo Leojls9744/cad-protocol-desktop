@@ -9,7 +9,7 @@
 // asks (`page`). Over a page's port it says what's open (`hello`, `opened`,
 // `progress`, `failed`) and answers what's asked (`snap`, `status`; 1.20
 // `region`; 1.22 `align` and `check`, cloud to cloud on points the page
-// gives). A page names scans only by their tokens: it never gives a path.
+// gives; 1.23 `classify`, Geo W. on points the page gives). A page names scans only by their tokens: it never gives a path.
 
 /** How often a scan being indexed says how far it's come. */
 const PROGRESS_MS = 300;
@@ -81,8 +81,53 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     if (s.handle != null) engine.closeScan(s.handle);
   }
 
-  function answer(port, msg) {
-    if (!msg || typeof msg !== "object") return;
+  /** A question's big lists as they come in parts (1.23), by port, then id. */
+  const partsOf = new WeakMap();
+
+  /** A part kept; a question's parts put back in their places. */
+  function gathered(port, msg) {
+    let held = partsOf.get(port);
+    if (!held) {
+      held = new Map();
+      partsOf.set(port, held);
+    }
+    if (msg.kind === "part") {
+      if (!(msg.bytes instanceof Uint8Array) || !(msg.total > 0)) return null;
+      let mine = held.get(msg.id);
+      if (!mine) {
+        mine = new Map();
+        held.set(msg.id, mine);
+      }
+      let buf = mine.get(msg.part);
+      if (!buf) {
+        buf = new Uint8Array(msg.total);
+        mine.set(msg.part, buf);
+      }
+      if (msg.at >= 0 && msg.at + msg.bytes.length <= buf.length) buf.set(msg.bytes, msg.at);
+      return null;
+    }
+    const mine = held.get(msg.id);
+    if (!mine) return msg;
+    held.delete(msg.id);
+    const KINDS = { Float64Array, Float32Array, Uint8Array, Uint16Array };
+    const put = (v) => {
+      if (v && typeof v === "object" && !ArrayBuffer.isView(v)) {
+        if (typeof v.__part === "number" && KINDS[v.type]) {
+          const buf = mine.get(v.__part);
+          return buf ? new KINDS[v.type](buf.buffer, 0, v.length) : v;
+        }
+        if (Array.isArray(v)) return v.map(put);
+        return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, put(x)]));
+      }
+      return v;
+    };
+    return put(msg);
+  }
+
+  function answer(port, raw) {
+    if (!raw || typeof raw !== "object") return;
+    const msg = gathered(port, raw);
+    if (!msg) return;
     const id = msg.id;
     if (msg.kind === "status") {
       port.postMessage({ kind: "status", id, scans: [...scans].map(([t, s]) => summary(t, s)) });
@@ -144,6 +189,42 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           } catch {
             ports.delete(port);
           }
+        },
+      );
+      return;
+    }
+    // 1.23: Geo W. over the page's points, on the engine's own threads; how
+    // far it's come said now and then (classify-progress).
+    if (msg.kind === "classify") {
+      let work;
+      try {
+        work = engine.netClassify(msg.model, msg.blob, msg.points);
+      } catch (err) {
+        work = Promise.reject(err);
+      }
+      const say = (m) => {
+        try {
+          port.postMessage(m);
+        } catch {
+          ports.delete(port);
+        }
+      };
+      let last = -1;
+      const timer = every(() => {
+        const done = typeof engine.netProgress === "function" ? engine.netProgress() : 0;
+        if (done !== last) {
+          last = done;
+          say({ kind: "classify-progress", id, done });
+        }
+      }, PROGRESS_MS);
+      Promise.resolve(work).then(
+        (got) => {
+          stop(timer);
+          say({ kind: "classify", id, cls: got.cls, sure: got.sure, cubes: got.cubes, ms: got.ms });
+        },
+        (err) => {
+          stop(timer);
+          say({ kind: "classify", id, error: String((err && err.message) || err) });
         },
       );
       return;
