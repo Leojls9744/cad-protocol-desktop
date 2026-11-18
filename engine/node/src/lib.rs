@@ -19,8 +19,16 @@
 //! (their setups kept; snap and region asked of one setup when given).
 //! 1.25: scans indexed on threads of their own, a few at a time, so cloud
 //! to cloud and Geo W. (on Node's worker threads) never wait behind them.
+//! 1.28: renderOpen(meshes) puts a render's scene in a BVH, renderStart and
+//! renderStep(job, passes) trace passes of it on every core (each step on
+//! a worker thread), renderClose lets one go.
+//! 1.28: cropScan(handle, ask, out) cuts a scan to the drawing's limit
+//! boxes from its index, every point, written to a LAS or LAZ file on a
+//! worker thread; cropProgress() says how far it's come.
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
+use cadp_engine_core::crop::{self, CropAsk, CropBox};
+use cadp_engine_core::render::{self as rt, Camera, Light, LightKind, Mesh, Scene, Settings};
 use cadp_engine_core::net;
 use cadp_engine_core::{
     build_fresh, open_made, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
@@ -660,4 +668,302 @@ pub fn net_classify(model: NetModelJs, blob: Float32Array, points: NetPoints) ->
 #[napi]
 pub fn net_progress() -> f64 {
     net::progress()
+}
+
+/// A limit box as the page tests it (its turn's cosine and sine worked out there).
+#[napi(object)]
+pub struct CropBoxJs {
+    pub min: Vec<f64>,
+    pub max: Vec<f64>,
+    pub centre: Vec<f64>,
+    pub cos: f64,
+    pub sin: f64,
+    pub turned: bool,
+    pub outside: bool,
+    pub slack: Vec<f64>,
+}
+
+/// What's cut: the file into the drawing, the boxes, the scan's own grid there, its units' WKT.
+#[napi(object)]
+pub struct CropAskJs {
+    pub affine: Vec<f64>,
+    pub boxes: Vec<CropBoxJs>,
+    pub setup: Option<u32>,
+    pub scale: Vec<f64>,
+    pub offset: Vec<f64>,
+    pub wkt: String,
+    pub laz: bool,
+}
+
+#[napi(object)]
+pub struct CropFound {
+    pub kept: f64,
+    pub processed: f64,
+    pub min: Vec<f64>,
+    pub max: Vec<f64>,
+    pub bytes: f64,
+    pub ms: f64,
+}
+
+pub struct CropTask {
+    ix: Arc<Index>,
+    ask: CropAsk,
+    out: PathBuf,
+    started: Instant,
+}
+
+impl Task for CropTask {
+    type Output = crop::CropDone;
+    type JsValue = CropFound;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        crop::crop(&self.ix, &self.ask, &self.out).map_err(|e| {
+            let _ = std::fs::remove_file(&self.out);
+            Error::from_reason(e)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, d: Self::Output) -> Result<Self::JsValue> {
+        Ok(CropFound {
+            kept: d.kept as f64,
+            processed: d.processed as f64,
+            min: d.min.to_vec(),
+            max: d.max.to_vec(),
+            bytes: d.bytes as f64,
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+fn three_finite(v: &[f64], what: &str) -> Result<[f64; 3]> {
+    if v.len() != 3 || v.iter().any(|x| x.is_nan()) {
+        return Err(Error::from_reason(format!("{what} needs three numbers")));
+    }
+    Ok([v[0], v[1], v[2]])
+}
+
+/// A scan cut to the limit boxes from its index, written to `out` (made new), on a worker thread.
+#[napi(ts_return_type = "Promise<CropFound>")]
+pub fn crop_scan(handle: u32, ask: CropAskJs, out: String) -> Result<AsyncTask<CropTask>> {
+    let ix = INDEXES
+        .lock()
+        .unwrap()
+        .get(&handle)
+        .cloned()
+        .ok_or_else(|| Error::from_reason(format!("scan {handle} isn't open")))?;
+    if ask.affine.len() != 12 || ask.affine.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("affine needs twelve numbers"));
+    }
+    if out.is_empty() {
+        return Err(Error::from_reason("the cut file needs a place"));
+    }
+    let mut affine = [0.0; 12];
+    affine.copy_from_slice(&ask.affine);
+    let mut boxes = Vec::with_capacity(ask.boxes.len());
+    for b in &ask.boxes {
+        let c = &b.centre;
+        if c.len() != 2 || !b.cos.is_finite() || !b.sin.is_finite() {
+            return Err(Error::from_reason("a box needs its centre and turn"));
+        }
+        boxes.push(CropBox {
+            min: three_finite(&b.min, "a box's min")?,
+            max: three_finite(&b.max, "a box's max")?,
+            centre: [c[0], c[1]],
+            cos: b.cos,
+            sin: b.sin,
+            turned: b.turned,
+            outside: b.outside,
+            slack: three_finite(&b.slack, "a box's slack")?,
+        });
+    }
+    Ok(AsyncTask::new(CropTask {
+        ix,
+        ask: CropAsk {
+            affine,
+            boxes,
+            setup: ask.setup.map(|k| k.min(u16::MAX as u32) as u16),
+            scale: three_finite(&ask.scale, "scale")?,
+            offset: three_finite(&ask.offset, "offset")?,
+            wkt: ask.wkt,
+            laz: ask.laz,
+        },
+        out: PathBuf::from(out),
+        started: Instant::now(),
+    }))
+}
+
+/// How far the cut in hand has come, 0 to 1.
+#[napi]
+pub fn crop_progress() -> f64 {
+    crop::PROGRESS.load(Ordering::Relaxed) as f64 / 1e6
+}
+
+/// A mesh of a render's scene: its corners, triangles, colour (linear 0–1) and whether it's glass.
+#[napi(object)]
+pub struct RenderMeshJs {
+    pub positions: Float64Array,
+    pub indices: Uint32Array,
+    pub color: Vec<f64>,
+    pub glass: bool,
+}
+
+/// A light of the drawing, its colour linear.
+#[napi(object)]
+pub struct RenderLightJs {
+    pub kind: String,
+    pub position: Vec<f64>,
+    pub direction: Vec<f64>,
+    pub rgb: Vec<f64>,
+    pub intensity: f64,
+    pub inner: f64,
+    pub outer: f64,
+    pub reach: f64,
+}
+
+/// A render asked for: the camera, the picture's size, the sun and lights, the scene's size and the seed.
+#[napi(object)]
+pub struct RenderAskJs {
+    pub position: Vec<f64>,
+    pub target: Vec<f64>,
+    pub fov: f64,
+    pub width: u32,
+    pub height: u32,
+    pub sun: Vec<f64>,
+    pub lights: Vec<RenderLightJs>,
+    pub sun_off: bool,
+    pub size: f64,
+    pub seed: u32,
+}
+
+static SCENES: LazyLock<Mutex<HashMap<u32, Arc<Scene>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct RenderJob {
+    scene: Arc<Scene>,
+    cam: Camera,
+    settings: Settings,
+    seed: u32,
+    sum: Vec<f32>,
+    passes: u32,
+}
+
+static RENDERS: LazyLock<Mutex<HashMap<u32, RenderJob>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn v3(v: &[f64], what: &str) -> Result<[f64; 3]> {
+    if v.len() != 3 || v.iter().any(|x| !x.is_finite()) {
+        return Err(Error::from_reason(format!("{what} needs three numbers")));
+    }
+    Ok([v[0], v[1], v[2]])
+}
+
+/// A render's scene: its meshes' triangles in a BVH; its handle.
+#[napi]
+pub fn render_open(meshes: Vec<RenderMeshJs>) -> Result<u32> {
+    let mut list = Vec::with_capacity(meshes.len());
+    for m in &meshes {
+        list.push(Mesh {
+            positions: m.positions.to_vec(),
+            indices: m.indices.to_vec(),
+            color: v3(&m.color, "a mesh's colour")?,
+            glass: m.glass,
+        });
+    }
+    let scene = Scene::build(&list);
+    let handle = NEXT.fetch_add(1, Ordering::Relaxed);
+    SCENES.lock().unwrap().insert(handle, Arc::new(scene));
+    Ok(handle)
+}
+
+/// A render of a scene started (no passes yet); its job.
+#[napi]
+pub fn render_start(scene: u32, ask: RenderAskJs) -> Result<u32> {
+    let sc = SCENES.lock().unwrap().get(&scene).cloned().ok_or_else(|| Error::from_reason("the render's scene isn't open"))?;
+    let (w, h) = (ask.width as usize, ask.height as usize);
+    if w == 0 || h == 0 || w * h > 40_000_000 {
+        return Err(Error::from_reason("the picture's size isn't usable"));
+    }
+    let mut lights = Vec::with_capacity(ask.lights.len());
+    for l in &ask.lights {
+        lights.push(Light {
+            kind: match l.kind.as_str() {
+                "spot" => LightKind::Spot,
+                "distant" => LightKind::Distant,
+                _ => LightKind::Point,
+            },
+            position: v3(&l.position, "a light's position")?,
+            direction: v3(&l.direction, "a light's direction")?,
+            rgb: v3(&l.rgb, "a light's colour")?,
+            intensity: l.intensity,
+            inner: l.inner,
+            outer: l.outer,
+            reach: l.reach,
+        });
+    }
+    let job = RenderJob {
+        scene: sc,
+        cam: Camera { position: v3(&ask.position, "position")?, target: v3(&ask.target, "target")?, fov: ask.fov },
+        settings: Settings { width: w, height: h, sun: v3(&ask.sun, "sun")?, lights, sun_off: ask.sun_off, size: ask.size },
+        seed: ask.seed,
+        sum: vec![0.0; w * h * 3],
+        passes: 0,
+    };
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    RENDERS.lock().unwrap().insert(id, job);
+    Ok(id)
+}
+
+#[napi(object)]
+pub struct RenderStepped {
+    pub sum: Float32Array,
+    pub passes: u32,
+    pub ms: f64,
+}
+
+pub struct RenderTask {
+    id: u32,
+    passes: u32,
+    started: Instant,
+}
+
+impl Task for RenderTask {
+    type Output = (Vec<f32>, u32);
+    type JsValue = RenderStepped;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        // Taken out while it's traced (a stop meanwhile lets it go after).
+        let job = RENDERS.lock().unwrap().remove(&self.id).ok_or_else(|| Error::from_reason("the render was stopped"))?;
+        let mut r = rt::Render::new(&job.scene, job.cam, job.settings.clone(), job.seed).resume(job.sum, job.passes);
+        for _ in 0..self.passes {
+            r.pass();
+        }
+        let out = (r.sum.clone(), r.passes);
+        let sum = std::mem::take(&mut r.sum);
+        let passes = r.passes;
+        drop(r);
+        RENDERS.lock().unwrap().insert(self.id, RenderJob { sum, passes, ..job });
+        Ok(out)
+    }
+
+    fn resolve(&mut self, _env: Env, (sum, passes): Self::Output) -> Result<Self::JsValue> {
+        Ok(RenderStepped { sum: Float32Array::from(sum), passes, ms: self.started.elapsed().as_secs_f64() * 1000.0 })
+    }
+}
+
+/// `passes` more of a render, on a worker thread (every core): its light summed so far.
+#[napi(ts_return_type = "Promise<RenderStepped>")]
+pub fn render_step(job: u32, passes: u32) -> Result<AsyncTask<RenderTask>> {
+    if !RENDERS.lock().unwrap().contains_key(&job) {
+        return Err(Error::from_reason("the render isn't there"));
+    }
+    Ok(AsyncTask::new(RenderTask { id: job, passes: passes.clamp(1, 1000), started: Instant::now() }))
+}
+
+/// A render, or a render's scene, let go.
+#[napi]
+pub fn render_close(job: Option<u32>, scene: Option<u32>) {
+    if let Some(j) = job {
+        RENDERS.lock().unwrap().remove(&j);
+    }
+    if let Some(s) = scene {
+        SCENES.lock().unwrap().remove(&s);
+    }
 }

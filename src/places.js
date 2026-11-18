@@ -25,6 +25,11 @@ const MAX_PLACES = 20000;
 /** What Windows' Open window shows, by what's asked for. */
 const KINDS = {
   scan: [{ name: "Scans", extensions: ["las", "laz", "e57"] }],
+  // 1.28: a scan the engine cuts (LAS or LAZ, by the name it's given).
+  cut: [
+    { name: "LAS", extensions: ["las"] },
+    { name: "LAZ (compressed)", extensions: ["laz"] },
+  ],
   pdf: [{ name: "PDF", extensions: ["pdf"] }],
   image: [{ name: "Pictures", extensions: ["png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp"] }],
   drawing: [{ name: "Drawings", extensions: ["cadp", "dwg", "dxf"] }],
@@ -216,38 +221,53 @@ function createPlaces({ file, fs, dialog, log = () => {}, now = () => Date.now()
      * it, then renamed over), kept, and its place given; null if cancelled.
      */
     async saveAs(win, options, data) {
-      const o = options && typeof options === "object" ? options : {};
       const bytes =
         data instanceof Uint8Array ? Buffer.from(data.buffer, data.byteOffset, data.byteLength) : null;
       if (!bytes) throw new Error("a file's bytes are needed");
       if (bytes.length > MAX_SAVE_BYTES) throw new Error("That file is too large to save here.");
-      const name = safeName(o.name);
-      const dir = known(o.beside) ? path.dirname(places[o.beside].path) : undefined;
-      const kind = Object.hasOwn(KINDS, o.kind) ? o.kind : "any";
-      const picked = await dialog.showSaveDialog(win, {
-        title: "Save to this computer",
-        defaultPath: dir ? path.join(dir, name) : name,
-        filters: KINDS[kind],
-        properties: ["showOverwriteConfirmation", "createDirectory"],
-      });
-      if (picked.canceled || !picked.filePath) return null;
-      const temp = `${picked.filePath}.saving`;
-      try {
-        await fs.promises.writeFile(temp, bytes);
-        await fs.promises.rename(temp, picked.filePath);
-      } catch (err) {
-        await fs.promises.rm(temp, { force: true }).catch(() => {});
-        throw err;
-      }
-      log(`places: saved ${path.basename(picked.filePath)}`);
-      return add([picked.filePath])[0] || null;
+      const got = await saveWith(win, options, (temp) => fs.promises.writeFile(temp, bytes));
+      return got ? got.place : null;
     },
+
+    /**
+     * 1.28: Windows' Save window as saveAs has it, the file then made by
+     * `write(temp, chosen)` (the scan engine's cut, written straight to
+     * disk), renamed over and kept: its place and what `write` gave; null
+     * if cancelled.
+     */
+    saveWith: (win, options, write) => saveWith(win, options, write),
 
     /** A place's path, if it's kept (for local-files.js to open a drawing). */
     pathOf(id) {
       return known(id) ? places[id].path : null;
     },
   };
+
+  async function saveWith(win, options, write) {
+    const o = options && typeof options === "object" ? options : {};
+    const name = safeName(o.name);
+    const dir = known(o.beside) ? path.dirname(places[o.beside].path) : undefined;
+    const kind = Object.hasOwn(KINDS, o.kind) ? o.kind : "any";
+    const picked = await dialog.showSaveDialog(win, {
+      title: "Save to this computer",
+      defaultPath: dir ? path.join(dir, name) : name,
+      filters: KINDS[kind],
+      properties: ["showOverwriteConfirmation", "createDirectory"],
+    });
+    if (picked.canceled || !picked.filePath) return null;
+    const temp = `${picked.filePath}.saving`;
+    let made;
+    try {
+      made = await write(temp, picked.filePath);
+      await fs.promises.rename(temp, picked.filePath);
+    } catch (err) {
+      await fs.promises.rm(temp, { force: true }).catch(() => {});
+      throw err;
+    }
+    log(`places: saved ${path.basename(picked.filePath)}`);
+    const place = add([picked.filePath])[0] || null;
+    return place ? { place, made } : null;
+  }
 }
 
 /**

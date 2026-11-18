@@ -69,6 +69,9 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
   /** The pages given a port, told when the engine stops and starts again (1.25). */
   const pages = new Set();
   const available = typeof exists === "function" ? exists(addon) : true;
+  /** Cuts asked of the engine (1.28), by id: told how far they've come, then done. */
+  const cuts = new Map();
+  let nextCut = 1;
 
   /** A word to each page still there. */
   function tellPages(channel, msg) {
@@ -100,9 +103,21 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     lines(child.stderr);
     child.on("message", (msg) => {
       if (msg && (msg.kind === "opened" || msg.kind === "failed") && typeof msg.token === "string") settled.add(msg.token);
+      // 1.28: a cut's progress, and its end.
+      const cut = msg && cuts.get(msg.id);
+      if (cut && msg.kind === "crop-progress") cut.progress(Number(msg.done) || 0);
+      else if (cut && msg.kind === "crop-done") {
+        cuts.delete(msg.id);
+        cut.done(msg);
+      }
     });
     child.on("exit", (code) => {
       if (host === child) host = null;
+      // Cuts out on it end with it (1.28).
+      for (const [id, cut] of cuts) {
+        cuts.delete(id);
+        cut.done({ kind: "crop-done", id, error: "The scan engine stopped while it was cutting the scan." });
+      }
       if (stopped) return;
       log(`scan engine: its process ended (${code})`);
       if (now() - startedAt >= STEADY_MS) restarts = 0;
@@ -165,6 +180,27 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     return true;
   }
 
+  /**
+   * 1.28: a scan (by its token) cut to the drawing's limit boxes by the
+   * engine, written to `out`; `progress` told how far, 0 to 1. What was cut
+   * ({ kept, processed, min, max, bytes }) or { error }.
+   */
+  function crop(token, out, ask, progress = () => {}) {
+    const h = host;
+    if (!h || !tokens.has(token)) return Promise.resolve({ error: "The scan isn't open in the scan engine." });
+    const id = nextCut;
+    nextCut += 1;
+    return new Promise((resolve) => {
+      cuts.set(id, { progress, done: resolve });
+      h.postMessage({ kind: "crop", id, token, out, ask });
+    });
+  }
+
+  /** A token's scan file (1.28: a cut is saved beside it). */
+  function pathOf(token) {
+    return tokens.get(token) ?? null;
+  }
+
   function stop() {
     stopped = true;
     if (host) {
@@ -181,6 +217,8 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     available,
     register,
     connect,
+    crop,
+    pathOf,
     stop,
     tokens,
     get running() {

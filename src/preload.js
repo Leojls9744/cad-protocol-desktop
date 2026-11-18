@@ -16,6 +16,8 @@ function arg(name) {
 }
 
 const appOrigin = arg("cadp-app-origin");
+/** Cuts asked of the scan engine (1.28), each told its own progress. */
+let cutsAsked = 0;
 
 if (appOrigin && window.location.origin === appOrigin) {
   contextBridge.exposeInMainWorld("cadpDesktop", {
@@ -149,6 +151,16 @@ if (appOrigin && window.location.origin === appOrigin) {
       save: (text) => ipcRenderer.invoke("cadp:jobs:save", text),
     },
     /**
+     * 1.28: Drawing Recovery's copies kept as files on this computer
+     * (src/recovery.js) in place of the browser engine's storage: put(copy),
+     * list(), remove(id), as the page's own store has them.
+     */
+    recovery: {
+      put: (copy) => ipcRenderer.invoke("cadp:recovery:put", copy),
+      list: () => ipcRenderer.invoke("cadp:recovery:list"),
+      remove: (id) => ipcRenderer.invoke("cadp:recovery:remove", id),
+    },
+    /**
      * 1.19: the scan engine (src/scan-engine.js), for LAS, LAZ and E57 scans
      * read from this computer. register(file) hands it a scan file the
      * person chose (a File from an Open window, a drop or a linked folder):
@@ -171,6 +183,24 @@ if (appOrigin && window.location.origin === appOrigin) {
         return ipcRenderer.invoke("cadp:engine:register", where);
       },
       connect: () => ipcRenderer.send("cadp:engine:connect"),
+      /**
+       * 1.28: a scan the engine has open (its token) cut to the drawing's
+       * limit boxes from its index, every point, saved where the person
+       * chooses in Windows' Save window (beside the place `beside`):
+       * { place, kept, processed, min, max, bytes }, or null if cancelled.
+       * `progress` is told how far it's come, 0 to 1.
+       */
+      crop: (options, progress) => {
+        const id = (cutsAsked += 1);
+        const heard = (_event, m) => {
+          if (m && m.id === id && typeof progress === "function") progress(Number(m.done) || 0);
+        };
+        ipcRenderer.on("cadp:engine:crop-progress", heard);
+        const o = options && typeof options === "object" ? options : {};
+        return ipcRenderer
+          .invoke("cadp:engine:crop", { id, token: o.token, name: o.name, beside: o.beside, ask: o.ask })
+          .finally(() => ipcRenderer.removeListener("cadp:engine:crop-progress", heard));
+      },
     },
     /**
      * 1.2: `handler` runs when the window is about to close (it may save and

@@ -330,3 +330,105 @@ test("1.24: the real engine opens an E57 of two setups, asked of each alone", { 
   assert.equal(first.front.length, 0);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("1.28: a big region answer goes in parts the page puts back together", () => {
+  const { postInParts, PART_BYTES } = require("../src/engine-host");
+  const page = port();
+  const n = Math.ceil((PART_BYTES * 2.5) / 12);
+  const xyz = new Float32Array(n * 3).map((_, i) => i % 1000);
+  const small = new Uint8Array(10).fill(3);
+  const parts = postInParts(page, { kind: "region", id: 9, count: n, xyz, classification: small });
+  assert.equal(parts, 1);
+  const pieces = page.out.filter((m) => m.kind === "part");
+  assert.equal(pieces.length, 3);
+  assert.ok(pieces.every((m) => m.id === 9 && m.bytes.length <= PART_BYTES));
+  const last = page.out.at(-1);
+  assert.deepEqual(last.xyz, { __part: 0, type: "Float32Array", length: n * 3 });
+  assert.equal(last.classification, small);
+  // Put back together as the page does.
+  const buf = new Uint8Array(pieces[0].total);
+  for (const m of pieces) buf.set(m.bytes, m.at);
+  const back = new Float32Array(buf.buffer, 0, last.xyz.length);
+  assert.deepEqual(back.subarray(0, 2000), xyz.subarray(0, 2000));
+  assert.equal(back[back.length - 1], xyz[xyz.length - 1]);
+});
+
+test("1.28: a region asked with parts and small enough comes whole", async () => {
+  const parent = new EventEmitter();
+  const engine = {
+    ...fakeEngine(),
+    region: () => ({ origin: [0, 0, 0], count: 1, xyz: new Float32Array(3), intensity: new Uint16Array(1), classification: new Uint8Array(1), flags: new Uint8Array(1), returns: new Uint8Array(1), complete: true, tried: 1, ms: 0 }),
+  };
+  createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  parent.emit("message", { data: { kind: "open", token: "t", path: "C:\\a.las", cacheDir: "C:\\c" } });
+  await tick();
+  page.emit("message", { data: { kind: "region", id: 4, token: "t", affine: [], min: [], max: [], most: 9, parts: true } });
+  const r = page.out.find((m) => m.kind === "region");
+  assert.equal(r.id, 4);
+  assert.equal(r.count, 1);
+  assert.ok(r.xyz instanceof Float32Array);
+  assert.equal(page.out.filter((m) => m.kind === "part").length, 0);
+});
+
+test("1.28: the real engine cuts a scan to a limit box, every point, into a file for the main process", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cadp-engine-crop-"));
+  const scan = path.join(dir, "site.las");
+  fs.writeFileSync(scan, lasBytes(samplePoints([6000000, 2000000, 0]), { offset: [6000000, 2000000, 0] }));
+  const parent = new EventEmitter();
+  parent.sent = [];
+  parent.postMessage = (m) => parent.sent.push(m);
+  createHost({ engine, parentPort: parent });
+  // Asked before it's open: waited for.
+  parent.emit("message", { data: { kind: "open", token: "s", path: scan, cacheDir: path.join(dir, "cache") } });
+  const out = path.join(dir, "site cut.las.saving");
+  const box = { min: [6000000.95, 2000000.95, -1e9], max: [6000002.05, 2000002.05, 1e9], centre: [6000001.5, 2000001.5], cos: 1, sin: 0, turned: false, outside: false, slack: [1e-6, 1e-6, 1e-6] };
+  const ask = { affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], boxes: [box], scale: [0.001, 0.001, 0.001], offset: [6000000, 2000000, 0], wkt: 'LOCAL_CS["Feet"]', laz: false };
+  parent.emit("message", { data: { kind: "crop", id: 3, token: "s", out, ask } });
+  for (let i = 0; i < 500 && !parent.sent.some((m) => m.kind === "crop-done"); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const done = parent.sent.find((m) => m.kind === "crop-done");
+  assert.ok(done && !done.error, JSON.stringify(done));
+  assert.equal(done.id, 3);
+  // 1.0 to 2.0 each way on the floor's 0.1 grid: 11 × 11.
+  assert.equal(done.kept, 121);
+  assert.equal(done.processed, 10040);
+  assert.ok(fs.statSync(out).size === done.bytes && done.bytes >= 375 + 121 * 30);
+  const bytes = fs.readFileSync(out);
+  assert.equal(bytes.toString("ascii", 0, 4), "LASF");
+  assert.equal(bytes.readUInt8(104), 6);
+  assert.equal(Number(bytes.readBigUInt64LE(247)), 121);
+  // A scan not open: said.
+  parent.emit("message", { data: { kind: "crop", id: 4, token: "nope", out, ask } });
+  await tick();
+  assert.match(parent.sent.find((m) => m.id === 4).error, /isn't open/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test("1.28: the real engine renders a scene's passes for a page, and stops when asked", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  const parent = new EventEmitter();
+  createHost({ engine, parentPort: parent });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  const s = 50;
+  const ground = { positions: new Float64Array([-s, 0, -s, s, 0, -s, s, 0, s, -s, 0, s]), indices: new Uint32Array([0, 2, 1, 0, 3, 2]), color: [0.5, 0.5, 0.5], glass: false };
+  const ask = { position: [0, 5, 20], target: [0, 0, 0], fov: 50, width: 24, height: 16, sun: [0.3, 1, 0.2], lights: [], sunOff: false, size: 100, seed: 1 };
+  page.emit("message", { data: { kind: "render", id: 1, meshes: [ground], ask, passes: 3 } });
+  for (let i = 0; i < 300 && !page.out.some((m) => m.kind === "render"); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const done = page.out.find((m) => m.kind === "render");
+  assert.ok(done && !done.error, JSON.stringify(done));
+  assert.equal(done.passes, 3);
+  const last = page.out.filter((m) => m.kind === "render-progress").at(-1);
+  assert.equal(last.done, true);
+  assert.ok(last.sum instanceof Float32Array && last.sum.length === 24 * 16 * 3);
+  assert.ok(last.sum.some((v) => v > 0));
+  // A long one stopped.
+  page.emit("message", { data: { kind: "render", id: 2, meshes: [ground], ask, passes: 5000 } });
+  page.emit("message", { data: { kind: "render-stop", id: 2 } });
+  for (let i = 0; i < 300 && !page.out.some((m) => m.kind === "render" && m.id === 2); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const stopped = page.out.find((m) => m.kind === "render" && m.id === 2);
+  assert.equal(stopped.stopped, true);
+  assert.ok(stopped.passes < 5000);
+});

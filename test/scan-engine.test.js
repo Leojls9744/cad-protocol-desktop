@@ -190,3 +190,23 @@ test("quitting stops the engine's process", async () => {
   hosts[0].emit("exit", 0);
   assert.equal(hosts.length, 1);
 });
+
+test("1.28: a cut asked of the engine, its progress and its end relayed by id", async () => {
+  const { e, hosts } = engine();
+  const r = await e.register("C:\\Jobs\\Lot 7\\scan 1.las");
+  assert.equal(e.pathOf(r.token), "C:\\Jobs\\Lot 7\\scan 1.las");
+  const told = [];
+  const cut = e.crop(r.token, "C:\\Jobs\\Lot 7\\scan 1 cut.las.saving", { boxes: [] }, (f) => told.push(f));
+  const [msg] = hosts[0].sent.at(-1);
+  assert.equal(msg.kind, "crop");
+  assert.equal(msg.token, r.token);
+  hosts[0].emit("message", { kind: "crop-progress", id: msg.id, done: 0.5 });
+  hosts[0].emit("message", { kind: "crop-done", id: msg.id, kept: 9, processed: 20 });
+  assert.deepEqual(await cut, { kind: "crop-done", id: msg.id, kept: 9, processed: 20 });
+  assert.deepEqual(told, [0.5]);
+  // Another token, or the engine stopping: an error, nothing waits for good.
+  assert.match((await e.crop("nope", "x", {})).error, /isn't open/);
+  const second = e.crop(r.token, "y", {});
+  hosts[0].emit("exit", 1);
+  assert.match((await second).error, /stopped/);
+});

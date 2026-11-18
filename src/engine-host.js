@@ -10,10 +10,45 @@
 // (1.25), so after a crash the scans it was still reading aren't tried again. Over a page's port it says what's open (`hello`, `opened`,
 // `progress`, `failed`) and answers what's asked (`snap`, `status`; 1.20
 // `region`; 1.22 `align` and `check`, cloud to cloud on points the page
-// gives; 1.23 `classify`, Geo W. on points the page gives). A page names scans only by their tokens: it never gives a path.
+// gives; 1.23 `classify`, Geo W. on points the page gives; 1.28 a big
+// `region` answered in parts, for a scan's overview). 1.28: the main
+// process asks for a scan cut to the limit boxes (`crop`), into a file the
+// person chose; a page asks for a `render` (the ray tracer on every core),
+// told how far it's come, and can stop it (`render-stop`). A page names scans only by their tokens: it never gives a path.
 
 /** How often a scan being indexed says how far it's come. */
 const PROGRESS_MS = 300;
+
+/** The most one message carries (1.28): a bigger list goes ahead in parts, as the page sends its own (1.23). */
+const PART_BYTES = 16 * 1024 * 1024;
+const LISTS = ["Float64Array", "Float32Array", "Uint8Array", "Uint16Array", "Uint32Array"];
+const listOf = (v) => (ArrayBuffer.isView(v) ? LISTS.find((n) => Object.prototype.toString.call(v) === `[object ${n}]`) : undefined);
+
+/**
+ * An answer sent with its big lists in parts first (1.28): each over
+ * PART_BYTES named in its place ({ __part, type, length }) and sent ahead a
+ * part at a time ({ kind: "part", id, part, at, total, bytes }), put back
+ * together by the page before it reads the answer. How many lists went in parts.
+ */
+function postInParts(port, msg) {
+  let parts = 0;
+  const out = {};
+  for (const [k, v] of Object.entries(msg)) {
+    const type = listOf(v);
+    if (!type || v.byteLength <= PART_BYTES) {
+      out[k] = v;
+      continue;
+    }
+    const part = parts;
+    parts += 1;
+    const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    for (let at = 0; at < bytes.length; at += PART_BYTES)
+      port.postMessage({ kind: "part", id: msg.id, part, at, total: bytes.length, bytes: bytes.slice(at, Math.min(bytes.length, at + PART_BYTES)) });
+    out[k] = { __part: part, type, length: v.length };
+  }
+  port.postMessage(out);
+  return parts;
+}
 
 /** The host, given the engine and the port to the main process. */
 function createHost({ engine, parentPort, log = () => {}, every = setInterval, stop = clearInterval }) {
@@ -66,7 +101,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     } catch (err) {
       opening = Promise.reject(err);
     }
-    opening.then(
+    s.ready = opening.then(
       (info) => {
         stop(timer);
         s.handle = info.handle;
@@ -84,6 +119,50 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         tell({ kind: "failed", token, error: s.error });
       },
     );
+  }
+
+  /** Told to the main process (1.28: a cut's progress and its end). */
+  const toMain = (msg) => {
+    try {
+      if (typeof parentPort.postMessage === "function") parentPort.postMessage(msg);
+    } catch {
+      // The main process is going.
+    }
+  };
+
+  /**
+   * 1.28: a scan cut to the drawing's limit boxes from its index, every
+   * point, written to `out` (the main process chose it with the person, in
+   * Windows' Save window); how far it's come said now and then, then what
+   * was cut, or why not. A scan still being indexed is waited for.
+   */
+  async function crop({ id, token, out, ask }) {
+    const held = scans.get(token);
+    if (!held) {
+      toMain({ kind: "crop-done", id, error: "The scan isn't open in the scan engine." });
+      return;
+    }
+    if (held.handle == null && held.ready) await held.ready.catch(() => {});
+    if (held.handle == null) {
+      toMain({ kind: "crop-done", id, error: held.error || "The scan engine couldn't read the scan." });
+      return;
+    }
+    let last = -1;
+    const timer = every(() => {
+      const done = engine.cropProgress();
+      if (done !== last) {
+        last = done;
+        toMain({ kind: "crop-progress", id, done });
+      }
+    }, PROGRESS_MS);
+    try {
+      const got = await engine.cropScan(held.handle, ask, out);
+      toMain({ kind: "crop-done", id, kept: got.kept, processed: got.processed, min: got.min, max: got.max, bytes: got.bytes, ms: got.ms });
+    } catch (err) {
+      toMain({ kind: "crop-done", id, error: String((err && err.message) || err) });
+    } finally {
+      stop(timer);
+    }
   }
 
   /** A question's big lists as they come in parts (1.23), by port, then id. */
@@ -114,7 +193,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const mine = held.get(msg.id);
     if (!mine) return msg;
     held.delete(msg.id);
-    const KINDS = { Float64Array, Float32Array, Uint8Array, Uint16Array };
+    const KINDS = { Float64Array, Float32Array, Uint8Array, Uint16Array, Uint32Array };
     const put = (v) => {
       if (v && typeof v === "object" && !ArrayBuffer.isView(v)) {
         if (typeof v.__part === "number" && KINDS[v.type]) {
@@ -129,11 +208,74 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     return put(msg);
   }
 
+  /** Renders under way (1.28), by port: stopped when asked, or when the page goes. */
+  const rendersOf = new WeakMap();
+
+  /**
+   * 1.28: a render, the page's ray tracer on every core: its scene put in a
+   * BVH, its passes traced a batch at a time (about a second each), the
+   * light summed so far sent after each (in parts when it's big), until
+   * every pass is done or it's stopped.
+   */
+  async function render(port, msg) {
+    const id = msg.id;
+    let mine = rendersOf.get(port);
+    if (!mine) {
+      mine = new Map();
+      rendersOf.set(port, mine);
+    }
+    const state = { stopped: false };
+    mine.set(id, state);
+    const say = (m) => {
+      try {
+        postInParts(port, m);
+      } catch {
+        state.stopped = true;
+      }
+    };
+    let scene;
+    let job;
+    try {
+      scene = engine.renderOpen(Array.isArray(msg.meshes) ? msg.meshes : []);
+      job = engine.renderStart(scene, msg.ask);
+      const total = Math.max(1, Math.min(10000, Math.floor(Number(msg.passes) || 1)));
+      let done = 0;
+      let batch = 1;
+      while (done < total && !state.stopped) {
+        const n = Math.min(batch, total - done);
+        const t0 = Date.now();
+        const got = await engine.renderStep(job, n);
+        done = got.passes;
+        batch = Math.max(1, Math.min(64, Math.round((n * 1000) / Math.max(1, Date.now() - t0))));
+        if (!state.stopped) say({ kind: "render-progress", id, sum: got.sum, passes: got.passes, done: done >= total });
+      }
+      say({ kind: "render", id, passes: done, stopped: state.stopped });
+    } catch (err) {
+      say({ kind: "render", id, error: String((err && err.message) || err) });
+    } finally {
+      mine.delete(id);
+      try {
+        engine.renderClose(job ?? undefined, scene ?? undefined);
+      } catch {
+        // Gone already.
+      }
+    }
+  }
+
   function answer(port, raw) {
     if (!raw || typeof raw !== "object") return;
     const msg = gathered(port, raw);
     if (!msg) return;
     const id = msg.id;
+    if (msg.kind === "render") {
+      void render(port, msg);
+      return;
+    }
+    if (msg.kind === "render-stop") {
+      const state = rendersOf.get(port)?.get(id);
+      if (state) state.stopped = true;
+      return;
+    }
     if (msg.kind === "status") {
       port.postMessage({ kind: "status", id, scans: [...scans].map(([t, s]) => summary(t, s)) });
       return;
@@ -148,7 +290,9 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       try {
         const setup = Number.isInteger(msg.setup) && msg.setup >= 0 ? msg.setup : undefined;
         const got = engine.region(held.handle, msg.affine, msg.min, msg.max, msg.ring ?? undefined, msg.most, setup);
-        port.postMessage({
+        // 1.28: a big one (a scan's overview) in parts, when the page puts them together.
+        const send = msg.parts === true ? (m) => postInParts(port, m) : (m) => port.postMessage(m);
+        send({
           kind: "region",
           id,
           origin: got.origin,
@@ -267,7 +411,11 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
   function addPage(port) {
     ports.add(port);
     port.on("message", (event) => answer(port, event.data));
-    port.on("close", () => ports.delete(port));
+    port.on("close", () => {
+      ports.delete(port);
+      // Its renders stop with it (1.28).
+      for (const state of rendersOf.get(port)?.values() ?? []) state.stopped = true;
+    });
     port.start();
     port.postMessage({
       kind: "hello",
@@ -280,13 +428,14 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const msg = event.data;
     if (!msg || typeof msg !== "object") return;
     if (msg.kind === "open") open(msg);
+    else if (msg.kind === "crop") void crop(msg);
     else if (msg.kind === "page" && event.ports && event.ports[0]) addPage(event.ports[0]);
   });
 
   return { scans, ports, answer };
 }
 
-module.exports = { createHost };
+module.exports = { createHost, postInParts, PART_BYTES };
 
 // Started as the engine's process: the add-on named on its command line.
 if (process.parentPort) {

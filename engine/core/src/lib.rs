@@ -24,12 +24,18 @@
 //!
 //! 1.24: E57 scans (`e57`), read as the page reads them, indexed as LAS
 //! scans are; each point's setup kept, a one-setup scan asked of alone.
+//!
+//! 1.28: Delete Outside Limit Box (`crop`): every point of a scan cut to
+//! the drawing's limit boxes from its index, written to a LAS or LAZ file;
+//! renders (`render`): the page's ray tracer, rows on every core.
 
 pub mod c2c;
+pub mod crop;
 pub mod e57;
 pub mod index;
 pub mod net;
 pub mod region;
+pub mod render;
 pub mod snap;
 
 mod fx;

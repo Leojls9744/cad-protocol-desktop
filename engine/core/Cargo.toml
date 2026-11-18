@@ -1,6 +1,6 @@
 [package]
 name = "cadp-engine-core"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 description = "CAD Protocol's scan engine: LAS, LAZ and E57 files read from disk, every point indexed, the scan's points under the cursor found."
@@ -10,3 +10,4 @@ las = { version = "0.9", features = ["laz-parallel"] }
 memmap2 = "0.9"
 roxmltree = "0.21"
 rayon = "1"
+chrono = { version = "0.4", default-features = false }

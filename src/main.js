@@ -88,6 +88,7 @@ const { EVERY_MS, createAutoUpdate } = require("./auto-update");
 const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar");
 const { createLocalFiles, launchedPaths } = require("./local-files");
 const { createJobsFile, createPlaces, fillInput, opensOutside } = require("./places");
+const { createRecovery } = require("./recovery");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
 const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
@@ -388,6 +389,8 @@ function start() {
   // 1.27: files remembered by their place on this computer, and the jobs.
   const places = createPlaces({ file: path.join(data, "places.json"), fs, dialog, log });
   const jobs = createJobsFile({ file: path.join(data, "jobs.json"), fs, log });
+  // 1.28: Drawing Recovery's copies as files on this computer.
+  const recovery = createRecovery({ dir: path.join(data, "recovery"), fs, log });
   /** Double-clicked drawings queued for the page; how many wait. */
   const launchFiles = (argv) => {
     const found = launchedPaths(argv);
@@ -716,6 +719,31 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       return places.saveAs(windowOf(event), options, bytes);
     });
+    // 1.28: Delete Outside Limit Box by the scan engine: Windows' Save
+    // window beside the scan (LAS, or LAZ by the name chosen), then every
+    // point cut from its index straight to that file; the page told how far
+    // it's come, then given the new file's place and what was cut.
+    ipcMain.handle("cadp:engine:crop", async (event, options) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const o = options && typeof options === "object" ? options : {};
+      const ask = o.ask && typeof o.ask === "object" ? o.ask : null;
+      const token = typeof o.token === "string" ? o.token : "";
+      if (!scanEngine || !ask || !scanEngine.pathOf(token)) throw new Error("The scan isn't open in the scan engine.");
+      const reply = Number.isInteger(o.id) ? o.id : 0;
+      const sender = event.sender;
+      const saved = await places.saveWith(windowOf(event), { name: o.name, beside: o.beside, kind: "cut" }, async (temp, chosen) => {
+        const got = await scanEngine.crop(token, temp, { ...ask, laz: /\.laz$/i.test(chosen) }, (done) => {
+          try {
+            if (!sender.isDestroyed()) sender.send("cadp:engine:crop-progress", { id: reply, done });
+          } catch {
+            // The window's gone: the cut goes on.
+          }
+        });
+        if (got.error) throw new Error(got.error);
+        return { kept: got.kept, processed: got.processed, min: got.min, max: got.max, bytes: got.bytes };
+      });
+      return saved ? { place: saved.place, ...saved.made } : null;
+    });
     ipcMain.handle("cadp:places:find", (event, id) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return places.find(windowOf(event), id);
@@ -770,6 +798,19 @@ function start() {
     ipcMain.handle("cadp:jobs:load", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return jobs.load();
+    });
+    // 1.28: Drawing Recovery's copies, kept as files here (src/recovery.js).
+    ipcMain.handle("cadp:recovery:put", (event, copy) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return recovery.put(copy);
+    });
+    ipcMain.handle("cadp:recovery:list", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return recovery.list();
+    });
+    ipcMain.handle("cadp:recovery:remove", (event, id) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return recovery.remove(id);
     });
     ipcMain.handle("cadp:jobs:save", (event, text) => {
       if (!fromApp(event)) throw new Error("not allowed");
