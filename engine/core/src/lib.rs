@@ -28,8 +28,11 @@
 //! 1.28: Delete Outside Limit Box (`crop`): every point of a scan cut to
 //! the drawing's limit boxes from its index, written to a LAS or LAZ file;
 //! renders (`render`): the page's ray tracer, rows on every core.
+//!
+//! 1.29: the rules classifier's heavy middle (`classify`), as the page's.
 
 pub mod c2c;
+pub mod classify;
 pub mod crop;
 pub mod e57;
 pub mod index;

@@ -432,3 +432,42 @@ test("1.28: the real engine renders a scene's passes for a page, and stops when 
   assert.equal(stopped.stopped, true);
   assert.ok(stopped.passes < 5000);
 });
+
+test("1.29: the real engine does the classifier's middle for a page, its big lists in parts", { skip: !fs.existsSync(addon) && "the engine's add-on isn't built (npm run build:engine)" }, async () => {
+  const engine = require(addon);
+  const parent = new EventEmitter();
+  createHost({ engine, parentPort: parent });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  // A floor 20 ft square at 100 (0.5 apart), a wall 6 ft up along one side.
+  const pts = [];
+  for (let i = 0; i < 40; i += 1) for (let j = 0; j < 40; j += 1) pts.push(i * 0.5, j * 0.5, 100);
+  for (let i = 0; i < 40; i += 1) for (let z = 2; z < 12; z += 1) pts.push(i * 0.5, 19.5, 100 + z * 0.5);
+  const xyz = new Float32Array(pts);
+  const n = xyz.length / 3;
+  // One tree of one leaf: everything's a building (2).
+  const ask = {
+    clouds: [{ origin: [0, 0, 0], xyz }],
+    x0: 0, y0: 0, y1: 19.5, zMin: 100, zMax: 105.5, k: 1, r: 1.5, v: 0.75, rise: 0.5,
+    gz: new Float64Array([100, 100, 100, 100]), cols: 2, rows: 2, g: 10,
+    groundGreen: 0, coloured: false,
+    treeF: new Float64Array([-2]), treeT: new Float64Array([0]), treeL: new Float64Array([-1]), treeR: new Float64Array([-1]), treeC: new Float64Array([2]), treeStarts: [0, 1],
+  };
+  page.emit("message", { data: { kind: "classify-stage", id: 5, ask } });
+  for (let i = 0; i < 300 && !page.out.some((m) => m.kind === "classify-stage"); i += 1) await new Promise((r) => setTimeout(r, 10));
+  const got = page.out.find((m) => m.kind === "classify-stage");
+  assert.ok(got && !got.error, JSON.stringify(got && got.error));
+  assert.equal(got.id, 5);
+  // The floor on the ground (2), the wall in voxels, all the forest's building, one object.
+  const ground = got.ground[0];
+  assert.equal(ground.length, n);
+  assert.equal(ground.filter((c) => c === 2).length, 1600);
+  assert.ok(got.vox[0] instanceof Int32Array);
+  assert.ok(got.n > 0 && got.label.every((l) => l === 2));
+  assert.equal(got.starts.length, 1);
+  assert.equal(got.members.length, got.n);
+  // A page that sends nonsense hears why.
+  page.emit("message", { data: { kind: "classify-stage", id: 6, ask: { ...ask, cols: 3 } } });
+  await tick();
+  assert.match(page.out.find((m) => m.id === 6).error, /ground grid/);
+});

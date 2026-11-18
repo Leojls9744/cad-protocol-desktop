@@ -22,11 +22,15 @@
 //! 1.28: renderOpen(meshes) puts a render's scene in a BVH, renderStart and
 //! renderStep(job, passes) trace passes of it on every core (each step on
 //! a worker thread), renderClose lets one go.
+//! 1.29: classifyStage(ask) does the heavy middle of the page's rules
+//! classifier (voxels, their shapes, the forest's votes, whole objects) on
+//! a worker thread, every core, as the page does it.
 //! 1.28: cropScan(handle, ask, out) cuts a scan to the drawing's limit
 //! boxes from its index, every point, written to a LAS or LAZ file on a
 //! worker thread; cropProgress() says how far it's come.
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
+use cadp_engine_core::classify::{self as rules, CloudIn, StageAsk, Tree};
 use cadp_engine_core::crop::{self, CropAsk, CropBox};
 use cadp_engine_core::render::{self as rt, Camera, Light, LightKind, Mesh, Scene, Settings};
 use cadp_engine_core::net;
@@ -966,4 +970,198 @@ pub fn render_close(job: Option<u32>, scene: Option<u32>) {
     if let Some(s) = scene {
         SCENES.lock().unwrap().remove(&s);
     }
+}
+
+/// A scan's points for the classifier, as the page keeps them.
+#[napi(object)]
+pub struct ClassifyCloudJs {
+    pub origin: Vec<f64>,
+    pub xyz: Float32Array,
+    pub rgb: Option<Uint8Array>,
+}
+
+/// What the page worked out before the stage (scan-classify.ts), and the forest, its trees one after another.
+#[napi(object)]
+pub struct ClassifyAskJs {
+    pub clouds: Vec<ClassifyCloudJs>,
+    pub x0: f64,
+    pub y0: f64,
+    pub y1: f64,
+    pub z_min: f64,
+    pub z_max: f64,
+    pub k: f64,
+    pub r: f64,
+    pub v: f64,
+    pub rise: f64,
+    pub gz: Float64Array,
+    pub cols: u32,
+    pub rows: u32,
+    pub g: f64,
+    pub ground_green: f64,
+    pub coloured: bool,
+    /// Each tree's nodes: features, thresholds, left, right, classes; `tree_starts` where each begins (and the end).
+    pub tree_f: Float64Array,
+    pub tree_t: Float64Array,
+    pub tree_l: Float64Array,
+    pub tree_r: Float64Array,
+    pub tree_c: Float64Array,
+    pub tree_starts: Vec<u32>,
+}
+
+#[napi(object)]
+pub struct StageFound {
+    pub ground: Vec<Uint8Array>,
+    pub vox: Vec<Int32Array>,
+    pub hags: Vec<Float32Array>,
+    pub n: u32,
+    pub cx: Float64Array,
+    pub cy: Float64Array,
+    pub cz: Float64Array,
+    pub ch: Float64Array,
+    pub sn: Float64Array,
+    pub sg: Float64Array,
+    pub nx: Float32Array,
+    pub ny: Float32Array,
+    pub nz: Float32Array,
+    pub curvature: Float32Array,
+    pub break_deg: Float32Array,
+    pub label: Int8Array,
+    pub choices: Int8Array,
+    pub share: Float32Array,
+    pub forest_top: Int8Array,
+    pub scatter: Float32Array,
+    pub flat: Float32Array,
+    pub face_x: Float32Array,
+    pub face_y: Float32Array,
+    pub members: Uint32Array,
+    pub starts: Uint32Array,
+    pub ms: f64,
+}
+
+struct OwnedCloud {
+    origin: [f64; 3],
+    xyz: Vec<f32>,
+    rgb: Option<Vec<u8>>,
+}
+
+pub struct StageTask {
+    clouds: Vec<OwnedCloud>,
+    nums: [f64; 12],
+    cols: usize,
+    rows: usize,
+    coloured: bool,
+    gz: Vec<f64>,
+    trees: Vec<Tree>,
+    started: Instant,
+}
+
+impl Task for StageTask {
+    type Output = rules::Stage;
+    type JsValue = StageFound;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let [x0, y0, y1, z_min, z_max, k, r, v, rise, g, ground_green, _] = self.nums;
+        let ask = StageAsk {
+            clouds: self.clouds.iter().map(|c| CloudIn { origin: c.origin, xyz: &c.xyz, rgb: c.rgb.as_deref() }).collect(),
+            x0,
+            y0,
+            y1,
+            z_min,
+            z_max,
+            k,
+            r,
+            v,
+            rise,
+            gz: &self.gz,
+            cols: self.cols,
+            rows: self.rows,
+            g,
+            ground_green,
+            coloured: self.coloured,
+            trees: &self.trees,
+        };
+        Ok(rules::stage(&ask))
+    }
+
+    fn resolve(&mut self, _env: Env, st: Self::Output) -> Result<Self::JsValue> {
+        Ok(StageFound {
+            ground: st.ground.into_iter().map(Uint8Array::from).collect(),
+            vox: st.vox.into_iter().map(Int32Array::from).collect(),
+            hags: st.hags.into_iter().map(Float32Array::from).collect(),
+            n: st.n as u32,
+            cx: Float64Array::from(st.cx),
+            cy: Float64Array::from(st.cy),
+            cz: Float64Array::from(st.cz),
+            ch: Float64Array::from(st.ch),
+            sn: Float64Array::from(st.sn),
+            sg: Float64Array::from(st.sg),
+            nx: Float32Array::from(st.shapes.nx),
+            ny: Float32Array::from(st.shapes.ny),
+            nz: Float32Array::from(st.shapes.nz),
+            curvature: Float32Array::from(st.shapes.curvature),
+            break_deg: Float32Array::from(st.shapes.break_deg),
+            label: Int8Array::from(st.label),
+            choices: Int8Array::from(st.choices),
+            share: Float32Array::from(st.share),
+            forest_top: Int8Array::from(st.forest_top),
+            scatter: Float32Array::from(st.scatter),
+            flat: Float32Array::from(st.flat),
+            face_x: Float32Array::from(st.face_x),
+            face_y: Float32Array::from(st.face_y),
+            members: Uint32Array::from(st.members),
+            starts: Uint32Array::from(st.starts),
+            ms: self.started.elapsed().as_secs_f64() * 1000.0,
+        })
+    }
+}
+
+/// The rules classifier's heavy middle (its voxels to its whole objects), on a worker thread, every core.
+#[napi(ts_return_type = "Promise<StageFound>")]
+pub fn classify_stage(ask: ClassifyAskJs) -> Result<AsyncTask<StageTask>> {
+    let mut clouds = Vec::with_capacity(ask.clouds.len());
+    for c in &ask.clouds {
+        if c.origin.len() != 3 || c.xyz.len() % 3 != 0 {
+            return Err(Error::from_reason("a scan needs its origin and x, y, z"));
+        }
+        let rgb = c.rgb.as_ref().map(|r| r.to_vec());
+        if rgb.as_ref().is_some_and(|r| r.len() != c.xyz.len()) {
+            return Err(Error::from_reason("a scan's colours don't match its points"));
+        }
+        clouds.push(OwnedCloud { origin: [c.origin[0], c.origin[1], c.origin[2]], xyz: c.xyz.to_vec(), rgb });
+    }
+    let (cols, rows) = (ask.cols as usize, ask.rows as usize);
+    if cols == 0 || rows == 0 || ask.gz.len() != cols * rows {
+        return Err(Error::from_reason("the ground grid doesn't match its size"));
+    }
+    let starts = &ask.tree_starts;
+    let mut trees = Vec::new();
+    for w in starts.windows(2) {
+        let (a, b) = (w[0] as usize, w[1] as usize);
+        if a >= b || b > ask.tree_f.len() {
+            return Err(Error::from_reason("the forest's trees don't fit"));
+        }
+        let ints = |v: &Float64Array| v[a..b].iter().map(|&x| x as i32).collect::<Vec<i32>>();
+        let tree = Tree { f: ints(&ask.tree_f), t: ask.tree_t[a..b].to_vec(), l: ints(&ask.tree_l), r: ints(&ask.tree_r), c: ints(&ask.tree_c) };
+        // Every node it goes to is in it, and every class one of the forest's.
+        let len = (b - a) as i32;
+        if tree.f.iter().zip(tree.l.iter().zip(tree.r.iter())).any(|(&f, (&l, &r))| f >= 10 || (f >= 0 && (l < 0 || l >= len || r < 0 || r >= len)))
+            || tree.c.iter().any(|&c| !(0..7).contains(&c))
+        {
+            return Err(Error::from_reason("a tree of the forest isn't whole"));
+        }
+        trees.push(tree);
+    }
+    if trees.is_empty() || !(ask.r > 0.0) || !(ask.v > 0.0) || !(ask.k > 0.0) || !(ask.g > 0.0) {
+        return Err(Error::from_reason("the classifier's sizes aren't usable"));
+    }
+    Ok(AsyncTask::new(StageTask {
+        clouds,
+        nums: [ask.x0, ask.y0, ask.y1, ask.z_min, ask.z_max, ask.k, ask.r, ask.v, ask.rise, ask.g, ask.ground_green, 0.0],
+        cols,
+        rows,
+        coloured: ask.coloured,
+        gz: ask.gz.to_vec(),
+        trees,
+        started: Instant::now(),
+    }))
 }

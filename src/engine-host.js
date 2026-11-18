@@ -14,14 +14,15 @@
 // `region` answered in parts, for a scan's overview). 1.28: the main
 // process asks for a scan cut to the limit boxes (`crop`), into a file the
 // person chose; a page asks for a `render` (the ray tracer on every core),
-// told how far it's come, and can stop it (`render-stop`). A page names scans only by their tokens: it never gives a path.
+// told how far it's come, and can stop it (`render-stop`). 1.29: the rules
+// classifier's middle (`classify-stage`). A page names scans only by their tokens: it never gives a path.
 
 /** How often a scan being indexed says how far it's come. */
 const PROGRESS_MS = 300;
 
 /** The most one message carries (1.28): a bigger list goes ahead in parts, as the page sends its own (1.23). */
 const PART_BYTES = 16 * 1024 * 1024;
-const LISTS = ["Float64Array", "Float32Array", "Uint8Array", "Uint16Array", "Uint32Array"];
+const LISTS = ["Float64Array", "Float32Array", "Uint8Array", "Uint16Array", "Uint32Array", "Int8Array", "Int32Array"];
 const listOf = (v) => (ArrayBuffer.isView(v) ? LISTS.find((n) => Object.prototype.toString.call(v) === `[object ${n}]`) : undefined);
 
 /**
@@ -32,20 +33,23 @@ const listOf = (v) => (ArrayBuffer.isView(v) ? LISTS.find((n) => Object.prototyp
  */
 function postInParts(port, msg) {
   let parts = 0;
-  const out = {};
-  for (const [k, v] of Object.entries(msg)) {
+  // 1.29: lists inside a list too (each scan's, say).
+  const walk = (v) => {
     const type = listOf(v);
-    if (!type || v.byteLength <= PART_BYTES) {
-      out[k] = v;
-      continue;
+    if (type) {
+      if (v.byteLength <= PART_BYTES) return v;
+      const part = parts;
+      parts += 1;
+      const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+      for (let at = 0; at < bytes.length; at += PART_BYTES)
+        port.postMessage({ kind: "part", id: msg.id, part, at, total: bytes.length, bytes: bytes.slice(at, Math.min(bytes.length, at + PART_BYTES)) });
+      return { __part: part, type, length: v.length };
     }
-    const part = parts;
-    parts += 1;
-    const bytes = new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-    for (let at = 0; at < bytes.length; at += PART_BYTES)
-      port.postMessage({ kind: "part", id: msg.id, part, at, total: bytes.length, bytes: bytes.slice(at, Math.min(bytes.length, at + PART_BYTES)) });
-    out[k] = { __part: part, type, length: v.length };
-  }
+    if (Array.isArray(v)) return v.map(walk);
+    return v;
+  };
+  const out = {};
+  for (const [k, v] of Object.entries(msg)) out[k] = walk(v);
   port.postMessage(out);
   return parts;
 }
@@ -193,7 +197,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const mine = held.get(msg.id);
     if (!mine) return msg;
     held.delete(msg.id);
-    const KINDS = { Float64Array, Float32Array, Uint8Array, Uint16Array, Uint32Array };
+    const KINDS = { Float64Array, Float32Array, Uint8Array, Uint16Array, Uint32Array, Int8Array, Int32Array };
     const put = (v) => {
       if (v && typeof v === "object" && !ArrayBuffer.isView(v)) {
         if (typeof v.__part === "number" && KINDS[v.type]) {
@@ -269,6 +273,34 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const id = msg.id;
     if (msg.kind === "render") {
       void render(port, msg);
+      return;
+    }
+    // 1.29: the rules classifier's middle, on the engine's threads (the
+    // page's scan-classify.ts voxelStage, as it is), answered in parts.
+    if (msg.kind === "classify-stage") {
+      let work;
+      try {
+        work = engine.classifyStage(msg.ask);
+      } catch (err) {
+        work = Promise.reject(err);
+      }
+      Promise.resolve(work).then(
+        (got) => {
+          log(`scan engine: classified ${got.n} voxels in ${Math.round(got.ms)} ms`);
+          try {
+            postInParts(port, { kind: "classify-stage", id, ...got });
+          } catch {
+            ports.delete(port);
+          }
+        },
+        (err) => {
+          try {
+            port.postMessage({ kind: "classify-stage", id, error: String((err && err.message) || err) });
+          } catch {
+            ports.delete(port);
+          }
+        },
+      );
       return;
     }
     if (msg.kind === "render-stop") {
