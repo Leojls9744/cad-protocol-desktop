@@ -143,4 +143,4 @@ function sampleSetups() {
   ];
 }
 
-module.exports = { e57Bytes, sampleSetups, crc32c };
+module.exports = { e57Bytes, sampleSetups };

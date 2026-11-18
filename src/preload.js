@@ -97,12 +97,15 @@ if (appOrigin && window.location.origin === appOrigin) {
       },
     },
     /**
-     * 1.19: the scan engine (src/scan-engine.js), for LAS and LAZ scans
+     * 1.19: the scan engine (src/scan-engine.js), for LAS, LAZ and E57 scans
      * read from this computer. register(file) hands it a scan file the
      * person chose (a File from an Open window, a drop or a linked folder):
      * { token, name, size }, or null when it isn't one it reads. connect()
      * asks for a port to it: the port comes to the page as a message
      * ({ cadpEngine: "port" }, its ports[0]) from this window's own origin.
+     * 1.25: when the engine's process stops, { cadpEngine: "lost", again,
+     * dropped } (whether it starts again; the tokens let go), and once it's
+     * started again { cadpEngine: "back" }, so the page asks for new ports.
      */
     engine: {
       register: (file) => {
@@ -162,5 +165,13 @@ if (appOrigin && window.location.origin === appOrigin) {
   // 1.19: the engine's port handed on to the page (a port can't cross the bridge).
   ipcRenderer.on("cadp:engine:port", (event) => {
     window.postMessage({ cadpEngine: "port" }, window.location.origin, event.ports);
+  });
+  // 1.25: the engine stopped (and whether it starts again), then started again.
+  ipcRenderer.on("cadp:engine:lost", (_event, info) => {
+    const dropped = info && Array.isArray(info.dropped) ? info.dropped.filter((t) => typeof t === "string") : [];
+    window.postMessage({ cadpEngine: "lost", again: Boolean(info && info.again), dropped }, window.location.origin);
+  });
+  ipcRenderer.on("cadp:engine:back", () => {
+    window.postMessage({ cadpEngine: "back" }, window.location.origin);
   });
 }

@@ -3,7 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
-const { addonPath, cacheDirFor, createScanEngine, scanPathOk, unpacked } = require("../src/scan-engine");
+const { STEADY_MS, addonPath, cacheDirFor, createScanEngine, scanPathOk, unpacked } = require("../src/scan-engine");
 
 function fakeHost() {
   const h = new EventEmitter();
@@ -116,6 +116,7 @@ test("a page gets a port to the engine; without the add-on, no engine at all", a
 test("after a crash the engine starts again and opens its scans again, three times at most", async () => {
   const { e, hosts, timers } = engine();
   const a = await e.register("C:\\Jobs\\Lot 7\\scan 1.las");
+  hosts[0].emit("message", { kind: "opened", token: a.token });
   for (let k = 0; k < 4; k += 1) {
     hosts[hosts.length - 1].emit("exit", 1);
     if (timers.length > k) timers[k][0]();
@@ -124,6 +125,58 @@ test("after a crash the engine starts again and opens its scans again, three tim
   assert.equal(timers.length, 3);
   assert.deepEqual(hosts[1].sent[0][0].token, a.token);
   assert.equal(e.running, false);
+  // 1.25: given up, scans go through the page.
+  assert.equal(await e.register("C:\\Jobs\\Lot 7\\scan 2.LAZ"), null);
+  assert.equal(e.connect({ postMessage: () => {} }), false);
+  assert.equal(hosts.length, 4);
+});
+
+test("a page is told when the engine stops and when it's back; scans it was still reading are let go", async () => {
+  const { e, hosts, timers } = engine();
+  const told = [];
+  const page = { postMessage: (channel, msg) => told.push([channel, msg]) };
+  e.connect(page);
+  const a = await e.register("C:\\Jobs\\Lot 7\\scan 1.las");
+  const b = await e.register("C:\\Jobs\\Lot 7\\scan 2.LAZ");
+  hosts[0].emit("message", { kind: "opened", token: a.token });
+  hosts[0].emit("exit", 1);
+  assert.deepEqual(told[1], ["cadp:engine:lost", { again: true, dropped: [b.token] }]);
+  timers[0][0]();
+  assert.deepEqual(told[2], ["cadp:engine:back", {}]);
+  // Started again with the scan it had opened, not the one it was reading.
+  assert.deepEqual(
+    hosts[1].sent.map(([m]) => [m.kind, m.token]),
+    [["open", a.token]],
+  );
+  // That one chosen again: a new token, tried again.
+  const b2 = await e.register("C:\\Jobs\\Lot 7\\scan 2.LAZ");
+  assert.notEqual(b2.token, b.token);
+  assert.equal(hosts[1].sent[1][0].token, b2.token);
+  // A page gone isn't told.
+  let closed = false;
+  const gone = {
+    postMessage: (channel) => {
+      if (channel !== "cadp:engine:port") assert.fail("told a page that's gone");
+    },
+    isDestroyed: () => closed,
+  };
+  e.connect(gone);
+  closed = true;
+  hosts[1].emit("exit", 1);
+  assert.deepEqual(told[told.length - 1][0], "cadp:engine:lost");
+});
+
+test("a process that ran a good while before it stopped starts the count again", async () => {
+  let clock = 0;
+  const { e, hosts, timers } = engine({ now: () => clock });
+  await e.register("C:\\Jobs\\Lot 7\\scan 1.las");
+  for (let k = 0; k < 6; k += 1) {
+    clock += STEADY_MS;
+    hosts[hosts.length - 1].emit("exit", 1);
+    timers[timers.length - 1][0]();
+  }
+  assert.equal(hosts.length, 7);
+  assert.equal(e.running, true);
 });
 
 test("quitting stops the engine's process", async () => {

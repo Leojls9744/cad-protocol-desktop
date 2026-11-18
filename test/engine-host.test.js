@@ -27,7 +27,6 @@ function fakeEngine() {
       if (p.endsWith("bad.las")) return Promise.reject(new Error("not a LAS file"));
       return Promise.resolve({ handle: 7, count: 10, built: true, ms: 3, hasRgb: false, min: [0, 0, 0], max: [1, 1, 1] });
     },
-    closeScan: () => true,
     snap: (scans, ask) => ({ front: new Float64Array([0]), near: new Float64Array([1, 2]), tried: 5, cells: 1, ms: 0.1, asked: [scans, ask] }),
   };
 }
@@ -36,6 +35,8 @@ const tick = () => new Promise((r) => setTimeout(r, 0));
 
 test("scans opened by token; a page told, then answered by token only", async () => {
   const parent = new EventEmitter();
+  parent.sent = [];
+  parent.postMessage = (m) => parent.sent.push(m);
   const engine = fakeEngine();
   createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
   const page = port();
@@ -51,6 +52,11 @@ test("scans opened by token; a page told, then answered by token only", async ()
   assert.equal(page.out[2].token, "t1");
   assert.equal(page.out[2].info.count, 10);
   assert.deepEqual(page.out[3], { kind: "failed", token: "t2", error: "not a LAS file" });
+  // 1.25: the main process told each scan settled.
+  assert.deepEqual(parent.sent, [
+    { kind: "opened", token: "t1" },
+    { kind: "failed", token: "t2" },
+  ]);
   page.emit("message", { data: { kind: "snap", id: 2, scans: [{ token: "t1", affine: [1] }], ask: { reach: 8 } } });
   assert.equal(page.out[4].kind, "snap");
   assert.equal(page.out[4].id, 2);
@@ -210,7 +216,7 @@ test("1.23: Geo W. asked with the page's points and model, how far it's come sai
   const engine = {
     ...fakeEngine(),
     netProgress: () => progress,
-    netClassify: (model, blob, points) =>
+    netClassify: (model, _blob, points) =>
       new Promise((resolve, reject) => {
         if (model.classes < 1) reject(new Error("no classes"));
         finish = () => resolve({ cls: new Uint8Array(points.px.length).fill(2), sure: new Float32Array(points.px.length).fill(0.9), cubes: 1, ms: 3 });

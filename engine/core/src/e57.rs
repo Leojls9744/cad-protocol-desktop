@@ -17,7 +17,7 @@
 //!   limits (else its field's range); each point's setup (its scan's place).
 //!
 //! The file is read a window at a time, never whole. `write` makes E57
-//! files (for the engine's tests and the app's own check).
+//! files for the engine's tests.
 
 use roxmltree::{Document, Node};
 use std::fs::File;
@@ -301,23 +301,9 @@ fn has_colour(scan: Node) -> bool {
     ["colorRed", "colorGreen", "colorBlue"].iter().all(|c| child(proto, c).is_some())
 }
 
-/// What an E57 file holds, its description alone read.
-pub fn facts(path: &Path) -> std::io::Result<E57Facts> {
-    let (_, text) = open(path)?;
-    let doc = Document::parse(&text).map_err(|_| bad("The E57 file's description can't be read."))?;
-    let scans = scans_of(&doc);
-    Ok(E57Facts {
-        scans: scans.len(),
-        records: scans
-            .iter()
-            .map(|s| child(Some(*s), "points").and_then(|p| p.attribute("recordCount")).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0))
-            .sum(),
-        colour: scans.iter().any(|s| has_colour(*s)),
-    })
-}
-
-/// Every valid point of the file in turn, as the page reads them; `progress` with records read, of all.
-pub fn read(path: &Path, mut visit: impl FnMut(&E57Point), mut progress: impl FnMut(u64, u64)) -> std::io::Result<E57Facts> {
+/// Every valid point of the file in turn, as the page reads them (`visit`
+/// false: no more wanted); `progress` with records read, of all.
+pub fn read(path: &Path, mut visit: impl FnMut(&E57Point) -> bool, mut progress: impl FnMut(u64, u64)) -> std::io::Result<E57Facts> {
     let (mut pages, text) = open(path)?;
     let doc = Document::parse(&text).map_err(|_| bad("The E57 file's description can't be read."))?;
     let scans = scans_of(&doc);
@@ -348,6 +334,10 @@ pub fn read(path: &Path, mut visit: impl FnMut(&E57Point), mut progress: impl Fn
             let (n, f) = field_of(el)?;
             names.push(n);
             fields.push(f);
+        }
+        // Points of no bytes (every field one value) would come without end (1.25).
+        if fields.iter().all(|f| matches!(f, Field::Int { bits: 0, .. })) {
+            return Err(bad("An E57 scan's points hold no values to read."));
         }
         let at = |n: &str| names.iter().position(|x| x == n);
         let cart: Vec<Option<usize>> = ["cartesianX", "cartesianY", "cartesianZ"].iter().map(|n| at(n)).collect();
@@ -445,10 +435,13 @@ pub fn read(path: &Path, mut visit: impl FnMut(&E57Point), mut progress: impl Fn
                             },
                             setup: k as u16,
                         };
-                        visit(&pt);
+                        if !visit(&pt) {
+                            return Ok(facts);
+                        }
                     }
                     ready -= n as u64;
                     left -= n as u64;
+                    progress(index, total);
                 }
             }
             p += length;

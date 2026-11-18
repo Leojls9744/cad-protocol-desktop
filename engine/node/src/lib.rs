@@ -6,7 +6,7 @@
 //! how far it's come; snap(scans, ask) finds the points under the cursor
 //! (each 14 numbers in a Float64Array: scan, index, x, y, z, pixels from the
 //! cursor, nearness to the eye, class, flags, intensity, returns, red,
-//! green, blue); closeScan(handle) lets one go. 1.20: region(handle,
+//! green, blue). 1.20: region(handle,
 //! affine, min, max, ring, most) gives a scan's points in a box of the
 //! drawing, evenly thinned to about `most`. 1.22: alignClouds(fixed,
 //! moving, ask) lines one scan's points up on another's after the picked
@@ -16,20 +16,21 @@
 //! netClassify(model, blob, points) runs Geo W. over a scan's points on a
 //! worker thread (every core), as the page runs it; netProgress() says how
 //! far the run in hand has come. 1.24: E57 scans opened as LAS scans are
-//! (their setups kept; snap and region asked of one setup when given);
-//! writeE57 makes one (the app's own check).
+//! (their setups kept; snap and region asked of one setup when given).
+//! 1.25: scans indexed on threads of their own, a few at a time, so cloud
+//! to cloud and Geo W. (on Node's worker threads) never wait behind them.
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
 use cadp_engine_core::net;
 use cadp_engine_core::{
-    build_or_open, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
+    build_fresh, open_made, region as within, snap as find, Candidate, Index, Progress, RegionQuery, ScanIn, SnapQuery,
 };
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex};
 use std::time::Instant;
 
 static INDEXES: LazyLock<Mutex<HashMap<u32, Arc<Index>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -61,70 +62,95 @@ pub struct ScanInfo {
     pub max: Vec<f64>,
 }
 
-pub struct OpenTask {
-    path: String,
-    cache: String,
-    progress: Arc<Progress>,
-    started: Instant,
-}
+/// Scans indexed at once (1.25), each on a thread of its own; any more wait their turn.
+const MOST_BUILDS: usize = 4;
+static BUILDS: (Mutex<usize>, Condvar) = (Mutex::new(0), Condvar::new());
 
-impl Task for OpenTask {
-    type Output = Index;
-    type JsValue = ScanInfo;
+/// A turn to index, given back when dropped.
+struct Turn;
 
-    fn compute(&mut self) -> Result<Self::Output> {
-        build_or_open(&PathBuf::from(&self.path), &PathBuf::from(&self.cache), &self.progress)
-            .map_err(|e| Error::from_reason(e.to_string()))
-    }
-
-    fn resolve(&mut self, _env: Env, ix: Self::Output) -> Result<Self::JsValue> {
-        let handle = NEXT.fetch_add(1, Ordering::Relaxed);
-        let lo = ix.file_xyz(ix.min[0], ix.min[1], ix.min[2]);
-        let hi = ix.file_xyz(ix.max[0], ix.max[1], ix.max[2]);
-        let info = ScanInfo {
-            handle,
-            count: ix.count as f64,
-            built: ix.built,
-            ms: self.started.elapsed().as_secs_f64() * 1000.0,
-            has_rgb: ix.has_rgb,
-            setups: ix.setups,
-            e57: ix.e57,
-            min: lo.to_vec(),
-            max: hi.to_vec(),
-        };
-        INDEXES.lock().unwrap().insert(handle, Arc::new(ix));
-        Ok(info)
-    }
-
-    fn finally(self, _env: Env) -> Result<()> {
-        OPENING.lock().unwrap().remove(&self.path);
-        Ok(())
+impl Turn {
+    fn wait() -> Turn {
+        let (count, freed) = &BUILDS;
+        let mut n = count.lock().unwrap();
+        while *n >= MOST_BUILDS {
+            n = freed.wait(n).unwrap();
+        }
+        *n += 1;
+        Turn
     }
 }
 
-/// A scan indexed (or its index made before opened), on a worker thread.
-#[napi]
-pub fn open_scan(path: String, cache_dir: String) -> AsyncTask<OpenTask> {
+impl Drop for Turn {
+    fn drop(&mut self) {
+        let (count, freed) = &BUILDS;
+        *count.lock().unwrap() -= 1;
+        freed.notify_one();
+    }
+}
+
+/// An index kept by a new handle; what the page is told of it.
+fn keep(ix: Index, started: Instant) -> ScanInfo {
+    let handle = NEXT.fetch_add(1, Ordering::Relaxed);
+    let lo = ix.file_xyz(ix.min[0], ix.min[1], ix.min[2]);
+    let hi = ix.file_xyz(ix.max[0], ix.max[1], ix.max[2]);
+    let info = ScanInfo {
+        handle,
+        count: ix.count as f64,
+        built: ix.built,
+        ms: started.elapsed().as_secs_f64() * 1000.0,
+        has_rgb: ix.has_rgb,
+        setups: ix.setups,
+        e57: ix.e57,
+        min: lo.to_vec(),
+        max: hi.to_vec(),
+    };
+    INDEXES.lock().unwrap().insert(handle, Arc::new(ix));
+    info
+}
+
+/// A scan indexed (or its index made before opened) on a thread of its own
+/// (1.25): one made before opens at once; a new one waits for a turn.
+#[napi(ts_return_type = "Promise<ScanInfo>")]
+pub fn open_scan(env: &Env, path: String, cache_dir: String) -> Result<Object<'_>> {
+    let (deferred, promise) = env.create_deferred::<ScanInfo, _>()?;
     let progress = Arc::new(Progress::default());
     OPENING.lock().unwrap().insert(path.clone(), progress.clone());
-    AsyncTask::new(OpenTask {
-        path,
-        cache: cache_dir,
-        progress,
-        started: Instant::now(),
-    })
+    let started = Instant::now();
+    let key = path.clone();
+    let spawned = std::thread::Builder::new().name("cadp-index".into()).spawn(move || {
+        let src = PathBuf::from(&path);
+        let cache = PathBuf::from(&cache_dir);
+        let got = match open_made(&src, &cache) {
+            Some(ix) => {
+                progress.set(1.0);
+                Ok(ix)
+            }
+            None => {
+                let _turn = Turn::wait();
+                build_fresh(&src, &cache, &progress)
+            }
+        };
+        OPENING.lock().unwrap().remove(&path);
+        match got {
+            Ok(ix) => {
+                let info = keep(ix, started);
+                deferred.resolve(move |_| Ok(info));
+            }
+            Err(e) => deferred.reject(Error::from_reason(e.to_string())),
+        }
+    });
+    if let Err(e) = spawned {
+        OPENING.lock().unwrap().remove(&key);
+        return Err(Error::from_reason(format!("couldn't start indexing: {e}")));
+    }
+    Ok(promise)
 }
 
 /// How far a scan's indexing has come (0 to 1), or -1 when none is.
 #[napi]
 pub fn open_progress(path: String) -> f64 {
     OPENING.lock().unwrap().get(&path).map(|p| p.get()).unwrap_or(-1.0)
-}
-
-/// A scan let go; whether it was open.
-#[napi]
-pub fn close_scan(handle: u32) -> bool {
-    INDEXES.lock().unwrap().remove(&handle).is_some()
 }
 
 #[napi(object)]
@@ -634,97 +660,4 @@ pub fn net_classify(model: NetModelJs, blob: Float32Array, points: NetPoints) ->
 #[napi]
 pub fn net_progress() -> f64 {
     net::progress()
-}
-
-#[napi(object)]
-pub struct E57WritePoint {
-    /// x, y, z (or range, azimuth, elevation), metres and radians.
-    pub at: Vec<f64>,
-    pub intensity: f64,
-    pub rgb: Option<Vec<u32>>,
-    pub invalid: Option<bool>,
-}
-
-#[napi(object)]
-pub struct E57WriteScan {
-    pub name: String,
-    /// w, x, y, z then x, y, z.
-    pub pose: Option<Vec<f64>>,
-    /// "float", "scaled" (a millimetre) or "spherical".
-    pub places: String,
-    pub points: Vec<E57WritePoint>,
-}
-
-/// An E57 file written (1.24: the app's own check of the engine, and checks against the page).
-#[napi]
-pub fn write_e57(path: String, scans: Vec<E57WriteScan>) -> Result<()> {
-    let list: Vec<cadp_engine_core::e57::WriteScan> = scans
-        .iter()
-        .map(|s| {
-            let pose = s.pose.as_ref().filter(|p| p.len() == 7).map(|p| ([p[0], p[1], p[2], p[3]], [p[4], p[5], p[6]]));
-            let colour = s.points.iter().any(|p| p.rgb.is_some());
-            cadp_engine_core::e57::WriteScan {
-                name: s.name.clone(),
-                pose,
-                places: match s.places.as_str() {
-                    "scaled" => cadp_engine_core::e57::Places::Scaled { scale: 0.001, min: -100_000_000, max: 100_000_000 },
-                    "spherical" => cadp_engine_core::e57::Places::Spherical,
-                    _ => cadp_engine_core::e57::Places::Float,
-                },
-                intensity_whole: Some(2047),
-                colour,
-                invalid_field: s.points.iter().any(|p| p.invalid.is_some()),
-                points: s
-                    .points
-                    .iter()
-                    .map(|p| cadp_engine_core::e57::WritePoint {
-                        at: [p.at.first().copied().unwrap_or(0.0), p.at.get(1).copied().unwrap_or(0.0), p.at.get(2).copied().unwrap_or(0.0)],
-                        intensity: p.intensity,
-                        rgb: p.rgb.as_ref().map(|c| [c.first().copied().unwrap_or(0).min(255) as u8, c.get(1).copied().unwrap_or(0).min(255) as u8, c.get(2).copied().unwrap_or(0).min(255) as u8]).unwrap_or([0, 0, 0]),
-                        invalid: p.invalid.unwrap_or(false),
-                    })
-                    .collect(),
-            }
-        })
-        .collect();
-    cadp_engine_core::e57::write(&PathBuf::from(path), &list).map_err(|e| Error::from_reason(e.to_string()))
-}
-
-#[napi(object)]
-pub struct E57Read {
-    pub x: Float64Array,
-    pub y: Float64Array,
-    pub z: Float64Array,
-    pub intensity: Uint16Array,
-    pub rgb: Uint8Array,
-    pub setup: Uint16Array,
-    pub scans: u32,
-}
-
-/// Every valid point of an E57 file as the engine reads it, in the file's order (1.24: checks against the page's own reading).
-#[napi]
-pub fn read_e57_points(path: String) -> Result<E57Read> {
-    let (mut x, mut y, mut z, mut i, mut c, mut s) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let facts = cadp_engine_core::e57::read(
-        &PathBuf::from(path),
-        |p| {
-            x.push(p.x);
-            y.push(p.y);
-            z.push(p.z);
-            i.push(p.intensity);
-            c.extend_from_slice(&p.rgb);
-            s.push(p.setup);
-        },
-        |_, _| {},
-    )
-    .map_err(|e| Error::from_reason(e.to_string()))?;
-    Ok(E57Read {
-        x: Float64Array::from(x),
-        y: Float64Array::from(y),
-        z: Float64Array::from(z),
-        intensity: Uint16Array::from(i),
-        rgb: Uint8Array::from(c),
-        setup: Uint16Array::from(s),
-        scans: facts.scans as u32,
-    })
 }

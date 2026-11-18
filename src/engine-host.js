@@ -6,7 +6,8 @@
 //
 // From the app's main process it hears which scan files the page was given
 // (each a token and its path: `open`), and gets a port for each page that
-// asks (`page`). Over a page's port it says what's open (`hello`, `opened`,
+// asks (`page`); it tells the main process each scan opened or turned down
+// (1.25), so after a crash the scans it was still reading aren't tried again. Over a page's port it says what's open (`hello`, `opened`,
 // `progress`, `failed`) and answers what's asked (`snap`, `status`; 1.20
 // `region`; 1.22 `align` and `check`, cloud to cloud on points the page
 // gives; 1.23 `classify`, Geo W. on points the page gives). A page names scans only by their tokens: it never gives a path.
@@ -38,6 +39,15 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     ...(s.error ? { error: s.error } : {}),
   });
 
+  /** The main process told a scan is settled (1.25). */
+  const settle = (kind, token) => {
+    try {
+      if (typeof parentPort.postMessage === "function") parentPort.postMessage({ kind, token });
+    } catch {
+      // The main process is going.
+    }
+  };
+
   function open({ token, path, cacheDir }) {
     if (typeof token !== "string" || typeof path !== "string" || typeof cacheDir !== "string") return;
     if (scans.has(token)) return;
@@ -63,22 +73,17 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         s.fraction = 1;
         s.info = { count: info.count, built: info.built, ms: info.ms, hasRgb: info.hasRgb, setups: info.setups === true, e57: info.e57 === true, min: info.min, max: info.max };
         log(`scan engine: ${info.built ? "indexed" : "opened"} ${info.count} points in ${Math.round(info.ms)} ms`);
+        settle("opened", token);
         tell({ kind: "opened", token, info: s.info });
       },
       (err) => {
         stop(timer);
         s.error = String((err && err.message) || err);
         log(`scan engine: couldn't open a scan: ${s.error}`);
+        settle("failed", token);
         tell({ kind: "failed", token, error: s.error });
       },
     );
-  }
-
-  function close({ token }) {
-    const s = scans.get(token);
-    if (!s) return;
-    scans.delete(token);
-    if (s.handle != null) engine.closeScan(s.handle);
   }
 
   /** A question's big lists as they come in parts (1.23), by port, then id. */
@@ -213,7 +218,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       };
       let last = -1;
       const timer = every(() => {
-        const done = typeof engine.netProgress === "function" ? engine.netProgress() : 0;
+        const done = engine.netProgress();
         if (done !== last) {
           last = done;
           say({ kind: "classify-progress", id, done });
@@ -275,14 +280,13 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const msg = event.data;
     if (!msg || typeof msg !== "object") return;
     if (msg.kind === "open") open(msg);
-    else if (msg.kind === "close") close(msg);
     else if (msg.kind === "page" && event.ports && event.ports[0]) addPage(event.ports[0]);
   });
 
   return { scans, ports, answer };
 }
 
-module.exports = { createHost, PROGRESS_MS };
+module.exports = { createHost };
 
 // Started as the engine's process: the add-on named on its command line.
 if (process.parentPort) {

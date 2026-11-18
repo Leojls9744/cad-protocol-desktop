@@ -54,7 +54,7 @@ The window is locked down the way Electron's [security guidance](https://www.ele
 - **A few things to the computer:** the app's page can reach the pointer-speed setting, start Sign in with your browser, read its update state and restart into a downloaded update, and answer before the window closes. The main process checks every request comes from the app's own address ([`src/preload.js`](src/preload.js), [`src/main.js`](src/main.js)).
 - **Permissions:** only clipboard, full screen, pointer lock, notifications and keeping its storage (1.21: `persistent-storage`, so the copy of the app it opens from and drawings kept here aren't cleared when the disk is low) are allowed, and only to the app. The camera, microphone and location are refused.
 - **Settings kept on the computer:** only the window's size and place, the pointer setting, and a short log, all in `%APPDATA%\CAD Protocol`. Drawings and files stay in your encrypted vault.
-- **Scans read only.** The scan engine opens only `.las`, `.laz` and `.e57` files you chose, read only; its indexes (copies of the points, filed by place) are in `%LOCALAPPDATA%\CAD Protocol\scan-engine`, and can be deleted at any time (they're made again).
+- **Scans read only.** The scan engine opens only `.las`, `.laz` and `.e57` files you chose, read only; its indexes (copies of the points, filed by place) are in `%LOCALAPPDATA%\CAD Protocol\scan-engine`, and can be deleted at any time (they're made again); 1.25 removes a scan's older index once its changed file is indexed again, and half-made index files a day old.
 - **Hardened Electron options:** "run as Node" and debugging flags are switched off in the executable.
 
 ## Files

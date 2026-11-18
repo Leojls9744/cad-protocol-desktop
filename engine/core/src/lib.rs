@@ -34,6 +34,6 @@ pub mod snap;
 
 mod fx;
 
-pub use index::{build_or_open, cache_name, Index, IndexError, Progress};
+pub use index::{build_fresh, build_or_open, cache_name, open_made, Index, IndexError, Progress};
 pub use region::{region, RegionPoints, RegionQuery};
 pub use snap::{snap, Candidate, ScanIn, SnapAnswer, SnapQuery};

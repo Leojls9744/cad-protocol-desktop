@@ -32,7 +32,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::UNIX_EPOCH;
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const MAGIC: &[u8; 8] = b"CADPENG1";
 /// 2 (desktop 1.20): each cell's points in a shuffled order, so the first
@@ -276,19 +277,32 @@ impl Index {
     }
 }
 
-/// The index file's name for a scan file: by its path, size and date.
-pub fn cache_name(src: &Path, size: u64, mtime: u64) -> String {
-    // FNV-1a, 64 bits.
+/// FNV-1a, 64 bits, of each run of bytes in turn.
+fn fnv(parts: &[&[u8]]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |bytes: &[u8]| {
-        for b in bytes {
+    for bytes in parts {
+        for b in *bytes {
             h ^= u64::from(*b);
             h = h.wrapping_mul(0x0100_0000_01b3);
         }
-    };
-    eat(src.to_string_lossy().to_lowercase().as_bytes());
-    eat(&size.to_le_bytes());
-    eat(&mtime.to_le_bytes());
+    }
+    h
+}
+
+/// A scan file's path as its indexes' names start (1.25).
+fn path_key(src: &Path) -> String {
+    format!("{:016x}-", fnv(&[src.to_string_lossy().to_lowercase().as_bytes()]))
+}
+
+/// The index file's name for a scan file (1.25): by its path, then its size
+/// and date, so a file's older indexes are known by the first part.
+pub fn cache_name(src: &Path, size: u64, mtime: u64) -> String {
+    format!("{}{:016x}.cpe", path_key(src), fnv(&[&size.to_le_bytes(), &mtime.to_le_bytes()]))
+}
+
+/// The name 1.19–1.24 gave it: path, size and date in one.
+fn old_cache_name(src: &Path, size: u64, mtime: u64) -> String {
+    let h = fnv(&[src.to_string_lossy().to_lowercase().as_bytes(), &size.to_le_bytes(), &mtime.to_le_bytes()]);
     format!("{h:016x}.cpe")
 }
 
@@ -303,22 +317,95 @@ fn stamp_of(src: &Path) -> Result<(u64, u64), IndexError> {
     Ok((meta.len(), mtime))
 }
 
-/// A scan's index: the one made before for this file as it is now, else made now.
-pub fn build_or_open(src: &Path, cache_dir: &Path, progress: &Progress) -> Result<Index, IndexError> {
-    let (size, mtime) = stamp_of(src)?;
-    let path = cache_dir.join(cache_name(src, size, mtime));
-    if let Ok(ix) = Index::open(&path) {
-        if ix.source_size == size && ix.source_mtime == mtime {
-            progress.set(1.0);
-            return Ok(ix);
+/// Half-made files (a build stopped short) are let go after this long.
+const STALE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The folder's half-made files of a day or more ago removed, once a run (1.25).
+fn tidy_folder_once(cache_dir: &Path) {
+    static DONE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    {
+        let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+        if done.iter().any(|d| d == cache_dir) {
+            return;
+        }
+        done.push(cache_dir.to_path_buf());
+    }
+    let Ok(list) = fs::read_dir(cache_dir) else { return };
+    let now = SystemTime::now();
+    for entry in list.flatten() {
+        let p = entry.path();
+        let half = matches!(p.extension().and_then(|e| e.to_str()), Some("scratch" | "building"));
+        let old = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= STALE);
+        if half && old {
+            let _ = fs::remove_file(&p);
         }
     }
+}
+
+/// The scan file's other indexes (made of it before it changed) and half-made files removed, all but `keep` (1.25).
+fn tidy_others(cache_dir: &Path, src: &Path, keep: &Path) {
+    let Ok(list) = fs::read_dir(cache_dir) else { return };
+    let mine = path_key(src);
+    for entry in list.flatten() {
+        let p = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = matches!(p.extension().and_then(|e| e.to_str()), Some("cpe" | "scratch" | "building"));
+        if ours && name.starts_with(&mine) && p != keep {
+            let _ = fs::remove_file(&p);
+        }
+    }
+}
+
+/// The index made before for this file as it is now, if there is one
+/// (1.25: one 1.19–1.24 made taken on under its new name).
+pub fn open_made(src: &Path, cache_dir: &Path) -> Option<Index> {
+    tidy_folder_once(cache_dir);
+    let (size, mtime) = stamp_of(src).ok()?;
+    let fits = |ix: &Index| ix.source_size == size && ix.source_mtime == mtime;
+    let path = cache_dir.join(cache_name(src, size, mtime));
+    if let Some(ix) = Index::open(&path).ok().filter(fits) {
+        return Some(ix);
+    }
+    let old = cache_dir.join(old_cache_name(src, size, mtime));
+    let ix = Index::open(&old).ok().filter(fits)?;
+    drop(ix);
+    if fs::rename(&old, &path).is_ok() {
+        tidy_others(cache_dir, src, &path);
+        return Index::open(&path).ok().filter(fits);
+    }
+    Index::open(&old).ok().filter(fits)
+}
+
+/// The scan's index made now; its older ones removed once it's whole (1.25).
+pub fn build_fresh(src: &Path, cache_dir: &Path, progress: &Progress) -> Result<Index, IndexError> {
+    let (size, mtime) = stamp_of(src)?;
     fs::create_dir_all(cache_dir)?;
-    build(src, &path, size, mtime, progress)?;
+    let path = cache_dir.join(cache_name(src, size, mtime));
+    if let Err(e) = build(src, &path, size, mtime, progress) {
+        let _ = fs::remove_file(path.with_extension("scratch"));
+        let _ = fs::remove_file(path.with_extension("building"));
+        return Err(e);
+    }
     let mut ix = Index::open(&path)?;
     ix.built = true;
+    tidy_others(cache_dir, src, &path);
     progress.set(1.0);
     Ok(ix)
+}
+
+/// A scan's index: the one made before for this file as it is now, else made now.
+pub fn build_or_open(src: &Path, cache_dir: &Path, progress: &Progress) -> Result<Index, IndexError> {
+    if let Some(ix) = open_made(src, cache_dir) {
+        progress.set(1.0);
+        return Ok(ix);
+    }
+    build_fresh(src, cache_dir, progress)
 }
 
 #[derive(Clone, Copy)]
@@ -466,7 +553,6 @@ pub fn build(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         origin,
         cell,
         flags: (has_rgb as u32) | (wide as u32) << 1,
-        point_format: header.point_format().to_u8().unwrap_or(0),
         size,
         mtime,
     };
@@ -480,7 +566,6 @@ struct Head {
     origin: [i64; 3],
     cell: [i64; 3],
     flags: u32,
-    point_format: u8,
     size: u64,
     mtime: u64,
 }
@@ -528,7 +613,7 @@ fn build_e57(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
             src,
             |p| {
                 if failed.is_some() {
-                    return;
+                    return false;
                 }
                 // The grid from the first point, in whole metres: ±214 km round it.
                 let o = *offset.get_or_insert([p.x.round(), p.y.round(), p.z.round()]);
@@ -549,9 +634,12 @@ fn build_e57(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
                 }
                 encode(&mut rec, &r);
                 if let Err(e) = out.write_all(&rec) {
+                    // No room: the rest of the file isn't read (1.25).
                     failed = Some(e);
+                    return false;
                 }
                 total += 1;
+                true
             },
             |done, all| progress.set(0.5 * (done as f64 / all.max(1) as f64).min(1.0)),
         );
@@ -604,7 +692,6 @@ fn build_e57(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
         origin,
         cell,
         flags: (facts.colour as u32) | ((facts.scans > 1) as u32) << 2 | 1 << 3,
-        point_format: 0,
         size,
         mtime,
     };
@@ -613,7 +700,7 @@ fn build_e57(src: &Path, path: &Path, size: u64, mtime: u64, progress: &Progress
 
 /// The index file laid out from the scratch: its head and tables, each point in its cell's place, each cell shuffled.
 fn lay_out(path: &Path, scratch: &Path, total: u64, cells: &FxMap<u64, Acc>, head: &Head, progress: &Progress) -> Result<(), IndexError> {
-    let Head { scale, offset, origin, cell, flags, point_format, size, mtime } = *head;
+    let Head { scale, offset, origin, cell, flags, size, mtime } = *head;
 
     // The cells in order, each its place; the blocks over them.
     let mut order: Vec<(u64, u64, Acc)> = cells.iter().map(|(k, a)| (order_of(*k), *k, *a)).collect();
@@ -689,7 +776,6 @@ fn lay_out(path: &Path, scratch: &Path, total: u64, cells: &FxMap<u64, Acc>, hea
         h[136..144].copy_from_slice(&(cells_at as u64).to_le_bytes());
         h[144..152].copy_from_slice(&(blocks_at as u64).to_le_bytes());
         h[152..160].copy_from_slice(&(points_at as u64).to_le_bytes());
-        h[184] = point_format;
     }
     for (k, (_, _, acc)) in order.iter().enumerate() {
         let at = cells_at + k * CELL;

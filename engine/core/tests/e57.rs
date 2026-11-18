@@ -56,7 +56,10 @@ fn reads_setups_as_the_page_does() {
     let f = d.join("site.e57");
     three(&f);
     let mut pts = Vec::new();
-    let facts = e57::read(&f, |p| pts.push(*p), |_, _| {}).unwrap();
+    let facts = e57::read(&f, |p| {
+        pts.push(*p);
+        true
+    }, |_, _| {}).unwrap();
     assert_eq!(facts.scans, 3);
     assert!(facts.colour);
     assert_eq!(facts.records, 1600 + 900 + 500);
@@ -140,6 +143,7 @@ fn reads_a_file_another_program_wrote() {
         if p.rgb != [0, 0, 0] {
             coloured += 1;
         }
+        true
     }, |_, _| {})
     .unwrap();
     assert_eq!(facts.scans, 1);
@@ -189,10 +193,46 @@ fn speed() {
     let size = std::fs::metadata(&f).unwrap().len();
     let t = std::time::Instant::now();
     let mut n = 0u64;
-    e57::read(&f, |_| n += 1, |_, _| {}).unwrap();
+    e57::read(&f, |_| {
+        n += 1;
+        true
+    }, |_, _| {}).unwrap();
     let read = t.elapsed();
     let t = std::time::Instant::now();
     let ix = build_or_open(&f, &d.join("cache"), &Progress::default()).unwrap();
     eprintln!("{} MB, {n} points: read {:?}, indexed {:?} ({} points)", size >> 20, read, t.elapsed(), ix.count);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn turns_down_a_scan_whose_points_hold_nothing() {
+    let d = dir("empty");
+    let f = d.join("one-value.e57");
+    let pts: Vec<WritePoint> = (0..300).map(|k| WritePoint { at: [k as f64 * 0.01, 1.0, 2.0], intensity: 100.0, rgb: [0, 0, 0], invalid: false }).collect();
+    e57::write(
+        &f,
+        &[WriteScan { name: "Station 1".into(), pose: None, places: Places::Scaled { scale: 0.001, min: -1_000_000, max: 1_000_000 }, intensity_whole: Some(2047), colour: false, invalid_field: false, points: pts }],
+    )
+    .unwrap();
+    // Every field made one value, the same length, so the file's places hold.
+    let mut b = std::fs::read(&f).unwrap();
+    let swap = |b: &mut Vec<u8>, from: &str, to: &str| {
+        assert_eq!(from.len(), to.len());
+        let mut n = 0;
+        while let Some(at) = b.windows(from.len()).position(|w| w == from.as_bytes()) {
+            b[at..at + from.len()].copy_from_slice(to.as_bytes());
+            n += 1;
+        }
+        n
+    };
+    assert_eq!(swap(&mut b, "minimum=\"-1000000\" maximum=\"1000000\"", "minimum=\"5\"        maximum=\"5\"      "), 3);
+    assert_eq!(swap(&mut b, "minimum=\"0\" maximum=\"2047\"", "minimum=\"0\" maximum=\"0\"   "), 1);
+    std::fs::write(&f, &b).unwrap();
+    let err = e57::read(&f, |_| true, |_, _| {}).expect_err("turned down");
+    assert!(err.to_string().contains("hold no values"), "{err}");
+    let cache = d.join("cache");
+    assert!(build_or_open(&f, &cache, &Progress::default()).is_err());
+    let left: Vec<_> = std::fs::read_dir(&cache).unwrap().flatten().collect();
+    assert!(left.is_empty(), "nothing left behind: {left:?}");
     let _ = std::fs::remove_dir_all(&d);
 }

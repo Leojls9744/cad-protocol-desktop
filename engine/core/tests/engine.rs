@@ -316,3 +316,78 @@ fn gives_a_box_s_points_evenly_thinned() {
     let b = region(&ix, &IDENTITY, &all);
     assert_eq!(a.xyz, b.xyz);
 }
+
+/// The index files in a folder, by name.
+fn indexes(cache: &Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(cache)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".cpe") || n.ends_with(".scratch") || n.ends_with(".building"))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn keeps_one_index_a_scan_and_lets_half_made_files_go() {
+    let dir = scratch("tidy");
+    let las = dir.join("site.las");
+    let other = dir.join("other.las");
+    write(&las, false);
+    write(&other, false);
+    let cache = dir.join("cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    // Half-made files: one from two days ago, one just now (a build going on elsewhere).
+    let old = cache.join("0123456789abcdef-0000000000000000.scratch");
+    let new = cache.join("fedcba9876543210-0000000000000000.building");
+    std::fs::write(&old, b"x").unwrap();
+    std::fs::write(&new, b"x").unwrap();
+    let two_days = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+    std::fs::File::options().write(true).open(&old).unwrap().set_modified(two_days).unwrap();
+    let first = build_or_open(&las, &cache, &Progress::default()).unwrap();
+    assert!(first.built);
+    drop(first);
+    build_or_open(&other, &cache, &Progress::default()).unwrap();
+    assert!(!old.exists(), "a half-made file of a day ago let go");
+    assert!(new.exists(), "a half-made file of now kept");
+    let before = indexes(&cache);
+    assert_eq!(before.len(), 3, "{before:?}");
+    // The scan changed: a new index, the old one of it gone, the other scan's kept.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    write(&las, false);
+    let again = build_or_open(&las, &cache, &Progress::default()).unwrap();
+    assert!(again.built);
+    let after = indexes(&cache);
+    assert_eq!(after.len(), 3, "{after:?}");
+    let stem = |n: &str| n.split('-').next().unwrap().to_string();
+    let changed: Vec<&String> = after.iter().filter(|n| n.ends_with(".cpe") && !before.contains(n)).collect();
+    assert_eq!(changed.len(), 1);
+    assert!(before.iter().any(|n| n.ends_with(".cpe") && stem(n) == stem(changed[0])), "same scan, same first part");
+    assert!(!before.iter().any(|n| n == changed[0]));
+}
+
+#[test]
+fn takes_on_an_index_named_as_before() {
+    let dir = scratch("adopt");
+    let las = dir.join("site.las");
+    write(&las, false);
+    let cache = dir.join("cache");
+    let ix = build_or_open(&las, &cache, &Progress::default()).unwrap();
+    let made = ix.path.clone();
+    drop(ix);
+    // 1.19–1.24's name: FNV-1a of the path (lower case), size and date in one.
+    let meta = std::fs::metadata(&las).unwrap();
+    let mtime = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in las.to_string_lossy().to_lowercase().as_bytes().iter().chain(&meta.len().to_le_bytes()).chain(&mtime.to_le_bytes()) {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    let old = cache.join(format!("{h:016x}.cpe"));
+    std::fs::rename(&made, &old).unwrap();
+    let again = build_or_open(&las, &cache, &Progress::default()).unwrap();
+    assert!(!again.built, "the index made before was opened, not made again");
+    assert_eq!(again.path, made);
+    assert!(!old.exists());
+}

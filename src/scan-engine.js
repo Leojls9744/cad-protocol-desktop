@@ -23,8 +23,10 @@ const crypto = require("node:crypto");
 const SCAN_EXTENSIONS = [".las", ".laz", ".e57"];
 /** At most this many scans opened in a session. */
 const MOST_SCANS = 500;
-/** After a crash, the engine's process is started again at most this many times. */
+/** After a crash, the engine's process is started again at most this many times in a row. */
 const MOST_RESTARTS = 3;
+/** A process that ran this long before it stopped starts the count again (1.25). */
+const STEADY_MS = 10 * 60 * 1000;
 
 /** Whether a path the preload gave is a scan file the engine may open. */
 function scanPathOk(p) {
@@ -53,22 +55,41 @@ function cacheDirFor(env, userData) {
  * fork(hostPath, args, options) starts its process (Electron's utilityProcess.fork);
  * newChannel() a MessageChannelMain; statFile(path) resolves fs.Stats or null.
  */
-function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon, hostPath, log = () => {}, later = setTimeout }) {
+function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon, hostPath, log = () => {}, later = setTimeout, now = Date.now }) {
   let host = null;
   let restarts = 0;
   let stopped = false;
+  /** Stopped after crashing MOST_RESTARTS times (1.25): scans go through the page. */
+  let gaveUp = false;
   /** token → path, and path (lower case) → token. */
   const tokens = new Map();
   const byPath = new Map();
+  /** Tokens whose scans the engine has opened or turned down (1.25). */
+  const settled = new Set();
+  /** The pages given a port, told when the engine stops and starts again (1.25). */
+  const pages = new Set();
   const available = typeof exists === "function" ? exists(addon) : true;
 
+  /** A word to each page still there. */
+  function tellPages(channel, msg) {
+    for (const contents of pages) {
+      try {
+        if (typeof contents.isDestroyed === "function" && contents.isDestroyed()) pages.delete(contents);
+        else contents.postMessage(channel, msg);
+      } catch {
+        pages.delete(contents);
+      }
+    }
+  }
+
   function start() {
-    if (stopped || !available) return null;
+    if (stopped || gaveUp || !available) return null;
     const child = fork(hostPath, [`--cadp-engine-addon=${addon}`], {
       serviceName: "CAD Protocol scan engine",
       stdio: "pipe",
     });
     host = child;
+    const startedAt = now();
     const lines = (stream) => {
       if (!stream || typeof stream.on !== "function") return;
       stream.on("data", (chunk) => {
@@ -77,18 +98,31 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     };
     lines(child.stdout);
     lines(child.stderr);
+    child.on("message", (msg) => {
+      if (msg && (msg.kind === "opened" || msg.kind === "failed") && typeof msg.token === "string") settled.add(msg.token);
+    });
     child.on("exit", (code) => {
       if (host === child) host = null;
       if (stopped) return;
       log(`scan engine: its process ended (${code})`);
-      if (restarts >= MOST_RESTARTS) return;
+      if (now() - startedAt >= STEADY_MS) restarts = 0;
+      // 1.25: the scans it was still reading let go, so one can't stop it again and again.
+      const dropped = [...tokens.keys()].filter((t) => !settled.has(t));
+      for (const t of dropped) {
+        byPath.delete(tokens.get(t).toLowerCase());
+        tokens.delete(t);
+      }
+      const again = restarts < MOST_RESTARTS;
+      if (!again) gaveUp = true;
+      tellPages("cadp:engine:lost", { again, dropped });
+      if (!again) return;
       restarts += 1;
       later(() => {
-        const again = ensure();
-        // Its scans opened again (their indexes open at once).
-        if (again) for (const [token, p] of tokens) again.postMessage({ kind: "open", token, path: p, cacheDir });
+        if (ensure()) tellPages("cadp:engine:back", {});
       }, 500 * restarts);
     });
+    // Its scans opened again (their indexes open at once).
+    for (const [token, p] of tokens) child.postMessage({ kind: "open", token, path: p, cacheDir });
     return child;
   }
 
@@ -98,18 +132,18 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
 
   /** A scan file the page was given: its token (the same each time for the same file), or null. */
   async function register(filePath) {
-    if (!available || !scanPathOk(filePath)) return null;
+    if (!available || gaveUp || !scanPathOk(filePath)) return null;
     const stat = await statFile(filePath);
     if (!stat || typeof stat.isFile !== "function" || !stat.isFile()) return null;
     const key = filePath.toLowerCase();
     let token = byPath.get(key);
     if (!token) {
       if (tokens.size >= MOST_SCANS) return null;
+      const h = ensure();
+      if (!h) return null;
       token = crypto.randomBytes(16).toString("hex");
       tokens.set(token, filePath);
       byPath.set(key, token);
-      const h = ensure();
-      if (!h) return null;
       h.postMessage({ kind: "open", token, path: filePath, cacheDir });
     }
     const name = filePath.includes("\\") ? path.win32.basename(filePath) : path.basename(filePath);
@@ -124,6 +158,10 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     const { port1, port2 } = newChannel();
     h.postMessage({ kind: "page" }, [port1]);
     contents.postMessage("cadp:engine:port", null, [port2]);
+    if (!pages.has(contents)) {
+      pages.add(contents);
+      if (typeof contents.once === "function") contents.once("destroyed", () => pages.delete(contents));
+    }
     return true;
   }
 
@@ -148,7 +186,11 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     get running() {
       return host !== null;
     },
+    /** The engine's process (the build's check stops it, to see it start again). */
+    get pid() {
+      return host && typeof host.pid === "number" ? host.pid : null;
+    },
   };
 }
 
-module.exports = { SCAN_EXTENSIONS, MOST_SCANS, addonPath, cacheDirFor, createScanEngine, scanPathOk, unpacked };
+module.exports = { SCAN_EXTENSIONS, MOST_SCANS, STEADY_MS, addonPath, cacheDirFor, createScanEngine, scanPathOk, unpacked };

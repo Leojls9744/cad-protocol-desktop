@@ -10,7 +10,8 @@ const { addonPath, createScanEngine } = require("./scan-engine");
  * The build's check of the scan engine (1.19) on real Windows: its add-on
  * in the packaged app, its own process started, a small scan written here
  * indexed, a point under a cursor found, then the scan opened again from
- * its index (not indexed twice).
+ * its index (not indexed twice). 1.25: the engine's process stopped, the
+ * page told, the engine started again with its scans, and asked again.
  */
 async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, log = () => {} }) {
   const os = require("node:os");
@@ -39,26 +40,46 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     if (!reg) throw new Error("The scan engine wouldn't take the check's scan.");
     const regE57 = await engine.register(e57);
     if (!regE57) throw new Error("The scan engine wouldn't take the check's E57 scan.");
-    // This process plays the page: the port's other end kept here.
-    const port = await new Promise((resolve, reject) => {
-      const fake = { postMessage: (_channel, _msg, ports) => resolve(ports[0]) };
-      if (!engine.connect(fake)) reject(new Error("No port to the scan engine."));
-    });
-    const heard = [];
-    const waitFor = (test, ms) =>
+    // This process plays the page: the port's other end kept here, and what the page is told.
+    const told = [];
+    let portCame = null;
+    const fake = {
+      postMessage: (channel, msg, ports) => {
+        if (channel === "cadp:engine:port") portCame?.(ports[0]);
+        else told.push({ channel, msg });
+      },
+    };
+    const portNow = () =>
       new Promise((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error(`The scan engine didn't answer (${round}): ${JSON.stringify(heard.slice(-3))}`)), ms);
-        const look = () => {
-          const m = heard.find(test);
+        portCame = resolve;
+        if (!engine.connect(fake)) reject(new Error("No port to the scan engine."));
+      });
+    let heard = [];
+    /** Settles when `test` holds of something heard (1.25: no more looking once given up). */
+    const until = (look, ms, what) =>
+      new Promise((resolve, reject) => {
+        let over = false;
+        const t = setTimeout(() => {
+          over = true;
+          reject(new Error(`The scan engine didn't answer (${round}): ${what()}`));
+        }, ms);
+        const again = () => {
+          if (over) return;
+          const m = look();
           if (m) {
             clearTimeout(t);
             resolve(m);
-          } else setTimeout(look, 20);
+          } else setTimeout(again, 20);
         };
-        look();
+        again();
       });
-    port.on("message", (e) => heard.push(e.data));
-    port.start();
+    const waitFor = (test, ms) => until(() => heard.find(test), ms, () => JSON.stringify(heard.slice(-3)));
+    const listen = (p) => {
+      p.on("message", (e) => heard.push(e.data));
+      p.start();
+    };
+    let port = await portNow();
+    listen(port);
     const hello = await waitFor((m) => m.kind === "hello", 20000);
     // Opened before the port came (its index made before), the hello says so.
     const said = (m) =>
@@ -74,26 +95,7 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     if (openedE57.kind === "failed") throw new Error(`The scan engine couldn't open the check's E57 scan: ${openedE57.error}`);
     if (opened.kind === "failed") throw new Error(`The scan engine couldn't open the check's scan: ${opened.error}`);
     const t0 = Date.now();
-    port.postMessage({
-      kind: "snap",
-      id: 1,
-      scans: [{ token: reg.token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
-      ask: {
-        target: [6000005, 2000005, 0],
-        right: [1, 0, 0],
-        up: [0, 1, 0],
-        toEye: [0, 0, 1],
-        unitsPerPixel: 0.01,
-        halfW: 200,
-        halfH: 150,
-        cursor: [200, 150],
-        reach: 8,
-        frontPx: 2,
-        window: 0,
-        most: 32,
-        frontMost: 8,
-      },
-    });
+    port.postMessage({ ...snapAsk(reg.token), id: 1 });
     const answer = await waitFor((m) => m.kind === "snap" && m.id === 1, 20000);
     // 1.20: every point in a box, and a tenth of them.
     const all = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
@@ -128,6 +130,32 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     port.postMessage({ kind: "region", id: 8, token: regE57.token, affine: all, min: [1915990, 639990, -1000], max: [1916050, 640010, 1000], most: 1000000, setup: 0 });
     const e57Snap = await waitFor((m) => m.kind === "snap" && m.id === 7, 20000);
     const e57Box = await waitFor((m) => m.kind === "region" && m.id === 8, 20000);
+    // 1.25: the engine's process stopped; the page told, then told it's back; a new port, the scan open again, a snap.
+    let restart = null;
+    if (round === "opened again") {
+      const pid = engine.pid;
+      if (!pid) throw new Error("The scan engine's process has no id.");
+      process.kill(pid);
+      const lost = await until(() => told.find((t) => t.channel === "cadp:engine:lost"), 20000, () => JSON.stringify(told));
+      await until(() => told.find((t) => t.channel === "cadp:engine:back"), 20000, () => JSON.stringify(told));
+      port.close();
+      heard = [];
+      port = await portNow();
+      listen(port);
+      const back = (m) =>
+        (m.kind === "opened" && m.token === reg.token) || (m.kind === "hello" && (m.scans || []).some((x) => x.token === reg.token && x.state === "open"));
+      await waitFor(back, 60000);
+      port.postMessage({ ...snapAsk(reg.token), id: 9 });
+      const after = await waitFor((m) => m.kind === "snap" && m.id === 9, 20000);
+      restart = {
+        again: lost.msg.again === true,
+        dropped: Array.isArray(lost.msg.dropped) ? lost.msg.dropped.length : -1,
+        running: engine.running,
+        error: after.error || null,
+        near: after.near ? after.near.length / 14 : 0,
+        frontZ: after.front && after.front.length >= 5 ? after.front[4] : null,
+      };
+    }
     port.close();
     engine.stop();
     const front = answer.front || [];
@@ -146,6 +174,7 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
       align: { error: lined.error || null, east: lined.align ? lined.align[3] : null, refined: lined.refined === true },
       check: { error: measured.error || null, pairs: measured.pairs ? measured.pairs.length : 0, gaps: measured.gaps ? measured.gaps[0].length : 0 },
       classify: { error: classed.error || null, points: classed.cls ? classed.cls.length : 0, cubes: classed.cubes || 0 },
+      restart,
       e57: {
         count: openedE57.info ? openedE57.info.count : 0,
         setups: openedE57.info ? openedE57.info.setups === true : false,
@@ -168,6 +197,29 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
     }
   }
   return result;
+}
+
+/** The check's snap: straight down on the post at (6000005, 2000005). */
+function snapAsk(token) {
+  return {
+    kind: "snap",
+    scans: [{ token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
+    ask: {
+      target: [6000005, 2000005, 0],
+      right: [1, 0, 0],
+      up: [0, 1, 0],
+      toEye: [0, 0, 1],
+      unitsPerPixel: 0.01,
+      halfW: 200,
+      halfH: 150,
+      cursor: [200, 150],
+      reach: 8,
+      frontPx: 2,
+      window: 0,
+      most: 32,
+      frontMost: 8,
+    },
+  };
 }
 
 /** Two scans of a floor and two walls (1.22's check), the second 0.2 off east. */
