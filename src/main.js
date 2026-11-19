@@ -90,6 +90,7 @@ const { createTitleBar, windowsBackend: titleBarBackend } = require("./title-bar
 const { createLocalFiles, launchedPaths } = require("./local-files");
 const { createJobsFile, createPlaces, fillInput, opensOutside } = require("./places");
 const { createRecovery } = require("./recovery");
+const { createStallLog } = require("./stall-log");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
 const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
@@ -392,6 +393,8 @@ function start() {
   const jobs = createJobsFile({ file: path.join(data, "jobs.json"), fs, log });
   // 1.28: Drawing Recovery's copies as files on this computer.
   const recovery = createRecovery({ dir: path.join(data, "recovery"), fs, log });
+  // 1.31: the drawing area's stalls, as the page notes them (src/stall-log.js).
+  const stallLog = createStallLog(path.join(data, "stalls.log"));
   /** Double-clicked drawings queued for the page; how many wait. */
   const launchFiles = (argv) => {
     const found = launchedPaths(argv);
@@ -818,6 +821,11 @@ function start() {
     ipcMain.handle("cadp:jobs:save", (event, text) => {
       if (!fromApp(event)) throw new Error("not allowed");
       return jobs.save(text);
+    });
+    // 1.31: the drawing area's stalls, a batch of lines at a time.
+    ipcMain.handle("cadp:stalls:append", (event, text) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return stallLog.append(text);
     });
     // 1.11: double-clicked drawings, read and handed over once each.
     ipcMain.handle("cadp:files:launched-count", (event) => {

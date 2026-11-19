@@ -150,6 +150,10 @@ if (appOrigin && window.location.origin === appOrigin) {
       load: () => ipcRenderer.invoke("cadp:jobs:load"),
       save: (text) => ipcRenderer.invoke("cadp:jobs:save", text),
     },
+    /** 1.31: the drawing area's stalls (text lines) added to stalls.log in this computer's app data. */
+    stalls: {
+      append: (text) => ipcRenderer.invoke("cadp:stalls:append", text),
+    },
     /**
      * 1.28: Drawing Recovery's copies kept as files on this computer
      * (src/recovery.js) in place of the browser engine's storage: put(copy),
