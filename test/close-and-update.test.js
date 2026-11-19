@@ -95,6 +95,10 @@ function fakeUpdater(script) {
     await script(u);
   };
   u.quitAndInstall = (silent, runAfter) => u.installed.push([silent, runAfter]);
+  u.install = (silent, runAfter) => {
+    u.installed.push(["on quit", silent, runAfter]);
+    return true;
+  };
   return u;
 }
 
@@ -103,10 +107,13 @@ test("up to date: the badge says so, with the version", async () => {
   const seen = [];
   const auto = createAutoUpdate({ updater, current: "1.3.0", onChange: (s) => seen.push(s.phase) });
   assert.equal(updater.autoDownload, true);
-  assert.equal(updater.autoInstallOnAppQuit, true);
+  // 1.30: never silently as the app quits.
+  assert.equal(updater.autoInstallOnAppQuit, false);
   assert.deepEqual(await auto.check(), { current: "1.3.0", latest: "1.3.0", newer: false, url: RELEASES_URL, phase: "up-to-date", percent: 0 });
   assert.deepEqual(seen, ["checking", "up-to-date"]);
   assert.equal(auto.installNow(), false);
+  assert.equal(auto.installOnQuit(), false);
+  assert.equal(auto.installsOnQuit, false);
 });
 
 test("a new version downloads with its percent, then installs with the installer's progress shown and restarts", async () => {
@@ -141,3 +148,20 @@ test("a failed check is 'couldn't check', never 'up to date', and keeps a ready 
   assert.equal(ready.state.phase, "ready");
 });
 
+test("1.30: closing with an update ready installs it in sight (its progress shown, the app opened again), once", async () => {
+  const updater = fakeUpdater(async (u) => u.emit("update-downloaded", { version: "1.30.0" }));
+  const auto = createAutoUpdate({ updater, current: "1.29.0" });
+  await auto.check();
+  assert.equal(auto.installsOnQuit, true);
+  assert.equal(auto.installOnQuit(), true);
+  assert.equal(auto.installsOnQuit, false);
+  assert.equal(auto.installOnQuit(), false);
+  assert.deepEqual(updater.installed, [["on quit", false, true]]);
+  // Restart to update first: not installed again as it quits.
+  const restarted = fakeUpdater(async (u) => u.emit("update-downloaded", { version: "1.30.0" }));
+  const r = createAutoUpdate({ updater: restarted, current: "1.29.0" });
+  await r.check();
+  assert.equal(r.installNow(), true);
+  assert.equal(r.installOnQuit(), false);
+  assert.deepEqual(restarted.installed, [[false, true]]);
+});

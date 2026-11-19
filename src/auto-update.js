@@ -18,6 +18,16 @@
 //   comes (told, not asked every half minute), and the install shows the
 //   installer's own progress window before the app opens again (it had run
 //   unseen, the app gone for a while).
+// - 1.30 (Leo, 2026-11-19 07:30: "when there is a new update ... it still
+//   happens in the backend, it causes the window to stay in the loading
+//   screen until you close the app and restart it"): closing with an update
+//   ready no longer installs it out of sight. electron-updater's install on
+//   quit ran the installer silently, and the installer closes every copy of
+//   the app it finds: opening the app again while it ran (the log: runs
+//   ended within seconds, "put back after an unfinished run", as 1.28 and
+//   1.29 came) left the card up and the app gone. Now closing installs it as
+//   Restart to update does, the installer's progress shown and the app
+//   opened again on the new version once it's done (installOnQuit).
 //
 // This file keeps the state the app's badge shows; main.js wires it up.
 
@@ -37,7 +47,9 @@ function createAutoUpdate({ updater, current, log = () => {}, onChange = () => {
   const version = (info) => (info && typeof info.version === "string" ? info.version : null);
 
   updater.autoDownload = true;
-  updater.autoInstallOnAppQuit = true;
+  // Never installed out of sight as the app quits (1.30): installOnQuit.
+  updater.autoInstallOnAppQuit = false;
+  let installing = false;
   updater.on("checking-for-update", () => {
     if (state.phase !== "downloading" && state.phase !== "ready") set({ phase: "checking" });
   });
@@ -76,9 +88,30 @@ function createAutoUpdate({ updater, current, log = () => {}, onChange = () => {
     },
     /** Restart into the new version, once it's downloaded: the installer's progress shown (1.26), then the app again. */
     installNow() {
-      if (state.phase !== "ready") return false;
+      if (state.phase !== "ready" || installing) return false;
+      installing = true;
       updater.quitAndInstall(false, true);
       return true;
+    },
+    /**
+     * The app's closing (1.30): an update that's ready installs now, its
+     * progress shown, and the app opens again on it when it's done. Once;
+     * not after Restart to update (that's installing already).
+     */
+    installOnQuit() {
+      if (state.phase !== "ready" || installing) return false;
+      installing = true;
+      try {
+        // The installer's own window (not silent), the app run after.
+        return updater.install(false, true) !== false;
+      } catch (err) {
+        log(`update install: ${err && err.message ? err.message : err}`);
+        return false;
+      }
+    },
+    /** Whether the update installs as the app closes (for the closing card). */
+    get installsOnQuit() {
+      return state.phase === "ready" && !installing;
     },
   };
 }

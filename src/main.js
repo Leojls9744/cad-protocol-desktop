@@ -16,7 +16,8 @@
 // - 1.3: it updates itself (auto-update.js): checked on the update screen at
 //   launch and every 6 hours, installed without running the installer again.
 //   1.26: checked behind the open app; the badge's Restart to update installs
-//   it with the installer's progress shown.
+//   it with the installer's progress shown. 1.30: closing installs one
+//   that's ready the same way, never silently out of sight.
 // - 1.4: a purple title bar on Windows 11 instead of the accent color
 //   (title-bar.js).
 // - 1.5: drawings saved to and opened from this computer, online or offline
@@ -542,6 +543,8 @@ function start() {
   });
 
   app.on("before-quit", () => {
+    // An update that's ready installs in sight as the app closes (1.30).
+    if (updates && updates.installOnQuit()) log(`update: installing ${updates.state.latest} as the app closes`);
     browserSignIn.cancel();
     browserDrive.cancel();
     if (pointer) pointer.blur();
@@ -836,7 +839,11 @@ function start() {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
       if (!splash) return;
       splash.open();
-      splash.say("Signing you out…", "Saving your drawings first");
+      // With an update ready (1.30): it installs next, in sight, and the app opens again.
+      splash.say(
+        "Signing you out…",
+        updates && updates.installsOnQuit ? `Saving your drawings, then ${updates.state.latest} installs` : "Saving your drawings first",
+      );
     });
     ipcMain.on("cadp:close-done", (event, id) => {
       if (fromApp(event) && closeGuard) closeGuard.done(id);
