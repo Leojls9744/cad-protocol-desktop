@@ -19,6 +19,8 @@ const FILES = new Map([
   ["update.html", "text/html; charset=utf-8"],
   ["offline.html", "text/html; charset=utf-8"],
   ["signin-card.html", "text/html; charset=utf-8"],
+  // The layer trial's test picture (1.34, layer-trial.js).
+  ["layer.html", "text/html; charset=utf-8"],
   ["splash.jpg", "image/jpeg"],
 ]);
 

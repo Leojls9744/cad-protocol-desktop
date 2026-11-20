@@ -145,6 +145,25 @@ jobs:
           if (-not $s.again -or $s.dropped -ne 0 -or -not $s.running) { throw "The scan engine didn't start again with its scans (again $($s.again), dropped $($s.dropped), running $($s.running))." }
           if ($s.error -or $s.near -lt 1 -or [math]::Abs($s.frontZ - 104) -gt 0.001) { throw "The scan engine's snap after it started again found z $($s.frontZ): $($s.error)" }
           if (-not (Test-Path "dist/win-unpacked/resources/app.asar.unpacked/engine/dist/cadp-engine.node")) { throw "The scan engine's add-on isn't unpacked beside the app." }
+          # 1.34: the layer trial's two windows: the page's kept over the frame's inside, moved, sized, maximized and closed with it.
+          $t = $r.layerTrial
+          Write-Output "layer trial: $($t | ConvertTo-Json -Depth 5 -Compress)"
+          if (-not $t) { throw "The layer trial wasn't checked." }
+          if ($t.error) { throw "The layer trial's check failed: $($t.error)" }
+          if (-not $t.owned) { throw "The layer trial's page window isn't owned by its frame." }
+          foreach ($name in "first", "moved", "maximized") {
+            $w = $t.$name
+            if ($w.page.x -ne $w.inside.x -or $w.page.y -ne $w.inside.y -or $w.page.width -ne $w.inside.width -or $w.page.height -ne $w.inside.height) {
+              throw "The layer trial's page window wasn't over its frame's inside ($name): $($w.page | ConvertTo-Json -Compress) against $($w.inside | ConvertTo-Json -Compress)"
+            }
+          }
+          if (-not $t.maximized.is) { throw "The layer trial's frame didn't maximize." }
+          if (-not $t.closed) { throw "The layer trial's windows didn't close together." }
+          # What the screen showed is said, not failed on (a trial: the picture's kept to look at).
+          if ($t.shot.width -gt 0) {
+            Write-Output "layer trial on screen: bar over $($t.barOver), layer through $($t.layerThrough), line over $($t.lineOver)"
+            if (-not ($t.barOver -and $t.layerThrough -and $t.lineOver)) { Write-Output "::warning::The layer trial's screen didn't show the page over the layer: $($t.pixels | ConvertTo-Json -Compress)" }
+          } else { Write-Output "::warning::The layer trial's screen couldn't be looked at: $($t.shotError)" }
           # 1.3 on: what the app updates itself from.
           if (-not (Test-Path "dist/win-unpacked/resources/app-update.yml")) { throw "app-update.yml is missing from the app." }
           if (-not (Test-Path "dist/latest.yml")) { throw "latest.yml wasn't made." }
@@ -206,6 +225,19 @@ jobs:
           Write-Output "windows: $(($running | Where-Object { $_.MainWindowTitle } | ForEach-Object { $_.MainWindowTitle }) -join ' | ')"
           $running | Stop-Process -Force -ErrorAction SilentlyContinue
           if (-not (& $said "brought to the front by a cadprotocol link")) { throw "A second cadprotocol:// link didn't reach the open app." }
+
+      # 1.34: the screen as the layer trial's check saw it, and the whole check, to look at.
+      - name: Keep the layer trial's picture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: layer-trial
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/smoke.json
+            ${{ runner.temp }}/smoke.json.log
+            ${{ runner.temp }}/smoke.json.layer.png
 
       - uses: actions/upload-artifact@v4
         with:

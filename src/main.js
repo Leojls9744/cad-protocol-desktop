@@ -65,6 +65,7 @@ const fs = require("node:fs");
 const {
   app,
   BrowserWindow,
+  desktopCapturer,
   dialog,
   ipcMain,
   Menu,
@@ -101,6 +102,18 @@ const { createSplash } = require("./splash");
 const { pageUrl, registerScheme, serveLocalPages } = require("./local-pages");
 const { addonPath, cacheDirFor, createScanEngine } = require("./scan-engine");
 const { checkEngine } = require("./engine-check");
+const {
+  KEY: LAYER_KEY,
+  SEE_THROUGH_CSS,
+  buttonDownBackend,
+  checkLayerTrial,
+  frameOptions,
+  glue: glueLayer,
+  isToggleChord,
+  layerTrialOn,
+  pageOptions,
+  toggleWords,
+} = require("./layer-trial");
 const {
   createSmallWindow,
   overRect,
@@ -184,6 +197,15 @@ if (smokeArg) {
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
       // 1.14: a sign-in window of the app's own, over a card, in front of it.
       result.signInWindow = await smokeSignInWindow();
+      // 1.34: the layer trial's two windows: kept as one, the page's over the layer.
+      result.layerTrial = await checkLayerTrial({
+        BrowserWindow,
+        screen,
+        desktopCapturer,
+        writeFile: (file, bytes) => fs.writeFileSync(file, bytes),
+        png: `${out}.layer.png`,
+        log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
+      });
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -962,7 +984,7 @@ function start() {
   function createMainWindow() {
     const saved = store.get("window", null);
     const bounds = onScreen(saved && saved.bounds);
-    const win = new BrowserWindow({
+    const options = {
       ...(bounds || { width: 1440, height: 900 }),
       minWidth: 900,
       minHeight: 600,
@@ -973,8 +995,35 @@ function start() {
         preload: path.join(__dirname, "preload.js"),
         additionalArguments: [`--cadp-desktop-version=${app.getVersion()}`, `--cadp-app-origin=${config.APP_ORIGIN}`],
       }),
-    });
+    };
+    // The layer trial (1.34, layer-trial.js): the window is two, an ordinary
+    // one whose inside is the layer, and the page's over it, see-through
+    // where the drawing area is. Off, the window's made as it always was.
+    const trial = layerTrialOn(process.argv, store);
+    let frame = null;
+    if (trial) {
+      frame = new BrowserWindow(frameOptions(options, secureWebPreferences()));
+      kinds.set(frame.webContents, "layer");
+      frame.loadURL(pageUrl("layer.html"));
+    }
+    const win = new BrowserWindow(frame ? pageOptions(options, frame, frame.getContentBounds()) : options);
+    if (frame) glueLayer({ frame, page: win, buttonDown: buttonDownBackend(log), log });
     kinds.set(win.webContents, "main");
+    // Ctrl+Alt+Shift+L turns the trial on or off for the next time the app opens.
+    win.webContents.on("before-input-event", (event, input) => {
+      if (!isToggleChord(input)) return;
+      event.preventDefault();
+      const next = !(store.get(LAYER_KEY, false) === true);
+      store.set(LAYER_KEY, next);
+      log(`layer trial: turned ${next ? "on" : "off"} for the next start`);
+      void dialog.showMessageBox(win, { type: "info", buttons: ["OK"], noLink: true, title: "CAD Protocol", ...toggleWords(next) });
+    });
+    // The page's drawing area see-through, each time the app's page loads.
+    if (trial)
+      win.webContents.on("dom-ready", () => {
+        if (!config.isAppUrl(win.webContents.getURL())) return;
+        win.webContents.insertCSS(SEE_THROUGH_CSS).catch((err) => log(`layer trial: the page's styles weren't taken: ${err.message}`));
+      });
     // Shown when the app's ready, the card closed then (1.7, launch.js).
     launch = createLaunch({
       // Once the card's been up long enough to be read (1.8.1, splash.js).
