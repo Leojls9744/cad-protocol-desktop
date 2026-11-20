@@ -33,6 +33,12 @@ pub struct Ask {
     pub px: f64,
     /// The check's own ring of points, with no scan.
     pub test: bool,
+    /// The background (red, green, blue, 0 to 1); the engine's own with none.
+    pub clear: Option<[f64; 3]>,
+    /// The scans kept on the card and not drawn (the page is drawing them itself for now).
+    pub hide: bool,
+    /// The page's own number for this ask: said back in `Stats::drawn` once a frame has shown it.
+    pub serial: u64,
 }
 
 /// How it's going.
@@ -43,8 +49,10 @@ pub struct Stats {
     pub frames: u64,
     /// The last frame's drawing, as the thread saw it, ms (its calls and the wait to show it).
     pub frame_ms: f64,
-    /// Frames a second over the last second or so.
+    /// Frames a second while it last drew one after another (a run of frames; a rest between isn't counted).
     pub fps: f64,
+    /// The longest frame of that run, ms.
+    pub worst_ms: f64,
     /// Points on the card.
     pub points: u64,
     /// The last scan's sampling and sending, ms.
@@ -52,6 +60,10 @@ pub struct Stats {
     pub size: [u32; 2],
     pub adapter: String,
     pub error: Option<String>,
+    /// How many of the asked scans the last frame drew.
+    pub scans: u32,
+    /// The serial of the ask the last frame showed.
+    pub drawn: u64,
 }
 
 struct Shared {
@@ -76,8 +88,8 @@ impl View {
             return Err("no window to draw in".into());
         }
         let shared = Arc::new(Shared {
-            // Until the page says what to show: the check's ring, turning, so the engine's own drawing is there to see.
-            ask: Mutex::new((Ask { px: 2.0, test: true, ..Ask::default() }, 0)),
+            // Until the page says what to show: its own background, nothing on it.
+            ask: Mutex::new((Ask { px: 2.0, ..Ask::default() }, 0)),
             stats: Mutex::new(Stats::default()),
             stop: AtomicBool::new(false),
         });
@@ -85,8 +97,12 @@ impl View {
         let thread = std::thread::Builder::new()
             .name("cadp-view".into())
             .spawn(move || {
-                let ended = run(parent, &theirs);
-                let mut stats = theirs.stats.lock().unwrap();
+                // A panic (the card's driver, a frame the card wouldn't take) ends the drawing and is said, not the engine's process.
+                let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(parent, &theirs))).unwrap_or_else(|p| {
+                    let said = p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()));
+                    Err(format!("the engine's drawing stopped: {}", said.unwrap_or_else(|| "it didn't say why".into())))
+                });
+                let mut stats = theirs.stats.lock().unwrap_or_else(|e| e.into_inner());
                 stats.running = false;
                 if let Err(e) = ended {
                     stats.error = Some(e);
@@ -98,13 +114,13 @@ impl View {
 
     /// What to show from now on.
     pub fn show(&self, ask: Ask) {
-        let mut held = self.shared.ask.lock().unwrap();
+        let mut held = self.shared.ask.lock().unwrap_or_else(|e| e.into_inner());
         held.0 = ask;
         held.1 += 1;
     }
 
     pub fn stats(&self) -> Stats {
-        self.shared.stats.lock().unwrap().clone()
+        self.shared.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Stopped, its window gone.
@@ -149,6 +165,17 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             .map_err(|e| format!("the engine's window can't be drawn on: {e}"))?
     };
     let mut gpu = Gpu::new(&instance, Some(&surface), None)?;
+    // What the card refuses (a buffer too big, memory run out) is said, and the drawing ended, not the engine's process.
+    let refused: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    {
+        let refused = refused.clone();
+        gpu.device.on_uncaptured_error(Box::new(move |e| {
+            let mut held = refused.lock().unwrap_or_else(|p| p.into_inner());
+            if held.is_none() {
+                *held = Some(e.to_string());
+            }
+        }));
+    }
     {
         let mut stats = shared.stats.lock().unwrap();
         stats.running = true;
@@ -178,8 +205,14 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
     let started = Instant::now();
     let mut second = Instant::now();
     let mut in_second = 0u32;
+    // When the last frame was shown, and the longest of the run it's in.
+    let mut last_frame = Instant::now();
+    let mut worst = 0.0f64;
     let mut dirty = true;
     while !shared.stop.load(Ordering::SeqCst) {
+        if let Some(e) = refused.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            return Err(format!("the graphics card refused: {e}"));
+        }
         window.pump();
         // The frame's inside, as it is now: the window kept filling it, in front of the frame's own page.
         let now = window.fit();
@@ -225,6 +258,12 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
+        // A rest since the last frame: a new run's count begins (frames a second is of frames one after another).
+        if last_frame.elapsed() > Duration::from_millis(250) {
+            second = Instant::now();
+            in_second = 0;
+            worst = 0.0;
+        }
         let t = Instant::now();
         let frame = match surface.get_current_texture() {
             Ok(f) => f,
@@ -237,7 +276,12 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         };
         let target = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let px = if ask.px > 0.0 { ask.px } else { 2.0 };
+        let clear = match ask.clear {
+            Some([r, g, b]) => [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0],
+            None => CLEAR,
+        };
         let mut points = 0u64;
+        let mut drew = 0u32;
         if let (true, Some(ring)) = (ask.test, ring.as_ref()) {
             // Turning about its middle, a turn every 6 s, the ring 60% of the window's shorter side.
             let a = started.elapsed().as_secs_f64() * std::f64::consts::TAU / 6.0;
@@ -252,26 +296,37 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             points = ring.count as u64;
             gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY)], px.max(3.0), CLEAR);
         } else {
-            let list: Vec<(&Cloud, Affine)> = ask
-                .scans
-                .iter()
-                .filter_map(|s| clouds.iter().find(|(h, _, _)| *h == s.handle).map(|(_, _, c)| (c, s.affine)))
-                .collect();
+            let list: Vec<(&Cloud, Affine)> = if ask.hide {
+                Vec::new()
+            } else {
+                ask.scans
+                    .iter()
+                    .filter_map(|s| clouds.iter().find(|(h, _, _)| *h == s.handle).map(|(_, _, c)| (c, s.affine)))
+                    .collect()
+            };
             points = list.iter().map(|(c, _)| c.count as u64).sum::<u64>().max(points);
-            gpu.draw(&target, size, ask.camera.as_ref(), &list, px, CLEAR);
+            drew = if ask.camera.is_some() { list.len() as u32 } else { 0 };
+            gpu.draw(&target, size, ask.camera.as_ref(), &list, px, clear);
         }
         frame.present();
         dirty = false;
         in_second += 1;
+        last_frame = Instant::now();
+        let took = t.elapsed().as_secs_f64() * 1000.0;
+        worst = worst.max(took);
         let mut stats = shared.stats.lock().unwrap();
         stats.frames += 1;
-        stats.frame_ms = t.elapsed().as_secs_f64() * 1000.0;
+        stats.frame_ms = took;
         stats.points = points;
+        stats.scans = drew;
+        stats.drawn = ask.serial;
         stats.size = size;
         let over = second.elapsed().as_secs_f64();
-        if over >= 1.0 {
+        if over >= 0.5 {
             stats.fps = in_second as f64 / over;
+            stats.worst_ms = worst;
             in_second = 0;
+            worst = 0.0;
             second = Instant::now();
         }
     }

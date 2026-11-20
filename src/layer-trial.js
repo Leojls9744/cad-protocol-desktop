@@ -18,12 +18,16 @@
 //   front of it and takes it away and back with it) and kept exactly over
 //   the frame's inside as the frame moves, sizes, maximizes or comes back.
 //
-// The page's drawing area is made see-through by four style rules given to
-// the page as it loads (SEE_THROUGH_CSS): every box the drawing area sits in
-// loses its background, and the canvas that paints the drawing's background
-// and grid isn't shown. The ribbon, the cards, the tabs and the status bar
-// have backgrounds of their own and stay as they are. Nothing in the web app
-// changes for the trial.
+// The way to the layer is opened by two style rules given to the page as it
+// loads (SEE_THROUGH_CSS): every box the drawing area sits in, up to the page
+// itself, loses its background. The drawing area's own background is the
+// page's to give up (1.35; the web app's v942 on, told the trial's on by
+// window.cadpDesktop.layer): see-through in model space, where the engine
+// draws the background and the scans, and its own as ever on a layout. (1.34
+// took the drawing area's background and its grid's canvas away itself, for
+// a page that knew nothing of the trial; a page from before v942 now simply
+// covers the layer.) The ribbon, the cards, the tabs and the status bar have
+// backgrounds of their own and stay as they are.
 //
 // It's off unless it's turned on: Ctrl+Alt+Shift+L in the app's window says
 // so and keeps it (desktop-settings.json's layerTrial), for the next time the
@@ -40,17 +44,14 @@ const FLAG = "--layer-trial";
 const KEY = "layerTrial";
 
 /**
- * The page's drawing area made see-through (tried on the web app with a
- * stand-in for the layer: only the drawing area shows it). Every box round
- * a drawing area, up to the page itself, without a background; the drawing
- * area's own; and its first canvas, which paints the drawing's background
- * and grid.
+ * The way from the page's drawing area down to the layer opened: every box
+ * round a drawing area, up to the page itself, without a background. The
+ * drawing area's own background is the page's to give up (the web app's
+ * v942 on): see-through in model space, its own on a layout.
  */
 const SEE_THROUGH_CSS = [
   "html, body { background: transparent !important; }",
   "*:has(.cpe-viewport) { background-color: transparent !important; background-image: none !important; }",
-  ".cpe-viewport { background: transparent !important; }",
-  ".cpe-viewport > canvas:first-child { opacity: 0 !important; }",
 ].join("\n");
 
 /** Whether the trial's on: asked for on the command line, or kept on. */
@@ -307,6 +308,8 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
   const base = { x: area.x + 40, y: area.y + 40, width: 900, height: 600, title: "Layer check" };
   const prefs = { contextIsolation: true, sandbox: true, nodeIntegration: false };
   const frame = new BrowserWindow(frameOptions(base, prefs));
+  // No menu bar, as the app's frame has none: the frame's inside is all the engine's window fills.
+  if (typeof frame.removeMenu === "function") frame.removeMenu();
   let page = null;
   try {
     await frame.loadURL("data:text/html,<title>Layer check</title><body style='margin:0;background:%23ff00ff'>");
@@ -389,6 +392,8 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
 
 /** The engine's own background (cadp-engine-view CLEAR), as the screen shows it. */
 const ENGINE_CLEAR = [11, 16, 32];
+/** The background the check asks for behind its scan (a page's own). */
+const SCAN_CLEAR = [51, 26, 77];
 
 /**
  * The build's check of the engine's own window (1.35, Trial B) on real
@@ -444,6 +449,9 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
         unitsPerPixel: 0.03 / k,
         rect: [0, 0, inside.width * k, inside.height * k],
         px: 5 * k,
+        // A background of the page's own choosing, and the page's number for this ask.
+        clear: SCAN_CLEAR.map((v) => v / 255),
+        serial: 7,
       },
     });
     out.shown = shown.shown;
@@ -455,7 +463,7 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
     for (let i = 0; i < 40; i += 1) {
       await wait(250);
       scan = (await engine.ask({ kind: "view-stats" })).stats || null;
-      if (scan && scan.points >= 10000) break;
+      if (scan && scan.points >= 10000 && scan.drawn === 7) break;
     }
     out.scan = scan;
     await wait(600);
@@ -464,7 +472,36 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       out.scanPixels = { post: second.at(cx, cy), floor: second.at(cx - 100, cy + 30), off: second.at(cx + 230, cy), line: second.at(520, 303) };
       out.postDrawn = near(out.scanPixels.post, [225, 70, 50], 60);
       out.floorDrawn = near(out.scanPixels.floor, [40, 80, 220], 40);
-      out.offClear = near(out.scanPixels.off, ENGINE_CLEAR, 12);
+      out.offClear = near(out.scanPixels.off, SCAN_CLEAR, 12);
+    }
+    // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
+    const hidden = await engine.ask({
+      kind: "view",
+      scans: [{ token: engine.token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
+      ask: {
+        target: [6000005, 2000005, 100],
+        right: [1, 0, 0],
+        up: [0, 1, 0],
+        toEye: [0, 0, 1],
+        unitsPerPixel: 0.03 / k,
+        rect: [0, 0, inside.width * k, inside.height * k],
+        px: 5 * k,
+        clear: SCAN_CLEAR.map((v) => v / 255),
+        hide: true,
+        serial: 8,
+      },
+    });
+    let kept = hidden.stats || null;
+    for (let i = 0; i < 40 && !(kept && kept.drawn === 8); i += 1) {
+      await wait(250);
+      kept = (await engine.ask({ kind: "view-stats" })).stats || null;
+    }
+    out.hidden = kept;
+    await wait(400);
+    const third = await look(null);
+    if (third) {
+      out.hiddenPixels = { post: third.at(cx, cy), floor: third.at(cx - 100, cy + 30) };
+      out.hiddenClear = near(out.hiddenPixels.post, SCAN_CLEAR, 12) && near(out.hiddenPixels.floor, SCAN_CLEAR, 12);
     }
     return out;
   } catch (err) {
@@ -482,6 +519,7 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
 
 module.exports = {
   ENGINE_CLEAR,
+  SCAN_CLEAR,
   checkEngineView,
   FLAG,
   KEY,

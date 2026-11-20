@@ -1014,6 +1014,8 @@ function start() {
       // 1.35: the page is told, so it asks the engine to draw its scans on the layer.
       options.webPreferences.additionalArguments.push("--cadp-layer-trial=1");
       frame = new BrowserWindow(frameOptions(options, secureWebPreferences()));
+      // No menu bar of its own, whatever the app's is: the frame's inside is all the page and the engine's window fill.
+      frame.removeMenu();
       kinds.set(frame.webContents, "layer");
       frame.loadURL(pageUrl("layer.html"));
     }

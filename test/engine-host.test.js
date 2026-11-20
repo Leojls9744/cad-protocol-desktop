@@ -507,10 +507,25 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
         { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 },
         { token: "nope", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] },
       ],
-      ask: { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [10, 20, 300, 200], px: 2 },
+      ask: {
+        target: [1, 2, 3],
+        right: [1, 0, 0],
+        up: [0, 1, 0],
+        toEye: [0, 0, 1],
+        unitsPerPixel: 0.5,
+        rect: [10, 20, 300, 200],
+        px: 2,
+        clear: [0.2, 0.1, 0.3],
+        hide: true,
+        serial: 41,
+      },
     },
   });
   const shown = calls.at(-1)[1];
+  // The page's background, its scans kept and not drawn, and its number for the ask.
+  assert.deepEqual(shown.clear, [0.2, 0.1, 0.3]);
+  assert.equal(shown.hide, true);
+  assert.equal(shown.serial, 41);
   assert.deepEqual(shown.scans, [{ handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 }]);
   assert.deepEqual(shown.target, [1, 2, 3]);
   assert.deepEqual(shown.toEye, [0, 0, 1]);

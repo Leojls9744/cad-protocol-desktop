@@ -275,6 +275,10 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           px: typeof a.px === "number" ? a.px : undefined,
           test: a.test === true,
           scans: list,
+          // The page's background, its scans kept and not drawn, and its own number for this ask.
+          clear: nums(a.clear, 3),
+          hide: a.hide === true,
+          serial: typeof a.serial === "number" ? a.serial : undefined,
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };

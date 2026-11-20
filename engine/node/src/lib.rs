@@ -1198,6 +1198,12 @@ pub struct ViewAskJs {
     pub px: Option<f64>,
     pub test: Option<bool>,
     pub scans: Option<Vec<ViewScanJs>>,
+    /// The background: red, green, blue, 0 to 1.
+    pub clear: Option<Vec<f64>>,
+    /// The scans kept on the card, none drawn.
+    pub hide: Option<bool>,
+    /// The page's own number for this ask (said back as `drawn` once a frame has shown it).
+    pub serial: Option<f64>,
 }
 
 #[napi(object)]
@@ -1207,12 +1213,18 @@ pub struct ViewStatsJs {
     pub frames: f64,
     pub frame_ms: f64,
     pub fps: f64,
+    /// The longest frame of the last run of frames, ms.
+    pub worst_ms: f64,
     pub points: f64,
     pub load_ms: f64,
     pub width: u32,
     pub height: u32,
     pub adapter: String,
     pub error: Option<String>,
+    /// How many of the asked scans the last frame drew.
+    pub scans: u32,
+    /// The serial of the ask the last frame showed.
+    pub drawn: f64,
 }
 
 fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
@@ -1262,7 +1274,16 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most });
     }
     let shown = scans.len() as u32;
-    view.show(cadp_engine_view::Ask { camera, scans, px: ask.px.unwrap_or(2.0), test: ask.test.unwrap_or(false) });
+    let serial = ask.serial.filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0) as u64;
+    view.show(cadp_engine_view::Ask {
+        camera,
+        scans,
+        px: ask.px.unwrap_or(2.0),
+        test: ask.test.unwrap_or(false),
+        clear: view_three(&ask.clear),
+        hide: ask.hide.unwrap_or(false),
+        serial,
+    });
     Ok(shown)
 }
 
@@ -1276,12 +1297,15 @@ pub fn view_stats() -> ViewStatsJs {
         frames: s.frames as f64,
         frame_ms: s.frame_ms,
         fps: s.fps,
+        worst_ms: s.worst_ms,
         points: s.points as f64,
         load_ms: s.load_ms,
         width: s.size[0],
         height: s.size[1],
         adapter: s.adapter,
         error: s.error,
+        scans: s.scans,
+        drawn: s.drawn as f64,
     }
 }
 

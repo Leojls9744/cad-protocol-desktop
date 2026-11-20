@@ -271,7 +271,9 @@ test("closed by the frame's bar: the page's window is asked first, and the frame
 test("the page's styles make only the drawing area see-through", () => {
   assert.match(SEE_THROUGH_CSS, /html, body \{ background: transparent !important; \}/);
   assert.match(SEE_THROUGH_CSS, /\*:has\(\.cpe-viewport\) \{ background-color: transparent !important;/);
-  assert.match(SEE_THROUGH_CSS, /\.cpe-viewport > canvas:first-child \{ opacity: 0 !important; \}/);
+  // 1.35: the drawing area's own background and its grid are the page's to give up (the web app's v942 on), not taken away here.
+  assert.equal(/canvas/.test(SEE_THROUGH_CSS), false);
+  assert.equal(/^\.cpe-viewport \{/m.test(SEE_THROUGH_CSS), false);
   // Nothing hidden but the drawing's own background.
   assert.equal(/display:\s*none/.test(SEE_THROUGH_CSS), false);
 });

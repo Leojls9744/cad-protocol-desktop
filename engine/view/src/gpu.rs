@@ -182,7 +182,10 @@ impl Gpu {
 
     /// A scan's points sent to the card.
     pub fn upload(&self, points: &Points) -> Cloud {
-        let bytes: &[u8] = bytemuck::cast_slice(&points.data);
+        // No more than one of the card's buffers holds (a scan's sample is far under it on any card of its own).
+        let fits = (self.device.limits().max_buffer_size / std::mem::size_of::<crate::scene::PointVertex>() as u64).min(u32::MAX as u64) as usize;
+        let data = &points.data[..points.data.len().min(fits)];
+        let bytes: &[u8] = bytemuck::cast_slice(data);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cadp points"),
             size: (bytes.len().max(16)) as u64,
@@ -208,7 +211,7 @@ impl Gpu {
             layout: &self.layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
-        Cloud { buffer, uniforms, bind, count: points.data.len() as u32, centre: points.centre, radius: points.radius }
+        Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius }
     }
 
     fn depth_for(&mut self, size: [u32; 2]) -> wgpu::TextureView {
