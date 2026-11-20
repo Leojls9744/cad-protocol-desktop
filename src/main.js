@@ -765,6 +765,14 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       return places.forget(ids);
     });
+    // 1.33: a scan a drawing keeps by another computer's place, looked for
+    // here from the drawing's own file (`token`: a drawing opened or saved
+    // here; none, only the very path it had is tried).
+    ipcMain.handle("cadp:places:resolve", (event, token, want) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      const drawing = typeof token === "string" && token ? files.pathOf(token) : null;
+      return places.resolve(drawing, want);
+    });
     // The files put into the page's own <input data-cadp-fill> (a drop's
     // files, read from disk); which ids were and which weren't there.
     ipcMain.handle("cadp:places:fill", async (event, marker, ids) => {

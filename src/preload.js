@@ -139,6 +139,9 @@ if (appOrigin && window.location.origin === appOrigin) {
       fill: (marker, ids) => ipcRenderer.invoke("cadp:places:fill", marker, ids),
       find: (id) => ipcRenderer.invoke("cadp:places:find", id),
       forget: (ids) => ipcRenderer.invoke("cadp:places:forget", ids),
+      // 1.33: a scan kept by another computer's place, looked for here from
+      // the drawing's own file: resolve(token, { id, rel, path, name, size }).
+      resolve: (token, want) => ipcRenderer.invoke("cadp:places:resolve", token, want),
       ofToken: (token) => ipcRenderer.invoke("cadp:places:of-token", token),
       openDrawing: (id) => ipcRenderer.invoke("cadp:places:open-drawing", id),
       saveAs: (options, bytes) => ipcRenderer.invoke("cadp:places:save-as", options, bytes),

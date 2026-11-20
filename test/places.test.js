@@ -123,3 +123,66 @@ test("saves a file the page made beside a place, keeps it, and never names a pat
   dialog.showSaveDialog = async () => ({ canceled: true });
   assert.equal(await places.saveAs(null, { name: "x" }, new Uint8Array(1)), null);
 });
+
+test("1.33: finds a scan another computer linked, from the drawing's own folder, and keeps it under the drawing's id", () => {
+  const { relSteps } = require("../src/places");
+  // Two computers with the same shared folder in different places.
+  const mine = tempDir();
+  const theirs = tempDir();
+  for (const root of [mine, theirs]) {
+    fs.mkdirSync(path.join(root, "Job", "Drawings"), { recursive: true });
+    fs.mkdirSync(path.join(root, "Job", "Scans", "Day 2"), { recursive: true });
+    fs.writeFileSync(path.join(root, "Job", "Drawings", "Topo.cadp"), "drawing");
+    fs.writeFileSync(path.join(root, "Job", "Scans", "Site.e57"), "e57-site-points");
+    fs.writeFileSync(path.join(root, "Job", "Scans", "Day 2", "Roof.laz"), "laz-roof");
+  }
+  const dialog = { showOpenDialog: async () => ({ canceled: true, filePaths: [] }) };
+  const a = createPlaces({ file: path.join(mine, "data", "places.json"), fs, dialog });
+  const b = createPlaces({ file: path.join(theirs, "data", "places.json"), fs, dialog });
+  // Linked on mine: the drawing keeps the place's id, its path there, and where it is from the drawing.
+  const site = a.add([path.join(mine, "Job", "Scans", "Site.e57")])[0];
+  const want = { id: site.id, rel: "../Scans/Site.e57", path: site.path, name: site.name, size: site.size };
+  const drawingThere = path.join(theirs, "Job", "Drawings", "Topo.cadp");
+  // Theirs doesn't know the id.
+  assert.deepEqual(b.stat([site.id]), []);
+  const found = b.resolve(drawingThere, want);
+  assert.equal(found.id, site.id);
+  assert.equal(found.path, path.join(theirs, "Job", "Scans", "Site.e57"));
+  // Kept under the same id: asked for like any place from now on.
+  assert.deepEqual(b.pathsOf([site.id]).filled.map((f) => f.path), [found.path]);
+  const later = createPlaces({ file: path.join(theirs, "data", "places.json"), fs, dialog });
+  assert.equal(later.stat([site.id])[0].there, true);
+  // Backslashes too, as Windows writes them.
+  const c = createPlaces({ file: path.join(theirs, "data2", "places.json"), fs, dialog });
+  assert.equal(c.resolve(drawingThere, { ...want, rel: "..\\Scans\\Site.e57" }).path, found.path);
+
+  // No `rel` (a drawing saved before): by its name round the drawing, a folder deeper too.
+  const roof = a.add([path.join(mine, "Job", "Scans", "Day 2", "Roof.laz")])[0];
+  const d = createPlaces({ file: path.join(theirs, "data3", "places.json"), fs, dialog });
+  const byName = d.resolve(drawingThere, { id: roof.id, path: roof.path.replace(mine, "Q:\\nowhere"), name: roof.name, size: roof.size });
+  assert.equal(byName.path, path.join(theirs, "Job", "Scans", "Day 2", "Roof.laz"));
+  // The very path it had, when it's the same on both (no drawing file needed).
+  const e = createPlaces({ file: path.join(theirs, "data4", "places.json"), fs, dialog });
+  assert.equal(e.resolve(null, { id: site.id, path: site.path, name: site.name, size: site.size }).path, site.path);
+  assert.equal(e.resolve(null, { id: roof.id, rel: "../Scans/Day 2/Roof.laz", name: roof.name, size: roof.size }), null);
+
+  // Not the same file (another size), not a scan, a bad id or path: nothing.
+  const f = createPlaces({ file: path.join(theirs, "data5", "places.json"), fs, dialog });
+  assert.equal(f.resolve(drawingThere, { ...want, size: site.size + 1 }), null);
+  assert.equal(f.resolve(drawingThere, { ...want, size: 0 }), null);
+  assert.equal(f.resolve(drawingThere, { ...want, id: "nope" }), null);
+  const drawingSize = fs.statSync(drawingThere).size;
+  assert.equal(f.resolve(drawingThere, { id: site.id, rel: "Topo.cadp", name: "Topo.cadp", size: drawingSize }), null);
+  assert.equal(f.resolve(drawingThere, { id: site.id, rel: "C:\\Windows\\win.ini", name: "win.ini", size: 10 }), null);
+  assert.deepEqual(f.stat([site.id]), []);
+
+  // A relative path's steps: up only at its start, no root, no drive.
+  assert.deepEqual(relSteps("../Scans/Site.e57"), ["..", "Scans", "Site.e57"]);
+  assert.deepEqual(relSteps("Scans\\Day 2\\Roof.laz"), ["Scans", "Day 2", "Roof.laz"]);
+  assert.equal(relSteps("/etc/passwd"), null);
+  assert.equal(relSteps("C:\\x.e57"), null);
+  assert.equal(relSteps("Scans/../../x.e57"), null);
+  assert.equal(relSteps("../".repeat(9) + "x.e57"), null);
+  assert.equal(relSteps(".."), null);
+  assert.equal(relSteps(""), null);
+});

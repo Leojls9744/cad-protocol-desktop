@@ -44,6 +44,15 @@ const KINDS = {
 
 const ID = /^p[0-9a-f]{24}$/;
 
+/** What a scan kept by another computer's place may be (1.33, resolve). */
+const SCAN_EXT = new Set([".las", ".laz", ".e57"]);
+/** How far a scan is looked for round its drawing by name (1.33): folders deep under the drawing's, and under the one above it; folders read in all. */
+const LOOK_DEPTH = 3;
+const LOOK_DEPTH_ABOVE = 2;
+const LOOK_FOLDERS = 400;
+/** A relative path's most steps up (1.33). */
+const REL_UPS = 8;
+
 /** Larger than any file the page makes to save (a cut scan). */
 const MAX_SAVE_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -55,6 +64,23 @@ function safeName(name) {
     .trim()
     .replace(/[. ]+$/, "");
   return clean || "Untitled";
+}
+
+/**
+ * A relative path's steps (1.33): "../Scans/Site.e57" or with backslashes;
+ * steps up only at its start, REL_UPS at most; no drive, no root, nothing
+ * Windows won't take in a name. Null when it isn't one.
+ */
+function relSteps(rel) {
+  if (typeof rel !== "string" || !rel || rel.length > 1024) return null;
+  if (/^[\\/]/.test(rel) || /^[a-zA-Z]:/.test(rel)) return null;
+  const steps = rel.split(/[\\/]+/).filter((p) => p !== "" && p !== ".");
+  if (!steps.length) return null;
+  let ups = 0;
+  while (ups < steps.length && steps[ups] === "..") ups += 1;
+  if (ups > REL_UPS || ups === steps.length) return null;
+  for (const p of steps.slice(ups)) if (p === ".." || /[<>:"|?*\u0000-\u001f]/.test(p)) return null;
+  return steps;
 }
 
 /** A place's id. */
@@ -241,7 +267,102 @@ function createPlaces({ file, fs, dialog, log = () => {}, now = () => Date.now()
     pathOf(id) {
       return known(id) ? places[id].path : null;
     },
+
+    /**
+     * 1.33 (Leo, 2026-11-20 06:48: a drawing saved in Google Drive for
+     * desktop opened by another user on the same Drive, "why don't the scan
+     * data file open already linked? it works with our TBC drawings"): a
+     * scan a drawing keeps by a place made on another computer, looked for
+     * on this one. `drawing` is the drawing's own path here (null when it
+     * isn't a file on this computer); `want` what the drawing says of the
+     * scan: its place's `id`, `rel` (where it was from the drawing's
+     * folder there), `path` (as it was there), `name` and `size`. Tried in
+     * turn: `rel` from the drawing's folder here; the very path it had
+     * (the same Drive letter and folders on both); its name in the
+     * drawing's folder, the folders in it, and those round it. Only a scan
+     * (las, laz, e57) of exactly that size is taken. Kept under the
+     * drawing's own id, so the drawing needs no change and the next open
+     * asks nothing. The place, or null.
+     */
+    resolve(drawing, want) {
+      const w = want && typeof want === "object" ? want : {};
+      const id = w.id;
+      if (typeof id !== "string" || !ID.test(id)) return null;
+      // This computer's already: as it is.
+      if (Object.hasOwn(places, id) && statOf(places[id].path)) {
+        places[id].used = now();
+        return shown(id);
+      }
+      const size = Number.isSafeInteger(w.size) && w.size > 0 ? w.size : 0;
+      const name = typeof w.name === "string" ? path.basename(w.name) : "";
+      if (!size) return null;
+      const scanAt = (file) => {
+        if (typeof file !== "string" || !file || !path.isAbsolute(file)) return null;
+        if (!SCAN_EXT.has(path.extname(file).toLowerCase())) return null;
+        const s = statOf(file);
+        return s && s.size === size ? s : null;
+      };
+      const here = typeof drawing === "string" && path.isAbsolute(drawing) ? path.dirname(drawing) : null;
+      const tries = [];
+      // Where it was from the drawing.
+      const rel = relSteps(w.rel);
+      if (here && rel) tries.push(path.resolve(here, ...rel));
+      // The very path it had.
+      if (typeof w.path === "string" && w.path.length <= 2048) tries.push(w.path);
+      // Beside the drawing.
+      if (here && name) tries.push(path.join(here, name));
+      let found = tries.find((t) => scanAt(t)) || null;
+      // By its name round the drawing.
+      if (!found && here && name && SCAN_EXT.has(path.extname(name).toLowerCase())) {
+        const budget = { left: LOOK_FOLDERS };
+        found = lookFor(here, name, LOOK_DEPTH, scanAt, budget);
+        const above = path.dirname(here);
+        if (!found && above !== here) found = lookFor(above, name, LOOK_DEPTH_ABOVE, scanAt, budget, here);
+      }
+      const s = found ? scanAt(found) : null;
+      if (!found || !s) return null;
+      places[id] = {
+        ...(Object.hasOwn(places, id) ? places[id] : { added: now() }),
+        path: found,
+        name: path.basename(found),
+        size: s.size,
+        modified: s.modified,
+        used: now(),
+      };
+      trim();
+      save();
+      log(`places: ${path.basename(found)} found for a drawing from another computer`);
+      return shown(id);
+    },
   };
+
+  /** A file named `name` (any case) that `takes` says is the one, in `dir` or the folders in it, `depth` deep; `skip` a folder looked through already. */
+  function lookFor(dir, name, depth, takes, budget, skip) {
+    if (budget.left <= 0) return null;
+    budget.left -= 1;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    const lower = name.toLowerCase();
+    for (const e of entries) {
+      if (e.isFile() && e.name.toLowerCase() === lower) {
+        const file = path.join(dir, e.name);
+        if (takes(file)) return file;
+      }
+    }
+    if (depth <= 0) return null;
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name.startsWith(".") || e.name.startsWith("$")) continue;
+      const sub = path.join(dir, e.name);
+      if (skip && sameFile(sub, skip)) continue;
+      const found = lookFor(sub, name, depth - 1, takes, budget);
+      if (found) return found;
+    }
+    return null;
+  }
 
   async function saveWith(win, options, write) {
     const o = options && typeof options === "object" ? options : {};
@@ -355,4 +476,4 @@ async function fillInput(dbg, marker, paths) {
   }
 }
 
-module.exports = { KINDS, MAX_PLACES, MAX_SAVE_BYTES, safeName, MAX_JOBS_BYTES, MARKER, OPEN_OUTSIDE, opensOutside, createPlaces, createJobsFile, fillInput };
+module.exports = { KINDS, MAX_PLACES, MAX_SAVE_BYTES, safeName, MAX_JOBS_BYTES, MARKER, OPEN_OUTSIDE, opensOutside, relSteps, createPlaces, createJobsFile, fillInput };
