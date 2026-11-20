@@ -261,7 +261,16 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         for (const s of Array.isArray(msg.scans) ? msg.scans : []) {
           const held = s && scans.get(s.token);
           if (!held || held.handle == null || !Array.isArray(s.affine)) continue;
-          list.push({ handle: held.handle, affine: s.affine.map(Number), ...(s.most > 0 ? { most: Number(s.most) } : {}) });
+          // 1.35: which of its points: the classes shown (eight numbers, as a snap's), an E57's one setup, its setups turned off.
+          const whole = (v) => Number.isInteger(v) && v >= 0;
+          list.push({
+            handle: held.handle,
+            affine: s.affine.map(Number),
+            ...(s.most > 0 ? { most: Number(s.most) } : {}),
+            ...(Array.isArray(s.allow) && s.allow.length === 8 ? { allow: s.allow.map((v) => v >>> 0) } : {}),
+            ...(whole(s.setup) ? { setup: s.setup } : {}),
+            ...(Array.isArray(s.off) && s.off.every(whole) && s.off.length ? { off: s.off } : {}),
+          });
         }
         const a = msg.ask && typeof msg.ask === "object" ? msg.ask : {};
         const nums = (v, n) => (Array.isArray(v) && v.length === n ? v.map(Number) : undefined);

@@ -21,6 +21,8 @@ pub struct ScanAsk {
     pub index: Arc<Index>,
     pub affine: Affine,
     pub most: usize,
+    /// Which of its points: by class and setup.
+    pub keep: crate::scene::Keep,
 }
 
 /// What to show.
@@ -199,8 +201,8 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
     let mut size = [0u32; 2];
     let mut seen = u64::MAX;
     let mut ask = Ask::default();
-    // What's on the card: each scan's points, by its handle and how many were asked for.
-    let mut clouds: Vec<(u32, usize, Cloud)> = Vec::new();
+    // What's on the card: each scan's points, by its handle, how many were asked for and which (two of one file's setups are two of them).
+    let mut clouds: Vec<(u32, usize, crate::scene::Keep, Cloud)> = Vec::new();
     let mut ring: Option<Cloud> = None;
     let started = Instant::now();
     let mut second = Instant::now();
@@ -234,19 +236,15 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             continue;
         }
         // Scans asked for and not on the card yet (or asked for with more points): sampled and sent.
-        clouds.retain(|(handle, _, _)| ask.scans.iter().any(|s| s.handle == *handle));
+        clouds.retain(|(handle, most, keep, _)| ask.scans.iter().any(|s| s.handle == *handle && s.most == *most && s.keep == *keep));
         for s in &ask.scans {
-            let have = clouds.iter().position(|(h, _, _)| *h == s.handle);
-            if let Some(k) = have {
-                if clouds[k].1 == s.most {
-                    continue;
-                }
-                clouds.remove(k);
+            if clouds.iter().any(|(h, m, k, _)| *h == s.handle && *m == s.most && *k == s.keep) {
+                continue;
             }
             let t = Instant::now();
-            let points = sample(&s.index, s.most);
+            let points = sample(&s.index, s.most, &s.keep);
             let cloud = gpu.upload(&points);
-            clouds.push((s.handle, s.most, cloud));
+            clouds.push((s.handle, s.most, s.keep.clone(), cloud));
             shared.stats.lock().unwrap().load_ms = t.elapsed().as_secs_f64() * 1000.0;
             dirty = true;
         }
@@ -301,7 +299,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             } else {
                 ask.scans
                     .iter()
-                    .filter_map(|s| clouds.iter().find(|(h, _, _)| *h == s.handle).map(|(_, _, c)| (c, s.affine)))
+                    .filter_map(|s| clouds.iter().find(|(h, m, k, _)| *h == s.handle && *m == s.most && *k == s.keep).map(|(_, _, _, c)| (c, s.affine)))
                     .collect()
             };
             points = list.iter().map(|(c, _)| c.count as u64).sum::<u64>().max(points);

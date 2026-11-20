@@ -504,7 +504,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
       kind: "view",
       id: 2,
       scans: [
-        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 },
+        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000, allow: [-129, -1, -1, -1, -1, -1, -1, -1], setup: 2, off: [0, 5] },
         { token: "nope", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] },
       ],
       ask: {
@@ -526,7 +526,10 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(shown.clear, [0.2, 0.1, 0.3]);
   assert.equal(shown.hide, true);
   assert.equal(shown.serial, 41);
-  assert.deepEqual(shown.scans, [{ handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 }]);
+  // Which of its points too: the classes shown (bits, as unsigned numbers), a setup alone, setups off.
+  assert.deepEqual(shown.scans, [
+    { handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000, allow: [4294967167, 4294967295, 4294967295, 4294967295, 4294967295, 4294967295, 4294967295, 4294967295], setup: 2, off: [0, 5] },
+  ]);
   assert.deepEqual(shown.target, [1, 2, 3]);
   assert.deepEqual(shown.toEye, [0, 0, 1]);
   assert.equal(shown.unitsPerPixel, 0.5);

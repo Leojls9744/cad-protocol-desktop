@@ -1183,6 +1183,12 @@ pub struct ViewScanJs {
     pub handle: u32,
     pub affine: Vec<f64>,
     pub most: Option<f64>,
+    /// The classes shown: eight 32-bit numbers, bit c for class c (as a snap's); all with none.
+    pub allow: Option<Vec<u32>>,
+    /// An E57's one setup alone.
+    pub setup: Option<u32>,
+    /// An E57's setups turned off.
+    pub off: Option<Vec<u32>>,
 }
 
 /// What to draw: the page's view (where its drawing area's middle looks, right, up and toward the eye, drawing units a
@@ -1271,7 +1277,18 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         let mut affine = [0.0; 12];
         affine.copy_from_slice(&s.affine);
         let most = s.most.filter(|m| m.is_finite() && *m >= 1.0).unwrap_or(16_000_000.0).min(64_000_000.0) as usize;
-        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most });
+        let mut keep = cadp_engine_view::Keep::all();
+        if let Some(bits) = &s.allow {
+            if bits.len() != 8 {
+                return Err(Error::from_reason("allow needs eight numbers"));
+            }
+            for (k, w) in keep.allow.iter_mut().enumerate() {
+                *w = bits[k * 2] as u64 | (bits[k * 2 + 1] as u64) << 32;
+            }
+        }
+        keep.setup = s.setup.map(|k| k.min(u16::MAX as u32) as u16);
+        keep.off = s.off.as_ref().map(|v| v.iter().map(|k| (*k).min(u16::MAX as u32) as u16).collect()).unwrap_or_default();
+        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep });
     }
     let shown = scans.len() as u32;
     let serial = ask.serial.filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0) as u64;

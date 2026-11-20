@@ -20,5 +20,5 @@ pub mod view;
 
 pub use camera::{Affine, Camera, IDENTITY};
 pub use gpu::{Cloud, Gpu, CLEAR};
-pub use scene::{sample, test_ring, PointVertex, Points};
+pub use scene::{sample, test_ring, Keep, PointVertex, Points};
 pub use view::{Ask, ScanAsk, Stats, View};
