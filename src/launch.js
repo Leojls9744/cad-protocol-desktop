@@ -60,6 +60,17 @@ function createLaunch({
     ready() {
       reveal("ready");
     },
+    /**
+     * Loading again from the start (1.32: the page didn't say it's up and
+     * is loaded fresh): its timers begun again, as a first load's.
+     */
+    again() {
+      if (shown) return;
+      if (fallback) clearTimer(fallback);
+      if (max) clearTimer(max);
+      fallback = null;
+      max = setTimer(() => reveal("slow"), maxMs);
+    },
     /** The page couldn't load: the offline page shows at once. */
     failed() {
       reveal("failed");

@@ -91,6 +91,9 @@ const { createLocalFiles, launchedPaths } = require("./local-files");
 const { createJobsFile, createPlaces, fillInput, opensOutside } = require("./places");
 const { createRecovery } = require("./recovery");
 const { createStallLog } = require("./stall-log");
+const { createStartCheck } = require("./start-check");
+const { createStartWatch, READY_MS } = require("./start-watch");
+const { createDeviceSpecs } = require("./device-specs");
 const { SCHEME: LINK_SCHEME, hasAppLink, registerAppLink } = require("./app-link");
 const { HIGH: FASTER_CARD, chooseGraphics, cardsWords } = require("./graphics");
 const { createLaunch } = require("./launch");
@@ -344,6 +347,8 @@ function start() {
   }
   /** The app's window told each change of the update's state (1.26): the badge's progress as it comes. */
   function tellUpdate(state) {
+    // The start-up card's check (1.32) hears it too.
+    if (startCheck) startCheck.heard(state);
     const win = mainWindow;
     if (!win || win.isDestroyed()) return;
     const contents = win.webContents;
@@ -395,6 +400,8 @@ function start() {
   const recovery = createRecovery({ dir: path.join(data, "recovery"), fs, log });
   // 1.31: the drawing area's stalls, as the page notes them (src/stall-log.js).
   const stallLog = createStallLog(path.join(data, "stalls.log"));
+  // 1.32: this computer's memory and graphics cards, for the scans' memory on Auto.
+  const deviceSpecs = createDeviceSpecs({ run: require("node:child_process").execFile });
   /** Double-clicked drawings queued for the page; how many wait. */
   const launchFiles = (argv) => {
     const found = launchedPaths(argv);
@@ -827,6 +834,11 @@ function start() {
       if (!fromApp(event)) throw new Error("not allowed");
       return stallLog.append(text);
     });
+    // 1.32: this computer's memory and graphics cards (the scans' memory on Auto).
+    ipcMain.handle("cadp:specs", (event) => {
+      if (!fromApp(event)) throw new Error("not allowed");
+      return deviceSpecs.read();
+    });
     // 1.11: double-clicked drawings, read and handed over once each.
     ipcMain.handle("cadp:files:launched-count", (event) => {
       if (!fromApp(event)) throw new Error("not allowed");
@@ -876,6 +888,7 @@ function start() {
     // The app's first screen is up: its window shows, the card goes (1.7).
     ipcMain.on("cadp:ready", (event) => {
       if (!fromApp(event)) return;
+      noteAlive("ready");
       if (awaitingSignIn) {
         // In, or Spatial Canvas offline chosen (1.10): the window, then the card goes.
         awaitingSignIn = false;
@@ -890,6 +903,7 @@ function start() {
     // Signed out (1.10): the sign-in card, the window kept out of sight.
     ipcMain.handle("cadp:card:sign-in", (event, can) => {
       if (!fromApp(event)) throw new Error("not allowed");
+      noteAlive("sign-in card");
       // What this page can do (1.14): sign in in a window of the app's own.
       signInCard.can(can);
       // Closing signs you out: no card then, the app's on its way out.
@@ -919,6 +933,11 @@ function start() {
 
   /** The main window's close handshake, made with the window. */
   let closeGuard = null;
+  /** The update check on the start-up card while it runs (1.32). */
+  let startCheck = null;
+  /** The app's start watched (1.32), and whether it's being loaded fresh. */
+  let startWatch = null;
+  let freshLoad = false;
   /** Signed out, the sign-in card up (1.10). */
   let awaitingSignIn = false;
 
@@ -951,7 +970,9 @@ function start() {
     // Shown when the app's ready, the card closed then (1.7, launch.js).
     launch = createLaunch({
       // Once the card's been up long enough to be read (1.8.1, splash.js).
-      showMain: () => {
+      showMain: (why) => {
+        // Why the window showed (1.32): the start's record in the log.
+        log(`window shown: ${why}${startWatch && startWatch.up ? "" : " (the page hasn't said it's up)"}`);
         const reveal = () => {
           if (win.isDestroyed()) return;
           if (!saved || saved.maximized !== false) win.maximize();
@@ -1044,19 +1065,76 @@ function start() {
    * installer's progress shown, the app opened again); closing installs one
    * that's ready.
    */
-  function openApp(win) {
+  async function openApp(win) {
+    // 1.32 (Leo, 2026-11-19 17:31): a new version looked for on the card
+    // first, downloaded and installed there when there's one.
+    if (updates) {
+      startCheck = createStartCheck({
+        updates,
+        log,
+        say: (title, detail, percent) => splash && splash.say(title, detail, percent),
+      });
+      const how = await startCheck.run();
+      startCheck = null;
+      if (how === "installing") return;
+    }
     loadApp(win);
     if (!updates) return;
-    void updates.check();
     setInterval(() => void updates.check(), EVERY_MS).unref();
   }
 
-  /** The app loads out of sight; the card says so (1.7). */
+  /** The app loads out of sight; the card says so (1.7). Watched (1.32): stuck, loaded again fresh. */
   function loadApp(win) {
     if (!win || win.isDestroyed()) return;
     if (splash) splash.say("Loading CAD Protocol…", "CAD Protocol for Windows");
     if (launch) launch.loading();
+    startWatch = createStartWatch({ stuck: () => void reloadFresh(win) });
+    startWatch.begin();
     win.loadURL(config.APP_URL);
+  }
+
+  /**
+   * The page said it's up (1.32): its first screen, or the sign-in card. The
+   * time logged; after a fresh load (reloadFresh), the window shown again.
+   */
+  function noteAlive(how) {
+    if (!startWatch) return;
+    const ms = startWatch.alive();
+    if (ms !== null) log(`app up: ${how} in ${(ms / 1000).toFixed(1)} s${startWatch.fired ? " (loaded fresh)" : ""}`);
+    if (freshLoad && how === "ready") {
+      freshLoad = false;
+      if (launch && !launch.shown) return;
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) showWindowAgain();
+      if (splash) splash.close();
+    }
+  }
+
+  /**
+   * The page didn't say it's up in time (1.32, start-watch.js): the saved
+   * copy of the app's code cleared (its service worker and the files it
+   * keeps: never drawings, jobs, settings or sign-in) and the page loaded
+   * again from the internet, the card saying so.
+   */
+  async function reloadFresh(win) {
+    if (!win || win.isDestroyed()) return;
+    log(`app didn't start in ${READY_MS / 1000} s: its saved code cleared, loading again`);
+    freshLoad = true;
+    if (win.isVisible()) win.hide();
+    if (splash) {
+      splash.open();
+      splash.say("Loading the latest CAD Protocol…", "CAD Protocol for Windows");
+    }
+    if (launch) launch.again();
+    try {
+      await win.webContents.session.clearStorageData({
+        origin: config.APP_ORIGIN,
+        storages: ["serviceworkers", "cachestorage"],
+      });
+      await win.webContents.session.clearCache();
+    } catch (err) {
+      log(`couldn't clear the saved code: ${err && err.message ? err.message : err}`);
+    }
+    if (!win.isDestroyed()) win.loadURL(config.APP_URL);
   }
 
   /** The saved size and place, if it still fits on one of the screens. */

@@ -154,6 +154,8 @@ if (appOrigin && window.location.origin === appOrigin) {
     stalls: {
       append: (text) => ipcRenderer.invoke("cadp:stalls:append", text),
     },
+    /** 1.32: this computer's memory and graphics cards: { ramMB, gpus: [{ name, vramMB }] }. */
+    specs: () => ipcRenderer.invoke("cadp:specs"),
     /**
      * 1.28: Drawing Recovery's copies kept as files on this computer
      * (src/recovery.js) in place of the browser engine's storage: put(copy),
