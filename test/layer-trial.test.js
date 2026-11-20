@@ -11,7 +11,9 @@ const {
   FRAME_ANSWERS,
   frameOptions,
   glue,
+  handleText,
   isToggleChord,
+  keepBarActive,
   layerTrialOn,
   near,
   pageOptions,
@@ -300,4 +302,43 @@ test("the app's window is two only while the trial's on", () => {
   assert.match(main, /new BrowserWindow\(frame \? pageOptions\(options, frame, frame\.getContentBounds\(\)\) : options\)/);
   assert.match(main, /if \(trial\)\s+win\.webContents\.on\("dom-ready"/);
   assert.match(main, /result\.layerTrial = await checkLayerTrial\(/);
+});
+
+test("1.35: the frame's bar is kept as in front while the page's window has the keys", () => {
+  const frame = fakeWindow({ x: 0, y: 0, width: 800, height: 600 });
+  const page = fakeWindow({ x: 0, y: 0, width: 800, height: 600 });
+  const handle = Buffer.alloc(8);
+  handle.writeBigUInt64LE(66052n);
+  frame.getNativeWindowHandle = () => handle;
+  assert.equal(handleText(frame), "66052");
+  assert.equal(handleText({ getNativeWindowHandle: () => null }), null);
+  const painted = [];
+  const waiting = [];
+  assert.equal(keepBarActive({ frame, page, paint: (hwnd, active) => painted.push([hwnd, active]), later: (f) => waiting.push(f) }), true);
+  // The page's window comes to the front: the frame's bar as the one in front.
+  page.focused = true;
+  page.emit("focus");
+  assert.deepEqual(painted.at(-1), ["66052", true]);
+  // Another app comes to the front: as Windows draws any window that isn't.
+  page.focused = false;
+  page.emit("blur");
+  waiting.shift()();
+  assert.deepEqual(painted.at(-1), ["66052", false]);
+  // The frame loses the keys to the page's window (its bar clicked, then let go): still as in front.
+  painted.length = 0;
+  page.focused = true;
+  frame.emit("blur");
+  waiting.shift()();
+  assert.deepEqual(painted.at(-1), ["66052", true]);
+  // With no way to tell Windows, nothing's done.
+  assert.equal(keepBarActive({ frame, page, paint: null }), false);
+});
+
+test("1.35: the page is told the trial's on, and the engine's window is started in the frame", () => {
+  const main = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
+  assert.match(main, /options\.webPreferences\.additionalArguments\.push\("--cadp-layer-trial=1"\);/);
+  assert.match(main, /scanEngine\.viewIn\(hwnd\)/);
+  assert.match(main, /keepBarActive\(\{ frame, page: win, paint: barBackend\(log\) \}\);/);
+  const preload = fs.readFileSync(path.join(__dirname, "..", "src", "preload.js"), "utf8");
+  assert.match(preload, /layer: \{ on: arg\("cadp-layer-trial"\) === "1" \},/);
 });

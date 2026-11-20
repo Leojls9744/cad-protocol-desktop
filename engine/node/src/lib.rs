@@ -28,6 +28,11 @@
 //! 1.28: cropScan(handle, ask, out) cuts a scan to the drawing's limit
 //! boxes from its index, every point, written to a LAS or LAZ file on a
 //! worker thread; cropProgress() says how far it's come.
+//! 1.35 (the layer trial): viewStart(parent) makes the engine a window of
+//! its own in the app's frame and a thread that draws scans there on the
+//! graphics card; viewShow(ask) says what (the page's view, the scans and
+//! where each is in the drawing, or the check's own ring); viewStats() how
+//! it's going; viewStop() ends it.
 
 use cadp_engine_core::c2c::{self, AlignOpts, GapStats};
 use cadp_engine_core::classify::{self as rules, CloudIn, StageAsk, Tree};
@@ -1164,4 +1169,125 @@ pub fn classify_stage(ask: ClassifyAskJs) -> Result<AsyncTask<StageTask>> {
         trees,
         started: Instant::now(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// 1.35: the engine's own drawing (cadp-engine-view), in the app's frame.
+// ---------------------------------------------------------------------------
+
+static VIEW: LazyLock<Mutex<Option<cadp_engine_view::View>>> = LazyLock::new(|| Mutex::new(None));
+
+/// A scan to draw: its handle, its file's coordinates into the drawing (12 numbers), and about how many points at most.
+#[napi(object)]
+pub struct ViewScanJs {
+    pub handle: u32,
+    pub affine: Vec<f64>,
+    pub most: Option<f64>,
+}
+
+/// What to draw: the page's view (where its drawing area's middle looks, right, up and toward the eye, drawing units a
+/// pixel, and the drawing area in the window: left, top, width, height), the scans, a point's size; or the check's ring.
+#[napi(object)]
+pub struct ViewAskJs {
+    pub target: Option<Vec<f64>>,
+    pub right: Option<Vec<f64>>,
+    pub up: Option<Vec<f64>>,
+    pub to_eye: Option<Vec<f64>>,
+    pub units_per_pixel: Option<f64>,
+    pub rect: Option<Vec<f64>>,
+    pub px: Option<f64>,
+    pub test: Option<bool>,
+    pub scans: Option<Vec<ViewScanJs>>,
+}
+
+#[napi(object)]
+pub struct ViewStatsJs {
+    pub started: bool,
+    pub running: bool,
+    pub frames: f64,
+    pub frame_ms: f64,
+    pub fps: f64,
+    pub points: f64,
+    pub load_ms: f64,
+    pub width: u32,
+    pub height: u32,
+    pub adapter: String,
+    pub error: Option<String>,
+}
+
+fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
+    let v = v.as_ref()?;
+    (v.len() == 3 && v.iter().all(|x| x.is_finite())).then(|| [v[0], v[1], v[2]])
+}
+
+/// The engine's window started in the frame whose handle is `parent` (a whole number, as text).
+#[napi]
+pub fn view_start(parent: String) -> Result<()> {
+    let hwnd: i64 = parent.trim().parse().map_err(|_| Error::from_reason("the frame's handle isn't a number"))?;
+    let mut held = VIEW.lock().unwrap();
+    // One at a time: a new frame's takes the old one's place.
+    if let Some(old) = held.take() {
+        old.stop();
+    }
+    let view = cadp_engine_view::View::start(hwnd as isize).map_err(Error::from_reason)?;
+    *held = Some(view);
+    Ok(())
+}
+
+/// What the engine's window shows from now on. Scans whose handles aren't open are left out.
+#[napi]
+pub fn view_show(ask: ViewAskJs) -> Result<u32> {
+    let held = VIEW.lock().unwrap();
+    let Some(view) = held.as_ref() else {
+        return Err(Error::from_reason("the engine's window isn't started"));
+    };
+    let camera = match (view_three(&ask.target), view_three(&ask.right), view_three(&ask.up), view_three(&ask.to_eye), ask.units_per_pixel, &ask.rect) {
+        (Some(target), Some(right), Some(up), Some(to_eye), Some(upp), Some(rect))
+            if upp > 0.0 && upp.is_finite() && rect.len() == 4 && rect.iter().all(|x| x.is_finite()) =>
+        {
+            Some(cadp_engine_view::Camera { target, right, up, to_eye, units_per_pixel: upp, rect: [rect[0], rect[1], rect[2], rect[3]] })
+        }
+        _ => None,
+    };
+    let indexes = INDEXES.lock().unwrap();
+    let mut scans = Vec::new();
+    for s in ask.scans.unwrap_or_default() {
+        let Some(index) = indexes.get(&s.handle) else { continue };
+        if s.affine.len() != 12 || s.affine.iter().any(|x| !x.is_finite()) {
+            continue;
+        }
+        let mut affine = [0.0; 12];
+        affine.copy_from_slice(&s.affine);
+        let most = s.most.filter(|m| m.is_finite() && *m >= 1.0).unwrap_or(16_000_000.0).min(64_000_000.0) as usize;
+        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most });
+    }
+    let shown = scans.len() as u32;
+    view.show(cadp_engine_view::Ask { camera, scans, px: ask.px.unwrap_or(2.0), test: ask.test.unwrap_or(false) });
+    Ok(shown)
+}
+
+#[napi]
+pub fn view_stats() -> ViewStatsJs {
+    let held = VIEW.lock().unwrap();
+    let s = held.as_ref().map(|v| v.stats()).unwrap_or_default();
+    ViewStatsJs {
+        started: held.is_some(),
+        running: s.running,
+        frames: s.frames as f64,
+        frame_ms: s.frame_ms,
+        fps: s.fps,
+        points: s.points as f64,
+        load_ms: s.load_ms,
+        width: s.size[0],
+        height: s.size[1],
+        adapter: s.adapter,
+        error: s.error,
+    }
+}
+
+#[napi]
+pub fn view_stop() {
+    if let Some(view) = VIEW.lock().unwrap().take() {
+        view.stop();
+    }
 }

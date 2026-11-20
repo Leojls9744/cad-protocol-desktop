@@ -212,6 +212,77 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     return put(msg);
   }
 
+  /**
+   * 1.35: the engine's own window (cadp-engine-view), in the app's frame.
+   * `started`: the frame it's in, as the app gave it; an engine without it
+   * (an add-on from before) says so.
+   */
+  let viewIn = null;
+  /** Why it didn't start, the last time it was tried. */
+  let viewError = null;
+  const canView = () => typeof engine.viewStart === "function";
+
+  function viewStart(msg) {
+    if (!canView()) return { error: "This scan engine can't draw in a window of its own." };
+    try {
+      engine.viewStart(String(msg.hwnd));
+      viewIn = String(msg.hwnd);
+      viewError = null;
+      log(`scan engine: its own window started in the app's frame`);
+      return { started: true };
+    } catch (err) {
+      viewIn = null;
+      const error = String((err && err.message) || err);
+      viewError = error;
+      log(`scan engine: its own window didn't start: ${error}`);
+      return { error };
+    }
+  }
+
+  function viewStop() {
+    if (!canView()) return;
+    try {
+      engine.viewStop();
+    } catch {
+      // Gone already.
+    }
+    viewIn = null;
+  }
+
+  /** What the window's told to show (a "view"), or just how it's going ("view-stats"). */
+  function viewAnswer(msg) {
+    if (!canView()) return { error: "This scan engine can't draw in a window of its own." };
+    if (viewIn === null)
+      return { error: viewError ? `The engine's window didn't start: ${viewError}` : "The engine's window isn't started.", stats: engine.viewStats() };
+    try {
+      let shown;
+      if (msg.kind === "view") {
+        const list = [];
+        for (const s of Array.isArray(msg.scans) ? msg.scans : []) {
+          const held = s && scans.get(s.token);
+          if (!held || held.handle == null || !Array.isArray(s.affine)) continue;
+          list.push({ handle: held.handle, affine: s.affine.map(Number), ...(s.most > 0 ? { most: Number(s.most) } : {}) });
+        }
+        const a = msg.ask && typeof msg.ask === "object" ? msg.ask : {};
+        const nums = (v, n) => (Array.isArray(v) && v.length === n ? v.map(Number) : undefined);
+        shown = engine.viewShow({
+          target: nums(a.target, 3),
+          right: nums(a.right, 3),
+          up: nums(a.up, 3),
+          toEye: nums(a.toEye, 3),
+          unitsPerPixel: typeof a.unitsPerPixel === "number" ? a.unitsPerPixel : undefined,
+          rect: nums(a.rect, 4),
+          px: typeof a.px === "number" ? a.px : undefined,
+          test: a.test === true,
+          scans: list,
+        });
+      }
+      return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
   /** Renders under way (1.28), by port: stopped when asked, or when the page goes. */
   const rendersOf = new WeakMap();
 
@@ -273,6 +344,12 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const id = msg.id;
     if (msg.kind === "render") {
       void render(port, msg);
+      return;
+    }
+    // 1.35 (the layer trial): what the engine's own window shows (the
+    // page's view and scans, or the check's ring), and how it's going.
+    if (msg.kind === "view" || msg.kind === "view-stats") {
+      port.postMessage({ kind: msg.kind, id, ...viewAnswer(msg) });
       return;
     }
     // 1.29: the rules classifier's middle, on the engine's threads (the
@@ -462,6 +539,9 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     if (msg.kind === "open") open(msg);
     else if (msg.kind === "crop") void crop(msg);
     else if (msg.kind === "page" && event.ports && event.ports[0]) addPage(event.ports[0]);
+    // 1.35: the app's frame for the engine's own window (the layer trial), or no more of it.
+    else if (msg.kind === "view-start") parentPort.postMessage({ kind: "view-started", ...viewStart(msg) });
+    else if (msg.kind === "view-stop") viewStop();
   });
 
   return { scans, ports, answer };

@@ -12,8 +12,10 @@ const { addonPath, createScanEngine } = require("./scan-engine");
  * indexed, a point under a cursor found, then the scan opened again from
  * its index (not indexed twice). 1.25: the engine's process stopped, the
  * page told, the engine started again with its scans, and asked again.
+ * 1.35: `view({ engine, token, ask })`, when given, tries the engine's own
+ * window with this engine and its scan (layer-trial.js checkLayerTrial).
  */
-async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, log = () => {} }) {
+async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, log = () => {}, view = null }) {
   const os = require("node:os");
   const { lasBytes, samplePoints } = require("./las-sample");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cadp-engine-check-"));
@@ -156,11 +158,28 @@ async function checkEngine({ utilityProcess, MessageChannelMain, dir: srcDir, lo
         frontZ: after.front && after.front.length >= 5 ? after.front[4] : null,
       };
     }
+    // 1.35 (the layer trial): the engine's own window, tried with this
+    // engine and its scan while they're here (the first time round).
+    let viewed;
+    if (view && round === "indexed") {
+      let n = 100;
+      viewed = await view({
+        engine,
+        token: reg.token,
+        ask: (msg, ms = 20000) => {
+          n += 1;
+          const id = n;
+          port.postMessage({ ...msg, id });
+          return waitFor((m) => m.kind === msg.kind && m.id === id, ms);
+        },
+      }).catch((err) => ({ error: String(err && err.stack ? err.stack : err) }));
+    }
     port.close();
     engine.stop();
     const front = answer.front || [];
     return {
       version: hello.version,
+      ...(viewed ? { view: viewed } : {}),
       count: opened.info.count,
       built: opened.info.built,
       ms: Date.now() - t0,

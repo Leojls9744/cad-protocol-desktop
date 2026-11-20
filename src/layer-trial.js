@@ -200,6 +200,70 @@ function glue({ frame, page, buttonDown = () => false, later = setTimeout, log =
   return { frame, page, place, giveKeys };
 }
 
+/** A window's handle as a whole number's text (Electron's getNativeWindowHandle() buffer); null with none. */
+function handleText(win) {
+  try {
+    const b = win.getNativeWindowHandle();
+    if (!b || typeof b.length !== "number") return null;
+    if (b.length >= 8) return String(b.readBigUInt64LE(0));
+    if (b.length >= 4) return String(b.readUInt32LE(0));
+  } catch {
+    // No window.
+  }
+  return null;
+}
+
+/**
+ * The frame's bar kept looking in front while the page's window has the
+ * keys (1.35; Leo's screenshots of 2026-11-20 14:10: the bar dark, as
+ * Windows draws a window that isn't in front, all the while the trial was
+ * on): Windows is told to draw the frame's bar as the active one's when the
+ * page's window comes to the front, and as it would when neither is.
+ * `paint(hwndText, active)` is Windows' call (barBackend); the windows'
+ * focus and blur say when.
+ */
+function keepBarActive({ frame, page, paint, later = setTimeout }) {
+  const gone = (win) => !win || win.isDestroyed();
+  const hwnd = handleText(frame);
+  if (!hwnd || typeof paint !== "function") return false;
+  const set = (active) => {
+    if (!gone(frame)) paint(hwnd, active);
+  };
+  page.on("focus", () => set(true));
+  // Gone from both (another app's in front): as Windows draws any window that isn't.
+  const lost = () =>
+    later(() => {
+      if (gone(frame) || gone(page)) return;
+      if (!page.isFocused() && !frame.isFocused()) set(false);
+      else if (page.isFocused()) set(true);
+    }, 40);
+  page.on("blur", lost);
+  frame.on("blur", lost);
+  return true;
+}
+
+/** Windows' call for keepBarActive: WM_NCACTIVATE sent to the frame (koffi); nothing anywhere else. */
+function barBackend(log = () => {}) {
+  if (process.platform !== "win32") return null;
+  try {
+    const koffi = require("koffi");
+    const user = koffi.load("user32.dll");
+    const send = user.func("__stdcall", "SendMessageW", "intptr_t", ["uintptr_t", "uint32", "uintptr_t", "intptr_t"]);
+    const WM_NCACTIVATE = 0x0086;
+    return (hwndText, active) => {
+      try {
+        // lParam 0: the bar's drawn again in its new look at once.
+        send(BigInt(hwndText), WM_NCACTIVATE, active ? 1 : 0, 0);
+      } catch (err) {
+        log(`layer trial: the frame's bar couldn't be told: ${err && err.message ? err.message : err}`);
+      }
+    };
+  } catch (err) {
+    log(`layer trial: the frame's bar can't be kept as in front: ${err && err.message ? err.message : err}`);
+    return null;
+  }
+}
+
 /** Whether the mouse's left button is held, from Windows (koffi); never, anywhere else. */
 function buttonDownBackend(log = () => {}) {
   if (process.platform !== "win32") return () => false;
@@ -235,7 +299,7 @@ function near(pixel, color, slack = 40) {
  * over the layer, the layer through the rest. The screen's picture is kept
  * at `png` for the build to keep.
  */
-async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFile, png, log = () => {} }) {
+async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFile, png, log = () => {}, engine = null }) {
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const display = screen.getPrimaryDisplay();
   const area = display.workArea;
@@ -266,32 +330,42 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
     // The screen: the bar, the layer through the page, the line over the layer.
     const inside = frame.getContentBounds();
     const k = display.scaleFactor || 1;
-    try {
+    /** The screen now: `at(dx, dy)` a pixel of it from the frame's inside's corner, and its picture kept at `file`. */
+    const look = async (file) => {
       const sources = await desktopCapturer.getSources({
         types: ["screen"],
         thumbnailSize: { width: Math.round(display.size.width * k), height: Math.round(display.size.height * k) },
       });
       const shot = sources[0] && sources[0].thumbnail;
       const size = shot ? shot.getSize() : { width: 0, height: 0 };
-      seen.shot = size;
-      if (shot && size.width > 0) {
-        const sx = size.width / display.size.width;
-        const sy = size.height / display.size.height;
-        const bitmap = shot.toBitmap();
-        const at = (dx, dy) =>
-          pixelAt(bitmap, size.width, (inside.x - display.bounds.x + dx) * sx, (inside.y - display.bounds.y + dy) * sy);
-        seen.pixels = { bar: at(100, 100), layer: at(520, 120), line: at(520, 303), below: at(520, 420) };
+      if (!shot || !(size.width > 0)) return null;
+      const sx = size.width / display.size.width;
+      const sy = size.height / display.size.height;
+      const bitmap = shot.toBitmap();
+      if (file && writeFile) writeFile(file, shot.toPNG());
+      return {
+        size,
+        at: (dx, dy) => pixelAt(bitmap, size.width, (inside.x - display.bounds.x + dx) * sx, (inside.y - display.bounds.y + dy) * sy),
+      };
+    };
+    try {
+      const shot = await look(png);
+      seen.shot = shot ? shot.size : { width: 0, height: 0 };
+      if (shot) {
+        seen.pixels = { bar: shot.at(100, 100), layer: shot.at(520, 120), line: shot.at(520, 303), below: shot.at(520, 420) };
         seen.barOver = near(seen.pixels.bar, [0, 255, 0]);
         seen.layerThrough = near(seen.pixels.layer, [255, 0, 255]) && near(seen.pixels.below, [255, 0, 255]);
         seen.lineOver = near(seen.pixels.line, [255, 255, 255]);
-        if (png && writeFile) {
-          writeFile(png, shot.toPNG());
-          seen.png = png;
-        }
+        if (png) seen.png = png;
       }
     } catch (err) {
       seen.shotError = String(err && err.message ? err.message : err);
     }
+    // 1.35 (Trial B): the scan engine's own window in the frame. Its ring of
+    // points, turning, then the check's scan from overhead: each seen on the
+    // screen through the page's see-through part, with the page's bar and
+    // line still over it.
+    if (engine) seen.view = await checkEngineView({ engine, frame, inside, k, look, png, wait, log });
     // Maximized with the frame, and back.
     frame.maximize();
     await wait(900);
@@ -313,7 +387,102 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
   }
 }
 
+/** The engine's own background (cadp-engine-view CLEAR), as the screen shows it. */
+const ENGINE_CLEAR = [11, 16, 32];
+
+/**
+ * The build's check of the engine's own window (1.35, Trial B) on real
+ * Windows, inside checkLayerTrial's two windows: started in the frame, its
+ * ring of points drawn (white at its middle, the engine's background round
+ * it, where the frame's page was magenta), then the check's scan from
+ * overhead (its post red at the middle, its floor blue beside it), and how
+ * it went (frames drawn, the card's name).
+ */
+async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
+  const out = {};
+  try {
+    const hwnd = handleText(frame);
+    out.hwnd = Boolean(hwnd);
+    out.told = engine.engine.viewIn(hwnd);
+    // The window, the card and its first frame (the build's computer draws on its processor).
+    let stats = null;
+    for (let i = 0; i < 80; i += 1) {
+      await wait(250);
+      const said = await engine.ask({ kind: "view", ask: { test: true } });
+      if (said.error && !/isn't started/.test(said.error)) {
+        out.error = said.error;
+        break;
+      }
+      stats = said.stats || null;
+      if (stats && stats.error) {
+        out.error = stats.error;
+        break;
+      }
+      if (stats && stats.frames >= 3) break;
+    }
+    out.ring = stats;
+    if (out.error || !stats || !(stats.frames >= 3)) return out;
+    await wait(600);
+    const cx = Math.round(inside.width / 2);
+    const cy = Math.round(inside.height / 2);
+    const first = await look(png ? png.replace(/\.png$/, ".ring.png") : null);
+    if (first) {
+      out.ringPixels = { middle: first.at(cx, cy), beside: first.at(cx + 60, cy + 40), bar: first.at(100, 100), line: first.at(520, 303) };
+      out.ringDrawn = near(out.ringPixels.middle, [255, 255, 255]);
+      out.engineUnder = near(out.ringPixels.beside, ENGINE_CLEAR, 12);
+      out.pageOver = near(out.ringPixels.bar, [0, 255, 0]) && near(out.ringPixels.line, [255, 255, 255]);
+    }
+    // The check's scan from overhead: 10 × 10 units of floor at 0.03 a pixel, its post at the middle.
+    const shown = await engine.ask({
+      kind: "view",
+      scans: [{ token: engine.token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
+      ask: {
+        target: [6000005, 2000005, 100],
+        right: [1, 0, 0],
+        up: [0, 1, 0],
+        toEye: [0, 0, 1],
+        unitsPerPixel: 0.03 / k,
+        rect: [0, 0, inside.width * k, inside.height * k],
+        px: 5 * k,
+      },
+    });
+    out.shown = shown.shown;
+    if (shown.error) {
+      out.error = shown.error;
+      return out;
+    }
+    let scan = null;
+    for (let i = 0; i < 40; i += 1) {
+      await wait(250);
+      scan = (await engine.ask({ kind: "view-stats" })).stats || null;
+      if (scan && scan.points >= 10000) break;
+    }
+    out.scan = scan;
+    await wait(600);
+    const second = await look(png ? png.replace(/\.png$/, ".scan.png") : null);
+    if (second) {
+      out.scanPixels = { post: second.at(cx, cy), floor: second.at(cx - 100, cy + 30), off: second.at(cx + 230, cy), line: second.at(520, 303) };
+      out.postDrawn = near(out.scanPixels.post, [225, 70, 50], 60);
+      out.floorDrawn = near(out.scanPixels.floor, [40, 80, 220], 40);
+      out.offClear = near(out.scanPixels.off, ENGINE_CLEAR, 12);
+    }
+    return out;
+  } catch (err) {
+    out.error = String(err && err.stack ? err.stack : err);
+    return out;
+  } finally {
+    try {
+      engine.engine.viewIn(null);
+      await wait(300);
+    } catch (err) {
+      log(`layer trial: the engine's window wasn't stopped: ${err && err.message ? err.message : err}`);
+    }
+  }
+}
+
 module.exports = {
+  ENGINE_CLEAR,
+  checkEngineView,
   FLAG,
   KEY,
   SEE_THROUGH_CSS,
@@ -326,6 +495,9 @@ module.exports = {
   pageOptions,
   routeToFrame,
   glue,
+  handleText,
+  keepBarActive,
+  barBackend,
   buttonDownBackend,
   pixelAt,
   near,

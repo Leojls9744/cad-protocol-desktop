@@ -471,3 +471,72 @@ test("1.29: the real engine does the classifier's middle for a page, its big lis
   await tick();
   assert.match(page.out.find((m) => m.id === 6).error, /ground grid/);
 });
+
+test("1.35: the engine's own window is started in the app's frame, shown a view by token, and says how it's going", async () => {
+  const parent = new EventEmitter();
+  parent.sent = [];
+  parent.postMessage = (m) => parent.sent.push(m);
+  const calls = [];
+  const engine = {
+    ...fakeEngine(),
+    viewStart: (hwnd) => calls.push(["start", hwnd]),
+    viewShow: (ask) => {
+      calls.push(["show", ask]);
+      return ask.scans.length;
+    },
+    viewStats: () => ({ started: true, running: true, frames: 12, points: 10, adapter: "A card" }),
+    viewStop: () => calls.push(["stop"]),
+  };
+  createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  parent.emit("message", { data: { kind: "open", token: "t1", path: "C:\\a.las", cacheDir: "C:\\c" } });
+  await tick();
+  // Asked before the window's started: said so.
+  page.emit("message", { data: { kind: "view", id: 1, ask: { test: true } } });
+  assert.equal(page.out.at(-1).error, "The engine's window isn't started.");
+  parent.emit("message", { data: { kind: "view-start", hwnd: "66052" } });
+  assert.deepEqual(calls[0], ["start", "66052"]);
+  assert.deepEqual(parent.sent.at(-1), { kind: "view-started", started: true });
+  // A view: its scans by their tokens (one not open is left out), the numbers as given.
+  page.emit("message", {
+    data: {
+      kind: "view",
+      id: 2,
+      scans: [
+        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 },
+        { token: "nope", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] },
+      ],
+      ask: { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [10, 20, 300, 200], px: 2 },
+    },
+  });
+  const shown = calls.at(-1)[1];
+  assert.deepEqual(shown.scans, [{ handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], most: 5000000 }]);
+  assert.deepEqual(shown.target, [1, 2, 3]);
+  assert.deepEqual(shown.toEye, [0, 0, 1]);
+  assert.equal(shown.unitsPerPixel, 0.5);
+  assert.deepEqual(shown.rect, [10, 20, 300, 200]);
+  assert.equal(shown.test, false);
+  assert.deepEqual(page.out.at(-1), { kind: "view", id: 2, shown: 1, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
+  // How it's going, with nothing changed.
+  page.emit("message", { data: { kind: "view-stats", id: 3 } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
+  assert.equal(calls.filter((c) => c[0] === "show").length, 1);
+  parent.emit("message", { data: { kind: "view-stop" } });
+  assert.deepEqual(calls.at(-1), ["stop"]);
+  page.emit("message", { data: { kind: "view-stats", id: 4 } });
+  assert.equal(page.out.at(-1).error, "The engine's window isn't started.");
+});
+
+test("1.35: an engine from before can't draw in a window of its own, and says so", () => {
+  const parent = new EventEmitter();
+  parent.sent = [];
+  parent.postMessage = (m) => parent.sent.push(m);
+  createHost({ engine: fakeEngine(), parentPort: parent, every: () => 0, stop: () => {} });
+  const page = port();
+  parent.emit("message", { data: { kind: "page" }, ports: [page] });
+  parent.emit("message", { data: { kind: "view-start", hwnd: "1" } });
+  assert.match(parent.sent.at(-1).error, /can't draw in a window of its own/);
+  page.emit("message", { data: { kind: "view", id: 1, ask: {} } });
+  assert.match(page.out.at(-1).error, /can't draw in a window of its own/);
+});

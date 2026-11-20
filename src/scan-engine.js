@@ -69,6 +69,8 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
   /** The pages given a port, told when the engine stops and starts again (1.25). */
   const pages = new Set();
   const available = typeof exists === "function" ? exists(addon) : true;
+  /** The frame the engine's own window is in (1.35, the layer trial), as a whole number's text; null: none. */
+  let viewFrame = null;
   /** Cuts asked of the engine (1.28), by id: told how far they've come, then done. */
   const cuts = new Map();
   let nextCut = 1;
@@ -103,6 +105,8 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     lines(child.stderr);
     child.on("message", (msg) => {
       if (msg && (msg.kind === "opened" || msg.kind === "failed") && typeof msg.token === "string") settled.add(msg.token);
+      // 1.35: whether its own window started in the frame.
+      if (msg && msg.kind === "view-started" && msg.error) log(`scan engine: no window of its own: ${msg.error}`);
       // 1.28: a cut's progress, and its end.
       const cut = msg && cuts.get(msg.id);
       if (cut && msg.kind === "crop-progress") cut.progress(Number(msg.done) || 0);
@@ -138,6 +142,8 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     });
     // Its scans opened again (their indexes open at once).
     for (const [token, p] of tokens) child.postMessage({ kind: "open", token, path: p, cacheDir });
+    // 1.35: its own window again, in the frame it was in (the layer trial).
+    if (viewFrame !== null) child.postMessage({ kind: "view-start", hwnd: viewFrame });
     return child;
   }
 
@@ -201,6 +207,26 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     return tokens.get(token) ?? null;
   }
 
+  /**
+   * 1.35 (the layer trial): the engine draws in a window of its own inside
+   * the frame whose window handle is `hwnd` (a whole number, as text or a
+   * BigInt), started with the engine and again whenever it restarts; null
+   * takes it away. Whether the engine's there to be told.
+   */
+  function viewIn(hwnd) {
+    viewFrame = hwnd === null || hwnd === undefined ? null : String(hwnd);
+    if (viewFrame === null) {
+      if (host) host.postMessage({ kind: "view-stop" });
+      return true;
+    }
+    // A new process is told as it starts (start()); one that's running, now.
+    const running = host;
+    const h = ensure();
+    if (!h) return false;
+    if (running) h.postMessage({ kind: "view-start", hwnd: viewFrame });
+    return true;
+  }
+
   function stop() {
     stopped = true;
     if (host) {
@@ -219,6 +245,7 @@ function createScanEngine({ fork, newChannel, statFile, exists, cacheDir, addon,
     connect,
     crop,
     pathOf,
+    viewIn,
     stop,
     tokens,
     get running() {

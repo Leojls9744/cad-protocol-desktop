@@ -24,6 +24,13 @@ if (appOrigin && window.location.origin === appOrigin) {
     isDesktop: true,
     version: arg("cadp-desktop-version"),
     platform: process.platform,
+    /**
+     * 1.35 (the layer trial, layer-trial.js): whether this page is over a
+     * layer the scan engine draws on itself. On: the page asks the engine to
+     * draw its scans there (the engine's port, { kind: "view" }) and
+     * leaves its own drawing of them off.
+     */
+    layer: { on: arg("cadp-layer-trial") === "1" },
     pointerSpeed: {
       /** { supported, chosen, automatic, off, own, inUse, defaultSpeed, min, max } */
       get: () => ipcRenderer.invoke("cadp:pointer-speed:get"),

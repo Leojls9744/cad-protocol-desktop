@@ -105,10 +105,13 @@ const { checkEngine } = require("./engine-check");
 const {
   KEY: LAYER_KEY,
   SEE_THROUGH_CSS,
+  barBackend,
   buttonDownBackend,
   checkLayerTrial,
   frameOptions,
   glue: glueLayer,
+  handleText,
+  keepBarActive,
   isToggleChord,
   layerTrialOn,
   pageOptions,
@@ -192,20 +195,26 @@ if (smokeArg) {
         MessageChannelMain,
         dir: __dirname,
         log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
+        // 1.34: the layer trial's two windows, kept as one, the page's over
+        // the layer; 1.35: the engine's own window in the frame, with this
+        // engine and its scan.
+        view: async (session) => {
+          result.layerTrial = await checkLayerTrial({
+            BrowserWindow,
+            screen,
+            desktopCapturer,
+            writeFile: (file, bytes) => fs.writeFileSync(file, bytes),
+            png: `${out}.layer.png`,
+            log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
+            engine: session,
+          });
+          return result.layerTrial.view || null;
+        },
       });
       // 1.13: a small browser window opened, put in place and closed.
       result.smallWindow = await smokeSmallWindow((line) => fs.appendFileSync(`${out}.log`, `${line}\n`));
       // 1.14: a sign-in window of the app's own, over a card, in front of it.
       result.signInWindow = await smokeSignInWindow();
-      // 1.34: the layer trial's two windows: kept as one, the page's over the layer.
-      result.layerTrial = await checkLayerTrial({
-        BrowserWindow,
-        screen,
-        desktopCapturer,
-        writeFile: (file, bytes) => fs.writeFileSync(file, bytes),
-        png: `${out}.layer.png`,
-        log: (line) => fs.appendFileSync(`${out}.log`, `${line}\n`),
-      });
     } catch (err) {
       result.error = String(err && err.stack ? err.stack : err);
     }
@@ -1002,12 +1011,25 @@ function start() {
     const trial = layerTrialOn(process.argv, store);
     let frame = null;
     if (trial) {
+      // 1.35: the page is told, so it asks the engine to draw its scans on the layer.
+      options.webPreferences.additionalArguments.push("--cadp-layer-trial=1");
       frame = new BrowserWindow(frameOptions(options, secureWebPreferences()));
       kinds.set(frame.webContents, "layer");
       frame.loadURL(pageUrl("layer.html"));
     }
     const win = new BrowserWindow(frame ? pageOptions(options, frame, frame.getContentBounds()) : options);
-    if (frame) glueLayer({ frame, page: win, buttonDown: buttonDownBackend(log), log });
+    if (frame) {
+      glueLayer({ frame, page: win, buttonDown: buttonDownBackend(log), log });
+      // 1.35: the frame's bar keeps its look while the page's window has the keys.
+      keepBarActive({ frame, page: win, paint: barBackend(log) });
+      // 1.35 (Trial B): the scan engine's own window in the frame, over the
+      // test picture and under the page: what the engine draws shows through
+      // the page's drawing area.
+      const hwnd = handleText(frame);
+      if (hwnd && scanEngine.available) {
+        if (!scanEngine.viewIn(hwnd)) log("layer trial: the scan engine isn't there to draw on the layer");
+      } else log("layer trial: no scan engine in this app; the layer keeps its test picture");
+    }
     kinds.set(win.webContents, "main");
     // Ctrl+Alt+Shift+L turns the trial on or off for the next time the app opens.
     win.webContents.on("before-input-event", (event, input) => {

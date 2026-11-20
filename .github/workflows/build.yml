@@ -56,7 +56,7 @@ jobs:
 
       - name: Scan engine tests
         working-directory: engine
-        run: cargo test -p cadp-engine-core --release
+        run: cargo test -p cadp-engine-core -p cadp-engine-view --release
 
       - name: Build the scan engine
         run: npm run build:engine
@@ -159,6 +159,15 @@ jobs:
           }
           if (-not $t.maximized.is) { throw "The layer trial's frame didn't maximize." }
           if (-not $t.closed) { throw "The layer trial's windows didn't close together." }
+          # 1.35: the scan engine's own window in the frame: its ring, then the check's scan, drawn on this computer's card (its processor's stand-in) and seen on the screen under the page.
+          $v = $r.engine.first.view
+          Write-Output "engine view: $($v | ConvertTo-Json -Depth 6 -Compress)"
+          if (-not $v) { Write-Output "::warning::The engine's own window wasn't tried." }
+          elseif ($v.error) { Write-Output "::warning::The engine's own window: $($v.error)" }
+          else {
+            Write-Output "engine view on screen: ring drawn $($v.ringDrawn), engine under the page $($v.engineUnder), page over it $($v.pageOver); scan: post $($v.postDrawn), floor $($v.floorDrawn), off it clear $($v.offClear); card: $($v.ring.adapter)"
+            if (-not ($v.ringDrawn -and $v.engineUnder -and $v.pageOver -and $v.postDrawn -and $v.floorDrawn)) { Write-Output "::warning::The engine's own window didn't show as expected: $($v.ringPixels | ConvertTo-Json -Compress) $($v.scanPixels | ConvertTo-Json -Compress)" }
+          }
           # What the screen showed is said, not failed on (a trial: the picture's kept to look at).
           if ($t.shot.width -gt 0) {
             Write-Output "layer trial on screen: bar over $($t.barOver), layer through $($t.layerThrough), line over $($t.lineOver)"
@@ -238,6 +247,8 @@ jobs:
             ${{ runner.temp }}/smoke.json
             ${{ runner.temp }}/smoke.json.log
             ${{ runner.temp }}/smoke.json.layer.png
+            ${{ runner.temp }}/smoke.json.layer.ring.png
+            ${{ runner.temp }}/smoke.json.layer.scan.png
 
       - uses: actions/upload-artifact@v4
         with:

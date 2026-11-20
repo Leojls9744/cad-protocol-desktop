@@ -210,3 +210,25 @@ test("1.28: a cut asked of the engine, its progress and its end relayed by id", 
   hosts[0].emit("exit", 1);
   assert.match((await second).error, /stopped/);
 });
+
+test("1.35: the engine's own window is in the app's frame from its start, and again after a crash", () => {
+  const { e, hosts, timers } = engine();
+  // Told the frame before the engine's running: it starts, and is told as it does.
+  assert.equal(e.viewIn(66052n), true);
+  assert.equal(hosts.length, 1);
+  assert.deepEqual(hosts[0].sent.map(([m]) => m), [{ kind: "view-start", hwnd: "66052" }]);
+  // Another frame while it runs: told at once.
+  assert.equal(e.viewIn("77"), true);
+  assert.deepEqual(hosts[0].sent.at(-1)[0], { kind: "view-start", hwnd: "77" });
+  // It stops by itself: started again, in the frame it was in.
+  hosts[0].emit("exit", 1);
+  timers.shift()[0]();
+  assert.equal(hosts.length, 2);
+  assert.deepEqual(hosts[1].sent.map(([m]) => m), [{ kind: "view-start", hwnd: "77" }]);
+  // Taken away: said, and not started in a frame again.
+  assert.equal(e.viewIn(null), true);
+  assert.deepEqual(hosts[1].sent.at(-1)[0], { kind: "view-stop" });
+  hosts[1].emit("exit", 1);
+  timers.shift()[0]();
+  assert.deepEqual(hosts[2].sent, []);
+});
