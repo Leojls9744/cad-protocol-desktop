@@ -318,7 +318,8 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
     await page.loadURL(
       "data:text/html,<title>Layer check</title><body style='margin:0;background:transparent'>" +
         "<div style='position:fixed;left:0;top:0;bottom:0;width:200px;background:%2300ff00'></div>" +
-        "<div style='position:fixed;left:200px;right:0;top:300px;height:6px;background:%23ffffff'></div>",
+        // The line a third of the way down: clear of the inside's middle, where the engine's ring and scan are looked at (1.35).
+        "<div style='position:fixed;left:200px;right:0;top:200px;height:6px;background:%23ffffff'></div>",
     );
     frame.show();
     page.show();
@@ -355,7 +356,7 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
       const shot = await look(png);
       seen.shot = shot ? shot.size : { width: 0, height: 0 };
       if (shot) {
-        seen.pixels = { bar: shot.at(100, 100), layer: shot.at(520, 120), line: shot.at(520, 303), below: shot.at(520, 420) };
+        seen.pixels = { bar: shot.at(100, 100), layer: shot.at(520, 120), line: shot.at(520, 203), below: shot.at(520, 420) };
         seen.barOver = near(seen.pixels.bar, [0, 255, 0]);
         seen.layerThrough = near(seen.pixels.layer, [255, 0, 255]) && near(seen.pixels.below, [255, 0, 255]);
         seen.lineOver = near(seen.pixels.line, [255, 255, 255]);
@@ -432,7 +433,7 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
     const cy = Math.round(inside.height / 2);
     const first = await look(png ? png.replace(/\.png$/, ".ring.png") : null);
     if (first) {
-      out.ringPixels = { middle: first.at(cx, cy), beside: first.at(cx + 60, cy + 40), bar: first.at(100, 100), line: first.at(520, 303) };
+      out.ringPixels = { middle: first.at(cx, cy), beside: first.at(cx + 60, cy + 40), bar: first.at(100, 100), line: first.at(520, 203) };
       out.ringDrawn = near(out.ringPixels.middle, [255, 255, 255]);
       out.engineUnder = near(out.ringPixels.beside, ENGINE_CLEAR, 12);
       out.pageOver = near(out.ringPixels.bar, [0, 255, 0]) && near(out.ringPixels.line, [255, 255, 255]);
@@ -469,7 +470,7 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
     await wait(600);
     const second = await look(png ? png.replace(/\.png$/, ".scan.png") : null);
     if (second) {
-      out.scanPixels = { post: second.at(cx, cy), floor: second.at(cx - 100, cy + 30), off: second.at(cx + 230, cy), line: second.at(520, 303) };
+      out.scanPixels = { post: second.at(cx, cy), floor: second.at(cx - 100, cy + 30), off: second.at(cx + 230, cy), line: second.at(520, 203) };
       out.postDrawn = near(out.scanPixels.post, [225, 70, 50], 60);
       out.floorDrawn = near(out.scanPixels.floor, [40, 80, 220], 40);
       out.offClear = near(out.scanPixels.off, SCAN_CLEAR, 12);
