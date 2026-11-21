@@ -1343,6 +1343,101 @@ pub fn view_strokes(key: String, strokes: Vec<ViewStrokeJs>) -> Result<bool> {
     Ok(true)
 }
 
+/// The page's linework for the engine's window (1.41): its batches of segments (the strips its own card drew), by the
+/// page's number for each, and its lists of them (which batches, in what colours), by their key. The newest few lists
+/// are kept (the page names one with each view; a turning view's and a resting one's take turns), and the strips of
+/// those; a batch in none of them is let go (asked for again, the page hears it's missing and gives it again).
+static LINE_STRIPS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::Strips>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static LINE_LISTS: LazyLock<Mutex<Vec<Arc<cadp_engine_view::LineList>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+const LINE_LISTS_KEPT: usize = 4;
+
+/// A batch of the page's lines: its segments as strips, nine floats each (its two ends, whether each end is soft, its span).
+#[napi]
+pub fn view_line_strips(id: u32, strips: Float32Array) -> Result<bool> {
+    if strips.len() % cadp_engine_view::STRIP_FLOATS != 0 || strips.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("a batch's strips must be numbers, nine a segment"));
+    }
+    LINE_STRIPS.lock().unwrap().insert(id, Arc::new(cadp_engine_view::Strips { id: id as u64, floats: strips.to_vec() }));
+    Ok(true)
+}
+
+/// One batch of a list: which strips, its colour (red, green, blue 0 to 1 and how solid), and whether its ends are places in the drawing (else in the view's plane).
+#[napi(object)]
+pub struct ViewLineJs {
+    pub id: u32,
+    pub rgba: Vec<f64>,
+    pub world: Option<bool>,
+}
+
+/// Whether a list was taken; the batches it names that the engine hasn't (given again, then the list again).
+#[napi(object)]
+pub struct ViewLinesTakenJs {
+    pub ok: bool,
+    pub missing: Vec<u32>,
+}
+
+/// A list of the page's lines, kept under `key` for the views that name it.
+#[napi]
+pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJs> {
+    let mut strips = LINE_STRIPS.lock().unwrap();
+    let mut list = Vec::with_capacity(items.len());
+    let mut missing = Vec::new();
+    for item in &items {
+        if item.rgba.len() != 4 || item.rgba.iter().any(|v| !v.is_finite()) {
+            return Err(Error::from_reason("a batch's colour is red, green, blue and how solid"));
+        }
+        match strips.get(&item.id) {
+            Some(s) => list.push(cadp_engine_view::LineItem {
+                strips: s.clone(),
+                rgba: [item.rgba[0].clamp(0.0, 1.0) as f32, item.rgba[1].clamp(0.0, 1.0) as f32, item.rgba[2].clamp(0.0, 1.0) as f32, item.rgba[3].clamp(0.0, 1.0) as f32],
+                world: item.world.unwrap_or(false),
+            }),
+            None => missing.push(item.id),
+        }
+    }
+    if !missing.is_empty() {
+        return Ok(ViewLinesTakenJs { ok: false, missing });
+    }
+    let made = Arc::new(cadp_engine_view::LineList { key, items: list });
+    let mut lists = LINE_LISTS.lock().unwrap();
+    lists.retain(|l| l.key != made.key);
+    lists.push(made);
+    if lists.len() > LINE_LISTS_KEPT {
+        lists.remove(0);
+    }
+    // Strips no kept list names: let go.
+    strips.retain(|id, _| lists.iter().any(|l| l.items.iter().any(|i| i.strips.id == *id as u64)));
+    Ok(ViewLinesTakenJs { ok: true, missing })
+}
+
+/// A view's lines this frame (1.41): the key of the list given with view_lines, where the page puts the plane's
+/// batches (its scale, and their origin across and down the view, CSS pixels), where it puts the drawing's own (the
+/// view's right and up, their origin across and down: eight numbers; none: they aren't drawn), half a line's width
+/// (the screen's pixels) and the screen's pixels a CSS pixel.
+#[napi(object)]
+pub struct ViewLinesJs {
+    pub key: String,
+    pub place: Vec<f64>,
+    pub world: Option<Vec<f64>>,
+    pub half: f64,
+    pub ratio: f64,
+}
+
+/// The lines a view names, as the engine draws them; none where it hasn't the list, or the numbers aren't as it reads them.
+fn view_lines_of(ask: &Option<ViewLinesJs>) -> Option<cadp_engine_view::Lines> {
+    let a = ask.as_ref()?;
+    let ok = |v: f64, most: f64| v.is_finite() && v > 0.0 && v <= most;
+    if a.place.len() != 3 || a.place.iter().any(|v| !v.is_finite()) || !ok(a.place[0], f64::MAX) || !ok(a.half, 64.0) || !ok(a.ratio, 16.0) {
+        return None;
+    }
+    let world = match &a.world {
+        Some(w) if w.len() == 8 && w.iter().all(|v| v.is_finite()) => Some(cadp_engine_view::LineWorld { right: [w[0], w[1], w[2]], up: [w[3], w[4], w[5]], e: w[6], f: w[7] }),
+        _ => None,
+    };
+    let list = LINE_LISTS.lock().unwrap().iter().find(|l| l.key == a.key).cloned()?;
+    Some(cadp_engine_view::Lines { list, scale: a.place[0], e: a.place[1], f: a.place[2], world, half: a.half, ratio: a.ratio })
+}
+
 /// The brush's preview in a view (1.39), as the page's own card draws it: its middle in the window and its radius (the
 /// screen's pixels), its colour (0 to 1), whether it's painting, whether painting takes the points out, its cut toward the
 /// eye in the drawing (none: all the way through), and its latest dabs' middles in the window (x, y, …).
@@ -1447,6 +1542,8 @@ pub struct ViewAskJs {
     pub stale: Option<bool>,
     /// That, but only till the new reading's base is in (1.40): for a change the brush's strokes don't stand in for.
     pub stale_base: Option<bool>,
+    /// The view's linework, drawn over its scans (1.41).
+    pub lines: Option<ViewLinesJs>,
 }
 
 #[napi(object)]
@@ -1476,6 +1573,8 @@ pub struct ViewStatsJs {
     pub views: Vec<f64>,
     /// For each of the frame's views (1.39), how many of its scans the last frame drew from an older reading than was asked for (not counted in `scans`).
     pub stale: Vec<u32>,
+    /// For each of the frame's views (1.41), the key of the list of lines the last frame drew over its scans ("": none).
+    pub lines: Vec<String>,
 }
 
 fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
@@ -1784,6 +1883,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         } else {
             cadp_engine_view::Older::No
         },
+        lines: view_lines_of(&ask.lines),
     });
     Ok(shown)
 }
@@ -1811,6 +1911,7 @@ pub fn view_stats() -> ViewStatsJs {
         drawn: s.drawn as f64,
         views: s.views.iter().flatten().map(|v| *v as f64).collect(),
         stale: s.stale,
+        lines: s.lines,
     }
 }
 

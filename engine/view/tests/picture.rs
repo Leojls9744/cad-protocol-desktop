@@ -516,8 +516,8 @@ fn a_frame_draws_two_views_each_in_its_own_part_of_the_window() {
     let right_clouds = [(&step, IDENTITY, &red)];
     let bg = [0.2, 0.4, 0.6, 1.0];
     let views = [
-        ViewDraw { slot: 0, camera: &left, clouds: &left_clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES },
-        ViewDraw { slot: 1, camera: &right, clouds: &right_clouds, edl: &none, shading: &shading, clip: &boxed, clear: [0.0, 0.0, 0.0, 1.0], brush: None, strokes: &NO_STROKES },
+        ViewDraw { slot: 0, camera: &left, clouds: &left_clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES, lines: None },
+        ViewDraw { slot: 1, camera: &right, clouds: &right_clouds, edl: &none, shading: &shading, clip: &boxed, clear: [0.0, 0.0, 0.0, 1.0], brush: None, strokes: &NO_STROKES, lines: None },
     ];
     let p = gpu.picture_views([400, 200], &views, bg).expect("a picture");
     let at = |x: u32, y: u32| pixel(&p, 400, x, y);
@@ -577,7 +577,7 @@ fn the_card_tests_as_many_limit_boxes_as_the_engine_takes() {
 /// One view of a floor with the brush's preview and strokes.
 fn brushed(gpu: &mut Gpu, cam: &Camera, clouds: &[(&cadp_engine_view::Cloud, cadp_engine_view::Affine, &Look)], brush: Option<&Preview>, strokes: &Strokes, size: [u32; 2]) -> Vec<u8> {
     let (edl, shading, clip) = (Edl::default(), Shading::default(), Clip::default());
-    gpu.picture_views(size, &[ViewDraw { slot: 0, camera: cam, clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush, strokes }], CLEAR).expect("a picture")
+    gpu.picture_views(size, &[ViewDraw { slot: 0, camera: cam, clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush, strokes, lines: None }], CLEAR).expect("a picture")
 }
 
 #[test]

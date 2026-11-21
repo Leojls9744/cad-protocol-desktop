@@ -699,6 +699,28 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
         out.spareAtOnce = atOnce(all, 63) && near(c.west, CLASS_FLOOR, 12) && near(c.east, SCAN_CLEAR, 12) && near(c.westAll, CLASS_FLOOR, 12) && near(c.eastAll, CLASS_FLOOR, 12);
       }
     }
+    // 1.41 (stage 2): the page's linework drawn by the engine over the scan, in the same frame. One line across the
+    // floor 60 px below its middle, four of the screen's pixels wide, magenta: a batch's strips (the page's own
+    // packing, nine floats a segment), a list that names it, and a view that names the list and says where the
+    // page puts it (x = e + r·scale, y = f − u·scale, the page's pixels from the view's corner).
+    const gave = await engine.ask({ kind: "view-line-strips", batch: 1, strips: Float32Array.from([cx - 120, -(cy + 60), 0, cx + 120, -(cy + 60), 0, 1, 1, 0]) });
+    const listed = gave.ok ? await engine.ask({ kind: "view-lines", key: "check lines", items: [{ id: 1, rgba: [1, 0, 1, 1] }] }) : gave;
+    out.linesTaken = listed.ok === true;
+    if (listed.ok) {
+      const lined = await showAndLook(64, byClass, { lines: { key: "check lines", place: [1, 0, 0], half: 2 * k, ratio: k } }, png ? png.replace(/\.png$/, ".lines.png") : null);
+      out.lined = lined.stats;
+      if (lined.picture) {
+        out.linePixels = { on: lined.picture.at(cx - 50, cy + 60), beside: lined.picture.at(cx - 50, cy + 80), past: lined.picture.at(cx + 140, cy + 60) };
+        const c = out.linePixels;
+        out.linesDrawn = near(c.on, [255, 0, 255], 12) && near(c.beside, CLASS_FLOOR, 12) && near(c.past, CLASS_FLOOR, 12) && Array.isArray(lined.stats && lined.stats.lines) && lined.stats.lines[0] === "check lines";
+      }
+      // A view that names no lines: none drawn (the page's own again).
+      const unlined = await showAndLook(65, byClass, {}, null);
+      if (unlined.picture) {
+        out.unlinedPixel = unlined.picture.at(cx - 50, cy + 60);
+        out.linesDrawn = out.linesDrawn === true && near(out.unlinedPixel, CLASS_FLOOR, 12) && !(unlined.stats && unlined.stats.lines && unlined.stats.lines[0]);
+      }
+    }
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
     const hidden = await showAndLook(70, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;

@@ -44,9 +44,14 @@
 //! is at once), a spare base with no points isolated is kept while some
 //! are (Unisolate is at once), and an older reading may stand in till the
 //! new one's base is in (`Older::TillBase`).
+//!
+//! 1.41: stage 2, linework drawn natively. `lines`: the page's own batches
+//! of thin solid lines (the strips its card drew) on the engine's card,
+//! drawn over the scans in the same frame, placed as the page places them.
 
 pub mod brush;
 pub mod camera;
+pub mod lines;
 pub mod gpu;
 pub mod scene;
 pub mod shapes;
@@ -57,5 +62,6 @@ pub use brush::{Preview, Stroke, StrokeOp, Strokes, PREVIEW_DABS, STROKES, STROK
 pub use camera::{Affine, Camera, IDENTITY};
 pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST, NO_STROKES};
 pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, Tint, CLIP_BOXES, RAMP, TINT_NONE};
+pub use lines::{covers, LineItem, LineList, LineWorld, Lines, Strips, STRIP_FLOATS};
 pub use shapes::{Op, ShapeIn, Shapes};
 pub use view::{Ask, Older, ScanAsk, Stage, Stats, View};

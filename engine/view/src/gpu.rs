@@ -26,6 +26,7 @@
 
 use crate::brush::{pack, Head, Preview, Strokes, HOVER_TINT, PREVIEW_DABS, STROKES};
 use crate::camera::{columns, Affine, Camera};
+use crate::lines::{LineCard, Lines};
 use crate::scene::{Clip, PointVertex, Points, CLIP_BOXES, RAMP};
 use crate::surface;
 
@@ -99,6 +100,8 @@ pub struct ViewDraw<'a> {
     pub clear: [f64; 4],
     pub brush: Option<&'a Preview>,
     pub strokes: &'a Strokes,
+    /// Its linework, over its scans (1.41); none: the page draws its own.
+    pub lines: Option<&'a Lines>,
 }
 
 /// No strokes.
@@ -785,6 +788,8 @@ pub struct Gpu {
     brush_layout: wgpu::BindGroupLayout,
     /// The brush in each of a frame's views.
     brush: Vec<BrushCard>,
+    /// The linework (1.41).
+    lines: LineCard,
     frame: Option<Frame>,
 }
 
@@ -972,7 +977,13 @@ impl Gpu {
             })
         });
         let brush = (0..VIEWS).map(|_| BrushCard::new(&device, &brush_layout)).collect();
-        Ok(Gpu { device, queue, format, adapter: name, pipeline, layout, shade, shade_layout, shade_uniforms, brush_layout, brush, frame: None })
+        let lines = LineCard::new(&device, format);
+        Ok(Gpu { device, queue, format, adapter: name, pipeline, layout, shade, shade_layout, shade_uniforms, brush_layout, brush, lines, frame: None })
+    }
+
+    /// How many batches of lines are on the card.
+    pub fn line_strips(&self) -> usize {
+        self.lines.held()
     }
 
     /// What sends points to this card, for this thread or another.
@@ -1038,7 +1049,7 @@ impl Gpu {
         clear: [f64; 4],
     ) {
         match camera {
-            Some(camera) => self.draw_views(target, size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES }], clear),
+            Some(camera) => self.draw_views(target, size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES, lines: None }], clear),
             None => self.draw_views(target, size, &[], clear),
         }
     }
@@ -1051,7 +1062,13 @@ impl Gpu {
         for view in &views {
             self.set_brush(size, view);
             self.set_view(size, view);
+            if let Some(lines) = view.lines {
+                self.lines.set(&self.device, &self.queue, view.slot, size, [view.camera.rect[0], view.camera.rect[1]], lines);
+            }
         }
+        // Strips the page no longer keeps: off the card.
+        let drawn: Vec<&Lines> = views.iter().filter_map(|v| v.lines).collect();
+        self.lines.tidy(&drawn);
         let frame = self.frame.as_ref().expect("the frame's picture");
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cadp frame") });
         {
@@ -1104,6 +1121,13 @@ impl Gpu {
                 pass.set_scissor_rect(x, y, w, h);
                 pass.set_bind_group(0, &frame.bind[view.slot], &[]);
                 pass.draw(0..3, 0..1);
+            }
+            // Then each view's linework over its scans (1.41), in the same part of the window.
+            for view in &views {
+                let Some(lines) = view.lines else { continue };
+                let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
+                pass.set_scissor_rect(x, y, w, h);
+                self.lines.draw(&mut pass, view.slot, lines);
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -1284,7 +1308,7 @@ impl Gpu {
         clear: [f64; 4],
     ) -> Result<Vec<u8>, String> {
         match camera {
-            Some(camera) => self.picture_views(size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES }], clear),
+            Some(camera) => self.picture_views(size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES, lines: None }], clear),
             None => self.picture_views(size, &[], clear),
         }
     }

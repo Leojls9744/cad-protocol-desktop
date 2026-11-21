@@ -34,6 +34,7 @@
 use crate::brush::{Preview, Strokes};
 use crate::camera::{Affine, Camera};
 use crate::gpu::{Cloud, Edl, Look, Sender, Shading, VIEWS};
+use crate::lines::Lines;
 use crate::scene::{sample, wanted, Clip, Keep, Sight, Taken};
 use cadp_engine_core::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,6 +102,8 @@ pub struct Ask {
     pub strokes: Arc<Strokes>,
     /// Whether a scan whose reading as asked for isn't in yet is drawn from the reading it had, and till when.
     pub stale: Older,
+    /// The view's linework, drawn over its scans in the same frame (1.41); none: the page draws its own.
+    pub lines: Option<Lines>,
 }
 
 /// How it's going.
@@ -134,6 +137,8 @@ pub struct Stats {
     pub views: Vec<[u64; 3]>,
     /// For each of the frame's views, how many of its scans the last frame drew from an older reading (`Ask::stale`): not counted in `scans`.
     pub stale: Vec<u32>,
+    /// For each of the frame's views, the list of lines the last frame drew over its scans (its key; "": none).
+    pub lines: Vec<String>,
 }
 
 /// What tells one scan's points on the card from another's: the scan, how
@@ -914,6 +919,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         let mut points = 0u64;
         let mut drew = [(0u32, 0u32); VIEWS];
         let mut older = [0u32; VIEWS];
+        let mut lined: [String; VIEWS] = std::array::from_fn(|_| String::new());
         if let (true, Some(ring)) = (ask.test, ring.as_ref()) {
             // Turning about its middle, a turn every 6 s, the ring 60% of the window's shorter side.
             let a = started.elapsed().as_secs_f64() * std::f64::consts::TAU / 6.0;
@@ -942,7 +948,12 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
                     Some([r, g, b]) => [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0],
                     None => clear,
                 };
-                views.push(crate::gpu::ViewDraw { slot, camera, clouds: &lists[slot], edl: &a.edl, shading: &a.shading, clip: &a.clip, clear: own, brush: a.brush.as_ref(), strokes: &a.strokes });
+                // Its linework with its scans (none while the page draws the scans itself: its lines are its own then too).
+                let lines = a.lines.as_ref().filter(|_| !a.hide);
+                if let Some(l) = lines {
+                    lined[slot] = l.list.key.clone();
+                }
+                views.push(crate::gpu::ViewDraw { slot, camera, clouds: &lists[slot], edl: &a.edl, shading: &a.shading, clip: &a.clip, clear: own, brush: a.brush.as_ref(), strokes: &a.strokes, lines });
             }
             gpu.draw_views(&target, size, &views, clear);
         }
@@ -961,6 +972,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         stats.drawn = ask.serial;
         stats.views = (0..VIEWS).map(|slot| [drew[slot].0 as u64, drew[slot].1 as u64, asks[slot].serial]).collect();
         stats.stale = older.to_vec();
+        stats.lines = lined.to_vec();
         stats.size = size;
         let over = second.elapsed().as_secs_f64();
         if over >= 0.5 {

@@ -388,6 +388,50 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     }
   }
 
+  /**
+   * 1.41 (stage 2, linework drawn natively): a batch of the page's lines
+   * for the engine's window, its segments as the strips the page's own
+   * card drew (nine floats each), under the page's number for it.
+   */
+  function viewLineStrips(msg) {
+    if (!canView() || typeof engine.viewLineStrips !== "function") return { error: "This scan engine can't draw linework." };
+    try {
+      if (!(msg.strips instanceof Float32Array) || msg.strips.length % 9 !== 0 || !(Number.isInteger(msg.batch) && msg.batch >= 0))
+        return { error: "The lines weren't as the engine reads them." };
+      engine.viewLineStrips(msg.batch, msg.strips);
+      return { ok: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
+  /**
+   * 1.41: a list of those batches (which, each one's colour, whether its
+   * ends are places in the drawing), kept by the engine under its key;
+   * each view then names the key. `missing`: batches it names that the
+   * engine hasn't (let go since): given again, then the list again.
+   */
+  function viewLines(msg) {
+    if (!canView() || typeof engine.viewLines !== "function") return { error: "This scan engine can't draw linework." };
+    try {
+      const items = [];
+      for (const it of Array.isArray(msg.items) ? msg.items : []) {
+        if (!it || !(Number.isInteger(it.id) && it.id >= 0) || !nums(it.rgba, 4)) return { error: "The lines weren't as the engine reads them." };
+        items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}) });
+      }
+      const took = engine.viewLines(String(msg.key), items);
+      return took && took.ok ? { ok: true } : { missing: took && Array.isArray(took.missing) ? took.missing : [] };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
+  /** A view's lines as the page gave them (1.41), only what the engine reads; nothing where they aren't whole. */
+  const linesOf = (l) =>
+    l && typeof l === "object" && typeof l.key === "string" && l.key && nums(l.place, 3) && l.half > 0 && Number.isFinite(l.half) && l.ratio > 0 && Number.isFinite(l.ratio)
+      ? { key: l.key, place: nums(l.place, 3), ...(nums(l.world, 8) ? { world: nums(l.world, 8) } : {}), half: l.half, ratio: l.ratio }
+      : undefined;
+
   /** The brush's preview as the page gave it (1.39), only what the engine reads; nothing where it isn't whole. */
   const brushOf = (b) =>
     b && typeof b === "object" && Number.isFinite(b.x) && Number.isFinite(b.y) && b.r > 0 && Number.isFinite(b.r)
@@ -469,6 +513,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           ...(a.stale === true ? { stale: true } : {}),
           // 1.40: an older reading drawn only till the new one's first sample is in.
           ...(a.staleBase === true && a.stale !== true ? { staleBase: true } : {}),
+          // 1.41: the view's linework, drawn over its scans in the same frame (the drawing area's alone for now).
+          ...(a.slot !== 1 && linesOf(a.lines) ? { lines: linesOf(a.lines) } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };
@@ -562,6 +608,15 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     }
     if (msg.kind === "view-strokes") {
       port.postMessage({ kind: "view-strokes", id, key: msg.key, ...viewStrokes(msg) });
+      return;
+    }
+    // 1.41: the page's linework for the engine's window: a batch's strips, and a list of batches.
+    if (msg.kind === "view-line-strips") {
+      port.postMessage({ kind: "view-line-strips", id, batch: msg.batch, ...viewLineStrips(msg) });
+      return;
+    }
+    if (msg.kind === "view-lines") {
+      port.postMessage({ kind: "view-lines", id, key: msg.key, ...viewLines(msg) });
       return;
     }
     // 1.29: the rules classifier's middle, on the engine's threads (the

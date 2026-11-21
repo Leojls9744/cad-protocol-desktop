@@ -504,6 +504,16 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
       // No more than the card tests at once.
       return args[1].length <= 8;
     },
+    viewLineStrips: (...args) => {
+      calls.push(["line strips", args]);
+      return true;
+    },
+    viewLines: (...args) => {
+      calls.push(["lines", args]);
+      // A batch it wasn't given: said, the list not taken.
+      const missing = args[1].map((i) => i.id).filter((id) => id > 100);
+      return { ok: missing.length === 0, missing };
+    },
   };
   createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
   const page = port();
@@ -725,10 +735,36 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   page.emit("message", { data: { kind: "view", id: 51, scans: [], ask: { ...boxed, stale: true, staleBase: true } } });
   assert.equal(calls.at(-1)[1].stale, true);
   assert.equal("staleBase" in calls.at(-1)[1], false);
+  // 1.41: a batch of the page's lines (its strips, nine floats a segment), a list of batches, and a view that names the list.
+  const strips = new Float32Array([0, 0, 0, 10, 0, 0, 1, 1, 0]);
+  page.emit("message", { data: { kind: "view-line-strips", id: 60, batch: 7, strips } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-line-strips", id: 60, batch: 7, ok: true });
+  assert.deepEqual(calls.at(-1), ["line strips", [7, strips]]);
+  page.emit("message", { data: { kind: "view-line-strips", id: 61, batch: 8, strips: new Float32Array(8) } });
+  assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view-line-strips", id: 62, batch: -1, strips } });
+  assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view-lines", id: 63, key: "lines 1", items: [{ id: 7, rgba: [1, 0, 0, 1] }, { id: 9, rgba: [0, 1, 0, 0.5], world: true, junk: 1 }] } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-lines", id: 63, key: "lines 1", ok: true });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 1", [{ id: 7, rgba: [1, 0, 0, 1] }, { id: 9, rgba: [0, 1, 0, 0.5], world: true }]]]);
+  // A batch the engine let go: which, and the list isn't taken.
+  page.emit("message", { data: { kind: "view-lines", id: 64, key: "lines 2", items: [{ id: 7, rgba: [1, 0, 0, 1] }, { id: 200, rgba: [1, 0, 0, 1] }] } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-lines", id: 64, key: "lines 2", missing: [200] });
+  page.emit("message", { data: { kind: "view-lines", id: 65, key: "lines 3", items: [{ id: 7, rgba: [1, 0, 0] }] } });
+  assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view", id: 66, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5, junk: 1 } } } });
+  assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5 });
+  // No right and up for the drawing's own: only the plane's are placed. Not whole, or the split view's other side: none.
+  page.emit("message", { data: { kind: "view", id: 67, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 } } } });
+  assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 });
+  page.emit("message", { data: { kind: "view", id: 68, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10], half: 0.625, ratio: 1 } } } });
+  assert.equal("lines" in calls.at(-1)[1], false);
+  page.emit("message", { data: { kind: "view", id: 69, scans: [], ask: { ...boxed, slot: 1, lines: { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 } } } });
+  assert.equal("lines" in calls.at(-1)[1], false);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 10);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 14);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });
@@ -748,4 +784,8 @@ test("1.35: an engine from before can't draw in a window of its own, and says so
   assert.match(page.out.at(-1).error, /can't draw in a window of its own/);
   page.emit("message", { data: { kind: "view-classes", id: 2, token: "t", key: "k" } });
   assert.match(page.out.at(-1).error, /can't draw a scan with the page's own classes/);
+  page.emit("message", { data: { kind: "view-line-strips", id: 3, batch: 1, strips: new Float32Array(9) } });
+  assert.match(page.out.at(-1).error, /can't draw linework/);
+  page.emit("message", { data: { kind: "view-lines", id: 4, key: "k", items: [] } });
+  assert.match(page.out.at(-1).error, /can't draw linework/);
 });
