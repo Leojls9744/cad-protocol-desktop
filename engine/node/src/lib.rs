@@ -1210,6 +1210,24 @@ fn keep_borrow(handle: u32, borrow: Arc<cadp_engine_view::Borrow>) {
     }
 }
 
+/// The page's own colouring of a scan's points (1.39), by the scan's handle: the newest for each of its lists of points.
+static TINTS: LazyLock<Mutex<HashMap<u32, Vec<Arc<cadp_engine_view::Tint>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A scan's colouring kept for its handle, in place of the one its points had before.
+fn keep_tint(handle: u32, tint: Arc<cadp_engine_view::Tint>) {
+    let mut held = TINTS.lock().unwrap();
+    let list = held.entry(handle).or_default();
+    list.retain(|t| t.points.key != tint.points.key);
+    list.push(tint);
+    if list.len() > BORROWS_KEPT {
+        list.remove(0);
+    }
+}
+
+/// The brush's strokes on the card (1.39), by their key: the newest few kept (the page gives them as they change, then names them with each view).
+static STROKES: LazyLock<Mutex<Vec<Arc<cadp_engine_view::Strokes>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+const STROKES_KEPT: usize = 6;
+
 /// The shapes isolating scan points (1.37), by their key: the newest few kept (the page gives them once, then names them with each view).
 static SHAPES: LazyLock<Mutex<Vec<Arc<cadp_engine_view::Shapes>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const SHAPES_KEPT: usize = 8;
@@ -1262,6 +1280,75 @@ pub fn view_shapes(key: String, shapes: Vec<ViewShapeJs>) -> Result<bool> {
     Ok(true)
 }
 
+/// A stroke of the brush for the card (1.39): what it does to the points inside its dabs ("class": gives them `cls`;
+/// "out": hides them; "keep": hides every other), the view it was painted across (its across and up in the drawing), its
+/// dabs across and up it (u, v, radius, …), each one's cut toward the eye where it painted the front surface only, and the
+/// classes it leaves alone.
+#[napi(object)]
+pub struct ViewStrokeJs {
+    pub op: String,
+    pub cls: Option<u32>,
+    pub right: Vec<f64>,
+    pub up: Vec<f64>,
+    pub dabs: Float64Array,
+    pub near: Option<Float64Array>,
+    pub off: Option<Vec<u32>>,
+}
+
+/// The brush's strokes the scans on the card haven't been read with, kept under `key` for the views that name it: the card
+/// tests each point it draws by them. No more than the card tests at once, nor more dabs than a stroke holds: false (the
+/// page draws the scans itself till the engine has read them).
+#[napi]
+pub fn view_strokes(key: String, strokes: Vec<ViewStrokeJs>) -> Result<bool> {
+    if strokes.len() > cadp_engine_view::STROKES {
+        return Ok(false);
+    }
+    let mut list = Vec::with_capacity(strokes.len());
+    for s in strokes {
+        let (Some(right), Some(up)) = (view_three(&Some(s.right)), view_three(&Some(s.up))) else {
+            return Err(Error::from_reason("a stroke needs its view's across and up"));
+        };
+        if s.dabs.len() % 3 != 0 || s.dabs.iter().any(|v| !v.is_finite()) {
+            return Err(Error::from_reason("a stroke's dabs must be numbers, three a dab"));
+        }
+        if s.dabs.len() / 3 > cadp_engine_view::STROKE_DABS {
+            return Ok(false);
+        }
+        let op = match s.op.as_str() {
+            "class" => cadp_engine_view::StrokeOp::Class(s.cls.filter(|c| *c < 256).ok_or_else(|| Error::from_reason("a stroke that gives a class needs the class"))? as u8),
+            "out" => cadp_engine_view::StrokeOp::Out,
+            "keep" => cadp_engine_view::StrokeOp::Keep,
+            _ => return Err(Error::from_reason("a stroke gives a class, hides or keeps")),
+        };
+        // A cut for each dab, or none of them.
+        let near = s.near.map(|n| n.to_vec()).filter(|n| n.len() == s.dabs.len() / 3);
+        list.push(cadp_engine_view::Stroke { op, right, up, dabs: s.dabs.to_vec(), near, off: s.off.unwrap_or_default().into_iter().filter(|c| *c < 256).map(|c| c as u8).collect() });
+    }
+    let made = Arc::new(cadp_engine_view::Strokes::new(key, list));
+    let mut held = STROKES.lock().unwrap();
+    held.retain(|s| s.key != made.key);
+    held.push(made);
+    if held.len() > STROKES_KEPT {
+        held.remove(0);
+    }
+    Ok(true)
+}
+
+/// The brush's preview in a view (1.39), as the page's own card draws it: its middle in the window and its radius (the
+/// screen's pixels), its colour (0 to 1), whether it's painting, whether painting takes the points out, its cut toward the
+/// eye in the drawing (none: all the way through), and its latest dabs' middles in the window (x, y, …).
+#[napi(object)]
+pub struct ViewBrushJs {
+    pub x: f64,
+    pub y: f64,
+    pub r: f64,
+    pub painting: Option<bool>,
+    pub color: Option<Vec<f64>>,
+    pub hide: Option<bool>,
+    pub cut: Option<f64>,
+    pub dabs: Option<Vec<f64>>,
+}
+
 /// How a scan's points look (1.36), as the page has them.
 #[napi(object)]
 pub struct ViewLookJs {
@@ -1303,6 +1390,8 @@ pub struct ViewScanJs {
     pub map: Option<Vec<u32>>,
     /// The page's own classes and removed points for it (view_borrow's key): drawn once they're in.
     pub borrow: Option<String>,
+    /// The page's own colouring of it (1.39; view_tint's key): drawn once it's in, its points in those colours where its look says their own.
+    pub tint: Option<String>,
     pub look: Option<ViewLookJs>,
 }
 
@@ -1341,6 +1430,12 @@ pub struct ViewAskJs {
     pub isolate: Option<String>,
     /// Which of the frame's views this is (1.37): 0 or none the drawing area, 1 the split view's other side.
     pub slot: Option<u32>,
+    /// The brush's preview in this view (1.39).
+    pub brush: Option<ViewBrushJs>,
+    /// The brush's strokes the scans haven't been read with (1.39): the key of those given with view_strokes. Scans are left out till they're in.
+    pub strokes: Option<String>,
+    /// A scan whose reading as asked for isn't whole yet is drawn from the reading it had meanwhile (1.39).
+    pub stale: Option<bool>,
 }
 
 #[napi(object)]
@@ -1368,6 +1463,8 @@ pub struct ViewStatsJs {
     pub drawn: f64,
     /// Those three for each of the frame's views (1.37), three numbers a view: the drawing area's first.
     pub views: Vec<f64>,
+    /// For each of the frame's views (1.39), how many of its scans the last frame drew from an older reading than was asked for (not counted in `scans`).
+    pub stale: Vec<u32>,
 }
 
 fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
@@ -1494,7 +1591,49 @@ pub fn view_borrow(
     }
 }
 
-/// What the engine's window shows from now on. Scans whose handles aren't open, or whose own classes (`borrow`) aren't in yet, are left out.
+/// The page's own colouring of a scan's points (1.39), for a colouring the engine hasn't: each of the page's points'
+/// colour (red, green, blue and a byte to spare), their places as view_borrow takes them (`xyz` needn't come again
+/// while `points_key` is the same: false says it's needed). The scan's points on the card take the colour of the
+/// nearest. Filed on a thread of their own; a view that names `key` draws that scan once they're in.
+#[napi]
+pub fn view_tint(handle: u32, key: String, points_key: String, cell: f64, origin: Vec<f64>, xyz: Option<Float32Array>, rgba: Uint8Array) -> Result<bool> {
+    if origin.len() != 3 || origin.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("the points' origin needs three numbers"));
+    }
+    let rgba = rgba.to_vec();
+    let have = BORROW_POINTS.lock().unwrap().get(&handle).and_then(|list| list.iter().find(|p| p.key == points_key).cloned());
+    match (have, xyz) {
+        (Some(points), _) => {
+            if rgba.len() != points.count() * 4 {
+                return Err(Error::from_reason("the colours aren't as many as the points"));
+            }
+            std::thread::spawn(move || {
+                if let Some(tint) = cadp_engine_view::Tint::new(key, points, rgba) {
+                    keep_tint(handle, Arc::new(tint));
+                }
+            });
+            Ok(true)
+        }
+        (None, None) => Ok(false),
+        (None, Some(xyz)) => {
+            if xyz.len() % 3 != 0 || xyz.len() / 3 * 4 != rgba.len() {
+                return Err(Error::from_reason("the colours aren't as many as the points"));
+            }
+            let xyz = xyz.to_vec();
+            let origin = [origin[0], origin[1], origin[2]];
+            std::thread::spawn(move || {
+                let points = Arc::new(cadp_engine_view::BorrowPoints::new(points_key, cell, origin, xyz));
+                if let Some(tint) = cadp_engine_view::Tint::new(key, points.clone(), rgba) {
+                    keep_borrow_points(handle, points);
+                    keep_tint(handle, Arc::new(tint));
+                }
+            });
+            Ok(true)
+        }
+    }
+}
+
+/// What the engine's window shows from now on. Scans whose handles aren't open, or whose own classes (`borrow`) or colouring (`tint`) aren't in yet, are left out.
 #[napi]
 pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     let held = VIEW.lock().unwrap();
@@ -1511,6 +1650,12 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     };
     let indexes = INDEXES.lock().unwrap();
     let borrows = BORROWS.lock().unwrap();
+    let tints = TINTS.lock().unwrap();
+    // The brush's strokes: those the page gave under this key (none in yet: no scan drawn till they are).
+    let strokes = match &ask.strokes {
+        Some(key) => STROKES.lock().unwrap().iter().find(|s| &s.key == key).cloned(),
+        None => Some(Arc::new(cadp_engine_view::Strokes::default())),
+    };
     // The points isolated: by the shapes the page gave under this key (none in yet: no scan drawn till they are).
     let isolate = match &ask.isolate {
         Some(key) => match SHAPES.lock().unwrap().iter().find(|s| &s.key == key) {
@@ -1522,6 +1667,9 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     let mut scans = Vec::new();
     for s in ask.scans.unwrap_or_default() {
         let Some(isolate) = &isolate else { break };
+        if strokes.is_none() {
+            break;
+        }
         let Some(index) = indexes.get(&s.handle) else { continue };
         if s.affine.len() != 12 || s.affine.iter().any(|x| !x.is_finite()) {
             continue;
@@ -1543,6 +1691,11 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
             // Its own classes aren't in yet (still being filed, or never sent): not drawn till they are.
             let Some(b) = borrows.get(&s.handle).and_then(|list| list.iter().find(|b| &b.key == key)) else { continue };
             keep.borrow = Some(b.clone());
+        }
+        if let Some(key) = &s.tint {
+            // Its colouring isn't in yet: not drawn till it is.
+            let Some(t) = tints.get(&s.handle).and_then(|list| list.iter().find(|t| &t.key == key)) else { continue };
+            keep.tint = Some(t.clone());
         }
         let mut look = view_look(&s.look, &s.allow, ask.px);
         // No look given (1.35's page): a scan with no colours of its own by its own heights, as 1.35 drew it.
@@ -1588,6 +1741,20 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         shading,
         clip: clip.keyed(),
         hold_ms: ask.hold_ms.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0),
+        brush: ask.brush.as_ref().filter(|b| b.x.is_finite() && b.y.is_finite() && b.r.is_finite() && b.r > 0.0).map(|b| {
+            let color = view_three(&b.color).unwrap_or([1.0, 0.0, 0.0]);
+            cadp_engine_view::Preview {
+                at: [b.x, b.y],
+                r: b.r,
+                painting: b.painting.unwrap_or(false),
+                color: [color[0].clamp(0.0, 1.0) as f32, color[1].clamp(0.0, 1.0) as f32, color[2].clamp(0.0, 1.0) as f32],
+                hide: b.hide.unwrap_or(false),
+                cut: b.cut.filter(|c| c.is_finite()),
+                dabs: b.dabs.as_ref().map(|d| d.chunks_exact(2).filter(|p| p[0].is_finite() && p[1].is_finite()).map(|p| [p[0], p[1]]).collect()).unwrap_or_default(),
+            }
+        }),
+        strokes: strokes.unwrap_or_default(),
+        stale: ask.stale.unwrap_or(false),
     });
     Ok(shown)
 }
@@ -1614,6 +1781,7 @@ pub fn view_stats() -> ViewStatsJs {
         detail: s.detail,
         drawn: s.drawn as f64,
         views: s.views.iter().flatten().map(|v| *v as f64).collect(),
+        stale: s.stale,
     }
 }
 

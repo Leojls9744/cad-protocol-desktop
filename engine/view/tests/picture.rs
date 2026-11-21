@@ -2,7 +2,8 @@
 //! where the view puts it, and a scan's sample from its index.
 
 use cadp_engine_core::crop::CropBox;
-use cadp_engine_view::{test_ring, Camera, Clip, Edl, ViewDraw, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
+use cadp_engine_view::brush::pack;
+use cadp_engine_view::{test_ring, Camera, Clip, Edl, Gpu, Look, PointVertex, Points, Preview, Shading, Stroke, StrokeOp, Strokes, ViewDraw, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, CLIP_BOXES, IDENTITY, NO_STROKES};
 
 /// One test draws at a time: the build computer's stand-in for a card (Windows' own, on the processor) has
 /// stopped the whole run when several tests each started and ended a card of their own at once. The app has one.
@@ -515,8 +516,8 @@ fn a_frame_draws_two_views_each_in_its_own_part_of_the_window() {
     let right_clouds = [(&step, IDENTITY, &red)];
     let bg = [0.2, 0.4, 0.6, 1.0];
     let views = [
-        ViewDraw { slot: 0, camera: &left, clouds: &left_clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR },
-        ViewDraw { slot: 1, camera: &right, clouds: &right_clouds, edl: &none, shading: &shading, clip: &boxed, clear: [0.0, 0.0, 0.0, 1.0] },
+        ViewDraw { slot: 0, camera: &left, clouds: &left_clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES },
+        ViewDraw { slot: 1, camera: &right, clouds: &right_clouds, edl: &none, shading: &shading, clip: &boxed, clear: [0.0, 0.0, 0.0, 1.0], brush: None, strokes: &NO_STROKES },
     ];
     let p = gpu.picture_views([400, 200], &views, bg).expect("a picture");
     let at = |x: u32, y: u32| pixel(&p, 400, x, y);
@@ -535,4 +536,204 @@ fn a_frame_draws_two_views_each_in_its_own_part_of_the_window() {
     // One view alone, in the second place: the first's part is the frame's background.
     let p = gpu.picture_views([400, 200], &views[1..], bg).expect("a picture");
     assert!(near(pixel(&p, 400, 60, 100), [51, 102, 153], 1) && near(pixel(&p, 400, 300, 100), [255, 0, 0], 1));
+}
+
+#[test]
+fn the_card_tests_as_many_limit_boxes_as_the_engine_takes() {
+    let Some(mut gpu) = card() else { return };
+    assert_eq!(CLIP_BOXES, 64);
+    let far = [6_000_000.0, 2_000_000.0, 100.0];
+    let mut floor = ground(|_, _| 0.0);
+    floor.centre = far;
+    let cloud = gpu.upload(&floor);
+    let cam = Camera { target: far, ..plan(200.0) };
+    let look = Look { px: 1.0, ..Look::own() };
+    let on = |p: &[u8], x: u32, y: u32| pixel(p, 200, x, y) == [200, 200, 200];
+    // 64 boxes, each a 6 × 6 square, eight rows of eight 16 apart: every one shows its own square, nothing between them.
+    let mut boxes = Vec::new();
+    for k in 0..CLIP_BOXES {
+        let (x, y) = (-60.0 + (k % 8) as f64 * 16.0, -60.0 + (k / 8) as f64 * 16.0);
+        boxes.push(limit([far[0] + x, far[1] + y, -1e6], [far[0] + x + 6.0, far[1] + y + 6.0, 1e6], 0.0, false));
+    }
+    let clip = Clip { boxes: boxes.clone(), slice: None, key: String::new() }.keyed();
+    let p = gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], &Edl::default(), &Shading::default(), &clip, CLEAR).expect("a picture");
+    for k in 0..CLIP_BOXES {
+        // A square's middle on screen: east of the view's middle, and north is up.
+        let (x, y) = (100 + (-60 + (k % 8) as i32 * 16 + 3), 100 - (-60 + (k / 8) as i32 * 16 + 3));
+        assert!(on(&p, x as u32, y as u32), "box {k} shows its square");
+        assert!(!on(&p, x as u32 + 8, y as u32) && !on(&p, x as u32, y as u32 + 8), "nothing between box {k} and the next");
+    }
+    let shown = (0..200).flat_map(|y| (0..200).map(move |x| (x, y))).filter(|(x, y)| on(&p, *x, *y)).count();
+    assert_eq!(shown, 64 * 36);
+    // The last of them one that shows what's outside it, over the first's square: that square's gone, the other 62 stay.
+    let mut holed = boxes.clone();
+    holed[63] = limit([far[0] - 61.0, far[1] - 61.0, -1e6], [far[0] - 53.0, far[1] - 53.0, 1e6], 0.0, true);
+    let clip = Clip { boxes: holed, slice: None, key: String::new() }.keyed();
+    let p = gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], &Edl::default(), &Shading::default(), &clip, CLEAR).expect("a picture");
+    let shown = (0..200).flat_map(|y| (0..200).map(move |x| (x, y))).filter(|(x, y)| on(&p, *x, *y)).count();
+    assert_eq!(shown, 62 * 36);
+}
+
+/// One view of a floor with the brush's preview and strokes.
+fn brushed(gpu: &mut Gpu, cam: &Camera, clouds: &[(&cadp_engine_view::Cloud, cadp_engine_view::Affine, &Look)], brush: Option<&Preview>, strokes: &Strokes, size: [u32; 2]) -> Vec<u8> {
+    let (edl, shading, clip) = (Edl::default(), Shading::default(), Clip::default());
+    gpu.picture_views(size, &[ViewDraw { slot: 0, camera: cam, clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush, strokes }], CLEAR).expect("a picture")
+}
+
+#[test]
+fn the_brush_s_preview_tints_what_it_would_paint_and_shows_its_dabs_painted() {
+    let Some(mut gpu) = card() else { return };
+    // A floor far from 0 with a step (its east half 10 higher), in a drawing area that starts 100 px into a window 300 wide.
+    let far = [6_000_000.0, 2_000_000.0, 100.0];
+    let mut floor = ground(|x, _| if x >= 0.0 { 10.0 } else { 0.0 });
+    floor.centre = far;
+    let cloud = gpu.upload(&floor);
+    let cam = Camera { target: far, rect: [100.0, 0.0, 200.0, 200.0], ..plan(200.0) };
+    let look = Look { px: 1.0, ..Look::own() };
+    let clouds = [(&cloud, IDENTITY, &look)];
+    let grey = [200u8, 200, 200];
+    // The brush's colour mixed into a point's, 45% of the way.
+    let tinted = [((200.0 * 0.55 + 255.0 * 0.45) as f64).round() as u8, (200.0f64 * 0.55).round() as u8, (200.0f64 * 0.55).round() as u8];
+    // Hovering 40 px left of the drawing area's middle (the window's 160, 100), 12 px from its middle out, in red.
+    let hover = Preview { at: [160.0, 100.0], r: 12.0, painting: false, color: [1.0, 0.0, 0.0], hide: false, cut: None, dabs: Vec::new() };
+    let p = brushed(&mut gpu, &cam, &clouds, Some(&hover), &NO_STROKES, [300, 200]);
+    let at = |p: &[u8], x: u32, y: u32| pixel(p, 300, x, y);
+    assert!(near(at(&p, 160, 100), tinted, 1), "{:?} for {tinted:?}", at(&p, 160, 100));
+    assert!(near(at(&p, 167, 107), tinted, 1) && near(at(&p, 150, 100), tinted, 1), "inside its circle");
+    assert_eq!(at(&p, 174, 100), grey, "outside it");
+    assert_eq!(at(&p, 160, 114), grey);
+    // Every pixel tinted is within a pixel of its circle, and it's a disc of about its size.
+    let mut count = 0;
+    for y in 0..200u32 {
+        for x in 100..300u32 {
+            if near(at(&p, x, y), tinted, 1) {
+                let d = ((x as f64 + 0.5 - 160.0).powi(2) + (y as f64 + 0.5 - 100.0).powi(2)).sqrt();
+                assert!(d <= 13.0, "tinted {d} px from the brush's middle");
+                count += 1;
+            }
+        }
+    }
+    assert!((count as f64 - std::f64::consts::PI * 144.0).abs() < 40.0, "{count} pixels tinted");
+    // No brush: as it was.
+    let p = brushed(&mut gpu, &cam, &clouds, None, &NO_STROKES, [300, 200]);
+    assert_eq!(at(&p, 160, 100), grey);
+    // Painting: under it, and under its latest dabs, in its colour; the dabs before its last sixteen aren't shown.
+    let mut dabs: Vec<[f64; 2]> = vec![[120.0, 30.0], [130.0, 30.0]];
+    dabs.extend((0..16).map(|k| [140.0 + k as f64 * 6.0, 160.0]));
+    let paint = Preview { painting: true, dabs: dabs.clone(), ..hover.clone() };
+    let p = brushed(&mut gpu, &cam, &clouds, Some(&paint), &NO_STROKES, [300, 200]);
+    assert_eq!(at(&p, 160, 100), [255, 0, 0], "under the brush");
+    assert_eq!(at(&p, 140, 160), [255, 0, 0], "under its sixteenth dab back");
+    assert_eq!(at(&p, 230, 165), [255, 0, 0], "under its last");
+    assert_eq!(at(&p, 125, 30), grey, "the dabs before those: as the points are");
+    assert_eq!(at(&p, 200, 100), grey);
+    // Painting takes the points out: gone at once.
+    let hide = Preview { hide: true, ..paint.clone() };
+    let p = brushed(&mut gpu, &cam, &clouds, Some(&hide), &NO_STROKES, [300, 200]);
+    assert!(near(at(&p, 160, 100), clear_bytes(), 1) && near(at(&p, 230, 165), clear_bytes(), 1));
+    assert_eq!(at(&p, 200, 100), grey);
+    // Front surface only: over the step's edge with its cut 5 over the low ground (the drawing's z 105), only the high side is the brush's.
+    let front = Preview { at: [200.0, 100.0], cut: Some(far[2] + 5.0), ..hover.clone() };
+    let p = brushed(&mut gpu, &cam, &clouds, Some(&front), &NO_STROKES, [300, 200]);
+    assert!(near(at(&p, 205, 100), tinted, 1), "the high side");
+    assert_eq!(at(&p, 195, 100), grey, "the low side, behind its cut");
+}
+
+#[test]
+fn a_stroke_shows_on_the_card_as_the_page_would_paint_it() {
+    let Some(mut gpu) = card() else { return };
+    // A floor far from 0, coloured by class: class 2 green, class 6 red, class 9 (its layer off) not drawn.
+    let far = [6_000_000.0, 2_000_000.0, 100.0];
+    let mut floor = ground(|x, _| x * 0.1);
+    floor.centre = far;
+    let cloud = gpu.upload(&floor);
+    let cam = Camera { target: far, ..plan(200.0) };
+    let mut look = Look { by: BY_CLASS, px: 1.0, ..Look::own() };
+    look.classes[2] = [0, 200, 0, 255];
+    look.classes[6] = [200, 0, 0, 255];
+    look.classes[9] = [0, 0, 200, 0];
+    let clouds = [(&cloud, IDENTITY, &look)];
+    let (green, red) = ([0u8, 200, 0], [200u8, 0, 0]);
+    let at = |p: &[u8], x: u32, y: u32| pixel(p, 200, x, y);
+    let gone = |p: &[u8], x: u32, y: u32| near(pixel(p, 200, x, y), clear_bytes(), 1);
+    let plan_way = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    let stroke = |op: StrokeOp, dabs: Vec<f64>| Stroke { op, right: plan_way.0, up: plan_way.1, dabs, near: None, off: Vec::new() };
+    // A dab's place across and up the plan view is the drawing's own x and y.
+    let dab = |x: f64, y: f64, r: f64| vec![far[0] + x, far[1] + y, r];
+    let shot = |gpu: &mut Gpu, list: Vec<Stroke>, key: &str| brushed(gpu, &cam, &clouds, None, &Strokes::new(key.into(), list), [200, 200]);
+    // None: all green.
+    let p = shot(&mut gpu, Vec::new(), "");
+    assert_eq!(at(&p, 100, 100), green);
+    // A class painted 30 east of the middle, 10 across its middle out: red inside its circle, green outside.
+    let p = shot(&mut gpu, vec![stroke(StrokeOp::Class(6), dab(30.0, 0.0, 10.0))], "class");
+    assert_eq!(at(&p, 130, 100), red);
+    assert_eq!(at(&p, 137, 93), red);
+    assert_eq!(at(&p, 141, 100), green);
+    assert_eq!(at(&p, 100, 100), green);
+    // Every pixel on the card is as the page's own test of that point says (but within a hair of a dab's edge).
+    let long: Vec<f64> = (0..40).flat_map(|k| dab(-70.0 + k as f64 * 3.5, 30.0 * ((k as f64) * 0.4).sin(), 6.0)).collect();
+    let list = vec![stroke(StrokeOp::Class(6), long.clone())];
+    let packed = pack(&list);
+    let p = shot(&mut gpu, list, "long");
+    let mut reds = 0;
+    for y in 0..200u32 {
+        for x in 0..200u32 {
+            // The point drawn at this pixel: half a unit into it, north up.
+            let (px, py) = (x as f64 - 100.0 + 0.5, 100.0 - y as f64 - 0.5);
+            if px.abs() >= 80.0 || py.abs() >= 80.0 {
+                continue;
+            }
+            let nearest = (0..40).map(|k| ((px + far[0] - long[3 * k]).powi(2) + (py + far[1] - long[3 * k + 1]).powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
+            if (nearest - 6.0).abs() < 0.01 {
+                continue;
+            }
+            let want = if packed.leaves([far[0] + px, far[1] + py, far[2] + px * 0.1], 2) == Some(6) { red } else { green };
+            assert_eq!(at(&p, x, y), want, "at {x}, {y}");
+            reds += (want == red) as u32;
+        }
+    }
+    assert!(reds > 2000, "{reds}");
+    // A class whose layer is off: painted into it, the points are gone.
+    let p = shot(&mut gpu, vec![stroke(StrokeOp::Class(9), dab(30.0, 0.0, 10.0))], "off");
+    assert!(gone(&p, 130, 100));
+    assert_eq!(at(&p, 100, 100), green);
+    // Hidden: gone inside. Kept only: gone outside.
+    let p = shot(&mut gpu, vec![stroke(StrokeOp::Out, dab(30.0, 0.0, 10.0))], "out");
+    assert!(gone(&p, 130, 100) && gone(&p, 124, 106));
+    assert_eq!(at(&p, 141, 100), green);
+    let p = shot(&mut gpu, vec![stroke(StrokeOp::Keep, dab(30.0, 0.0, 10.0))], "keep");
+    assert_eq!(at(&p, 130, 100), green);
+    assert!(gone(&p, 141, 100) && gone(&p, 100, 100) && gone(&p, 30, 170));
+    // A stroke leaves a class alone: nothing of class 2 hidden.
+    let p = shot(&mut gpu, vec![Stroke { off: vec![2], ..stroke(StrokeOp::Out, dab(30.0, 0.0, 10.0)) }], "left");
+    assert_eq!(at(&p, 130, 100), green);
+    // Several at once: a class given, then that class's points hidden where another stroke crosses it, the rest kept.
+    let p = shot(&mut gpu, vec![stroke(StrokeOp::Class(6), dab(0.0, 0.0, 20.0)), Stroke { off: vec![2], ..stroke(StrokeOp::Out, dab(15.0, 0.0, 10.0)) }], "two");
+    assert_eq!(at(&p, 95, 100), red);
+    assert!(gone(&p, 112, 100), "the class's points under the second stroke");
+    assert_eq!(at(&p, 123, 100), green, "the second stroke leaves the ground");
+    // Front surface only: a dab over the middle whose cut is the drawing's z 100 (the floor rises to the east): only its east half.
+    let p = shot(&mut gpu, vec![Stroke { near: Some(vec![far[2]]), ..stroke(StrokeOp::Class(6), dab(0.0, 0.0, 10.0)) }], "front");
+    assert_eq!(at(&p, 105, 100), red);
+    assert_eq!(at(&p, 95, 100), green);
+    // The scan moved in the drawing (a quarter turn about its middle, and 30 north): the stroke is the drawing's, not the scan's.
+    let quarter = [0.0, -1.0, 0.0, far[0] + far[1], 1.0, 0.0, 0.0, far[1] - far[0] + 30.0, 0.0, 0.0, 1.0, 0.0];
+    let moved = [(&cloud, quarter, &look)];
+    let p = brushed(&mut gpu, &cam, &moved, None, &Strokes::new("moved".into(), vec![stroke(StrokeOp::Class(6), dab(30.0, 0.0, 10.0))]), [200, 200]);
+    assert_eq!(at(&p, 130, 100), red);
+    assert_eq!(at(&p, 141, 100), green);
+    assert_eq!(at(&p, 100, 100), green);
+    // From the side (looking north, 40° down): a stroke painted in plan is still a column through the plan.
+    let (s, c) = (40f64.to_radians().sin(), 40f64.to_radians().cos());
+    let side = Camera { target: far, right: [1.0, 0.0, 0.0], up: [0.0, c, s], to_eye: [0.0, -s, c], units_per_pixel: 1.0, rect: [0.0, 0.0, 200.0, 200.0] };
+    let p = brushed(&mut gpu, &side, &clouds, None, &Strokes::new("side".into(), vec![stroke(StrokeOp::Class(6), dab(30.0, 0.0, 10.0))]), [200, 200]);
+    // The point 30 east of the middle is at the screen's 130 across; its height 3 puts it 3 × cos 40° up.
+    assert_eq!(at(&p, 130, 98), red);
+    assert_eq!(at(&p, 100, 100), green);
+    // And one painted across that side view: a circle on that screen, through the view.
+    let across = Stroke { op: StrokeOp::Out, right: side.right, up: side.up, dabs: vec![far[0] + 30.0, far[1] * c + far[2] * s, 10.0], near: None, off: Vec::new() };
+    let p = brushed(&mut gpu, &side, &clouds, None, &Strokes::new("across".into(), vec![across]), [200, 200]);
+    assert!(gone(&p, 130, 100) && gone(&p, 136, 94));
+    assert_eq!(at(&p, 142, 100), green);
+    assert_eq!(at(&p, 130, 112), green);
 }

@@ -337,6 +337,72 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     }
   }
 
+  /**
+   * 1.39: the page's own colouring of a scan's points (each one's red,
+   * green, blue and a byte to spare), for a colouring the engine hasn't:
+   * the scan's points on the card take the colour of the nearest.
+   * `needPoints`: where they are must come too.
+   */
+  function viewColours(msg) {
+    if (!canView() || typeof engine.viewTint !== "function") return { error: "This scan engine can't draw a scan in the page's own colouring." };
+    const held = scans.get(msg.token);
+    if (!held || held.handle == null) return { missing: [msg.token] };
+    try {
+      if (!(msg.rgba instanceof Uint8Array) || !nums(msg.origin, 3) || !(msg.cell > 0)) return { error: "The page's colours weren't as the engine reads them." };
+      const took = engine.viewTint(held.handle, String(msg.key), String(msg.pointsKey), Number(msg.cell), nums(msg.origin, 3), msg.xyz instanceof Float32Array ? msg.xyz : null, msg.rgba);
+      return took ? { ok: true } : { needPoints: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
+  /**
+   * 1.39: the brush's strokes the scans on the card haven't been read with
+   * (a press going on, or one just done), kept by the engine under their
+   * key; each view then names the key, and the card tests each point by
+   * them. `tooMany`: more than the card tests (the page draws meanwhile).
+   */
+  function viewStrokes(msg) {
+    if (!canView() || typeof engine.viewStrokes !== "function") return { error: "This scan engine can't draw the brush's strokes." };
+    try {
+      const f64 = (v) => (v instanceof Float64Array ? v : Array.isArray(v) && v.every((x) => typeof x === "number") ? Float64Array.from(v) : null);
+      const strokes = [];
+      for (const s of Array.isArray(msg.strokes) ? msg.strokes : []) {
+        const dabs = s && f64(s.dabs);
+        const op = s && (s.op === "class" || s.op === "out" || s.op === "keep") ? s.op : null;
+        if (!dabs || !op || !nums(s.right, 3) || !nums(s.up, 3) || (op === "class" && !(Number.isInteger(s.cls) && s.cls >= 0 && s.cls < 256)))
+          return { error: "The brush's strokes weren't as the engine reads them." };
+        strokes.push({
+          op,
+          ...(op === "class" ? { cls: s.cls } : {}),
+          right: nums(s.right, 3),
+          up: nums(s.up, 3),
+          dabs,
+          ...(f64(s.near) && f64(s.near).length ? { near: f64(s.near) } : {}),
+          ...(Array.isArray(s.off) && s.off.length ? { off: s.off.filter((c) => Number.isInteger(c) && c >= 0 && c < 256) } : {}),
+        });
+      }
+      return engine.viewStrokes(String(msg.key), strokes) ? { ok: true } : { tooMany: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
+  /** The brush's preview as the page gave it (1.39), only what the engine reads; nothing where it isn't whole. */
+  const brushOf = (b) =>
+    b && typeof b === "object" && Number.isFinite(b.x) && Number.isFinite(b.y) && b.r > 0 && Number.isFinite(b.r)
+      ? {
+          x: b.x,
+          y: b.y,
+          r: b.r,
+          painting: b.painting === true,
+          ...(nums(b.color, 3) ? { color: nums(b.color, 3) } : {}),
+          hide: b.hide === true,
+          ...(typeof b.cut === "number" && Number.isFinite(b.cut) ? { cut: b.cut } : {}),
+          ...(Array.isArray(b.dabs) && b.dabs.length % 2 === 0 && b.dabs.every((v) => typeof v === "number") ? { dabs: b.dabs.slice(-32) } : {}),
+        }
+      : undefined;
+
   /** What the window's told to show (a "view"), or just how it's going ("view-stats"). */
   function viewAnswer(msg) {
     if (!canView()) return { error: "This scan engine can't draw in a window of its own." };
@@ -361,6 +427,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
             ...(Array.isArray(s.off) && s.off.every(whole) && s.off.length ? { off: s.off } : {}),
             ...(table(s.map) ? { map: table(s.map) } : {}),
             ...(typeof s.borrow === "string" && s.borrow ? { borrow: s.borrow } : {}),
+            // 1.39: the page's own colouring for it (by its key).
+            ...(typeof s.tint === "string" && s.tint ? { tint: s.tint } : {}),
             ...(lookOf(s.look) ? { look: lookOf(s.look) } : {}),
           });
         }
@@ -395,6 +463,10 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           ...(typeof a.isolate === "string" && a.isolate ? { isolate: a.isolate } : {}),
           // 1.37: which of the frame's views this is (the split view's other side: 1).
           ...(a.slot === 1 ? { slot: 1 } : {}),
+          // 1.39: the brush's preview there, the key of its strokes the scans haven't been read with, and a scan's older reading drawn while it's read again.
+          ...(brushOf(a.brush) ? { brush: brushOf(a.brush) } : {}),
+          ...(typeof a.strokes === "string" && a.strokes ? { strokes: a.strokes } : {}),
+          ...(a.stale === true ? { stale: true } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };
@@ -479,6 +551,15 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     }
     if (msg.kind === "view-classes") {
       port.postMessage({ kind: "view-classes", id, key: msg.key, ...viewClasses(msg) });
+      return;
+    }
+    // 1.39: the page's own colouring for a scan, and the brush's strokes for the card.
+    if (msg.kind === "view-colours") {
+      port.postMessage({ kind: "view-colours", id, key: msg.key, ...viewColours(msg) });
+      return;
+    }
+    if (msg.kind === "view-strokes") {
+      port.postMessage({ kind: "view-strokes", id, key: msg.key, ...viewStrokes(msg) });
       return;
     }
     // 1.29: the rules classifier's middle, on the engine's threads (the

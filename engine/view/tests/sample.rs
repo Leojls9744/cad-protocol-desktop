@@ -3,7 +3,7 @@
 
 use cadp_engine_core::{build_or_open, Progress};
 use cadp_engine_core::crop::CropBox;
-use cadp_engine_view::{sample, wanted, Borrow, BorrowPoints, Camera, Clip, Keep, Op, ShapeIn, Shapes, Sight, IDENTITY};
+use cadp_engine_view::{sample, wanted, Borrow, BorrowPoints, Camera, Clip, Keep, Op, ShapeIn, Shapes, Sight, Tint, IDENTITY, TINT_NONE};
 use std::sync::Arc;
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::PathBuf;
@@ -311,5 +311,57 @@ fn isolated_points_are_every_point_of_the_scan_inside_the_shapes() {
     assert_ne!(narrowed.key, isolated.key);
     let (got, _) = sample(&ix, 10_000_000, &narrowed, &IDENTITY, None, None);
     assert_eq!(got.data.len(), (101 - 11) * 50);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_scan_takes_the_pages_own_colouring_each_point_its_nearest_s() {
+    let dir = scratch("tint");
+    let src = dir.join("floor.las");
+    let n = floor(&src, true);
+    let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
+    // The page's own points of it: one in ten each way (a point a unit apart), over its west 30 only; each coloured by where it is.
+    let origin = [6_000_000.0, 2_000_000.0, 100.0];
+    let mut xyz = Vec::new();
+    let mut rgba = Vec::new();
+    for i in 0..30 {
+        for j in 0..30 {
+            xyz.extend_from_slice(&[i as f32 + 0.5, j as f32 + 0.5, (i as f32 + 0.5) * 0.075]);
+            rgba.extend_from_slice(&[i as u8 * 8, j as u8 * 8, 77, 255]);
+        }
+    }
+    // Filed as the page files them: cells twice their spacing.
+    let points = Arc::new(BorrowPoints::new("p".into(), 2.0, origin, xyz));
+    assert!(Tint::new("short".into(), points.clone(), vec![0; 12]).is_none());
+    let tint = Arc::new(Tint::new("height above ground".into(), points, rgba).unwrap());
+    let keep = Keep { tint: Some(tint), ..Keep::all() }.keyed();
+    assert_ne!(keep.key, Keep::all().keyed().key);
+    // Which scan it is doesn't change with its colouring.
+    assert_eq!(keep.who(), Keep::all().who());
+    let (got, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None, None);
+    assert_eq!(got.data.len(), n);
+    assert!(got.colours);
+    let mut far_off = 0;
+    for v in &got.data {
+        // Where it is from the floor's corner.
+        let (x, y) = (v.pos[0] as f64 + 19.95, v.pos[1] as f64 + 14.95);
+        if x < 30.5 {
+            // The page's point in its own small cell (1 across: half the 2 its classes are filed by), so no farther than that off; past the page's last, its last.
+            let (i, j) = (v.rgb[0] as f64 / 8.0 + 0.5, v.rgb[1] as f64 / 8.0 + 0.5);
+            let ok = (i - x.min(29.5)).abs() <= 1.001 && (j - y.min(29.5)).abs() <= 1.001 && v.rgb[2] == 77;
+            assert!(ok, "{:?} at {x}, {y}", v.rgb);
+        } else if x > 36.0 {
+            // None of the page's near: the grey of a point with none.
+            assert_eq!(v.rgb, TINT_NONE);
+            far_off += 1;
+        }
+    }
+    assert!(far_off > 10_000);
+    // A scan with no colours of its own is drawn by the page's all the same.
+    let bare = dir.join("bare.las");
+    floor(&bare, false);
+    let ix = build_or_open(&bare, &dir.join("cache2"), &Progress::default()).unwrap();
+    let (got, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None, None);
+    assert!(got.colours && got.data.iter().any(|v| v.rgb[2] == 77));
     let _ = std::fs::remove_dir_all(&dir);
 }

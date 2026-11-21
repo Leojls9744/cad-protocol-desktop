@@ -170,6 +170,52 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     stage.step_all(std::slice::from_ref(&ask)).expect("a step");
     assert_eq!(stage.held_in(1, &other), (1, 0));
     assert_eq!(stage.held_in(0, &ask), (1, 1));
+    // The scan asked for another way (here with its shading worked out: the brush's presses, its classes or its
+    // isolated points are others), the view where it was. Asked for plainly, the reading it had goes at once and
+    // the new one's base shows as soon as it's read.
+    let again = ScanAsk { keep: Keep { shade: true, ..Keep::all() }.keyed(), ..scan.clone() };
+    let plain = Ask { camera: ask.camera, scans: vec![again.clone()], serial: 20, ..Ask::default() };
+    stage.step(&plain).expect("a step");
+    assert_eq!((stage.held(&plain), stage.stale_in(0, &plain)), ((0, 0), 0));
+    assert!(stage.list(&plain).is_empty());
+    // Back as it was, whole again.
+    settle(&mut stage, &ask);
+    assert_eq!(stage.held(&ask), (1, 1));
+    let was: Vec<u32> = stage.list(&ask).iter().map(|(c, _, _)| c.count).collect();
+    // Asked for with its older reading kept meanwhile (`stale`): that's what's drawn, every point of it, until the new
+    // one is whole (its base and this view's detail), though the view never moves.
+    let kept = Ask { stale: true, serial: 21, ..plain.clone() };
+    stage.step(&kept).expect("a step");
+    assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((0, 0), 1));
+    assert_eq!(stage.list(&kept).iter().map(|(c, _, _)| c.count).collect::<Vec<u32>>(), was);
+    let mut seen_stale = 0;
+    for _ in 0..4000 {
+        stage.step(&kept).expect("a step");
+        let (on, detail) = stage.held(&kept);
+        let stale = stage.stale_in(0, &kept);
+        // Never neither, and never the new one's base alone: the old whole, then the new whole.
+        assert_eq!(on + stale, 1);
+        if on == 1 {
+            assert_eq!(detail, 1, "the new reading shows only once its detail is in");
+            break;
+        }
+        seen_stale += 1;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(seen_stale > 0);
+    assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((1, 1), 0));
+    // The older reading's off the card now: asked for again, it's read again.
+    stage.step(&kept).expect("a step");
+    assert_eq!(stage.held(&ask), (0, 0));
+    // A scan it never had another reading of: nothing to keep, its base as soon as it's read.
+    let fresh = Ask { camera: ask.camera, scans: vec![ScanAsk { handle: 7, ..again.clone() }], stale: true, serial: 22, ..Ask::default() };
+    stage.step(&fresh).expect("a step");
+    assert_eq!((stage.held(&fresh), stage.stale_in(0, &fresh)), ((0, 0), 0));
+    settle(&mut stage, &fresh);
+    assert_eq!((stage.held(&fresh), stage.stale_in(0, &fresh)), ((1, 1), 0));
+    // As it was for what follows.
+    settle(&mut stage, &ask);
+    assert_eq!(stage.held(&ask), (1, 1));
     // Hidden (the page draws them itself): kept on the card, none drawn.
     ask.hide = true;
     assert!(stage.list(&ask).is_empty());

@@ -29,7 +29,16 @@
 //! what kept a scan the page's to draw: `scene::Clip`, the limit boxes and
 //! the slice (a view's detail is read by them, and the card tests each
 //! point by them); `shapes`, the points isolated.
+//!
+//! 1.39: what was left of stage 1 (Leo, 2026-11-20 18:54: "what can we
+//! finish of this"). `brush`: the brush's preview under the cursor, and
+//! its strokes tested on the card until the scan's read with them, so a
+//! press shows as it's painted; `view`: a scan's older reading kept on the
+//! card while it's read again. `scene::Tint`: the page's own colouring for
+//! the ones the engine hasn't (each point its nearest's colour). And 64
+//! limit boxes on the card.
 
+pub mod brush;
 pub mod camera;
 pub mod gpu;
 pub mod scene;
@@ -37,8 +46,9 @@ pub mod shapes;
 pub mod surface;
 pub mod view;
 
+pub use brush::{Preview, Stroke, StrokeOp, Strokes, PREVIEW_DABS, STROKES, STROKE_DABS};
 pub use camera::{Affine, Camera, IDENTITY};
-pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST};
-pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, CLIP_BOXES, RAMP};
+pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST, NO_STROKES};
+pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, Tint, CLIP_BOXES, RAMP, TINT_NONE};
 pub use shapes::{Op, ShapeIn, Shapes};
 pub use view::{Ask, ScanAsk, Stage, Stats, View};

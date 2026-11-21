@@ -15,7 +15,15 @@
 //! read by a loader thread on every core while frames go on, and read
 //! again when the view sees cells it hasn't or wants a good deal more of
 //! them.
+//!
+//! A scan asked for another way (its classes painted, points hidden or
+//! isolated) is read again; where the page asks for it (`Ask::stale`) the
+//! reading it had stays on the card and is drawn until the new one is
+//! whole (its base and the view's detail), with the brush's strokes tested
+//! on the card standing in for what's changed (brush.rs), so a press of the
+//! brush never blanks the scan or thins it.
 
+use crate::brush::{Preview, Strokes};
 use crate::camera::{Affine, Camera};
 use crate::gpu::{Cloud, Edl, Look, Sender, Shading, VIEWS};
 use crate::scene::{sample, wanted, Clip, Keep, Sight, Taken};
@@ -61,6 +69,12 @@ pub struct Ask {
     /// (its linework, over the scans) reaches the screen a refresh or so
     /// after the page paints it, and the two are to land together.
     pub hold_ms: f64,
+    /// The brush's preview in this view (none: no brush there).
+    pub brush: Option<Preview>,
+    /// The brush's strokes the scans as asked for haven't been read with: tested on the card.
+    pub strokes: Arc<Strokes>,
+    /// A scan whose reading as asked for isn't whole yet is drawn from the reading it had (the strokes standing in for what's changed), not left out or thin.
+    pub stale: bool,
 }
 
 /// How it's going.
@@ -92,6 +106,8 @@ pub struct Stats {
     pub drawn: u64,
     /// Those three for each of the frame's views (the first: the drawing area's, as above).
     pub views: Vec<[u64; 3]>,
+    /// For each of the frame's views, how many of its scans the last frame drew from an older reading (`Ask::stale`): not counted in `scans`.
+    pub stale: Vec<u32>,
 }
 
 /// What tells one scan's points on the card from another's: the scan, how
@@ -103,6 +119,13 @@ type ScanKey = (u32, usize, String);
 
 fn key_of(s: &ScanAsk) -> ScanKey {
     scan_key(s.handle, s.most, &s.keep, &s.affine)
+}
+
+/// Which scan a reading is of, whatever way it was read (its file and its setups).
+type Who = (u32, String);
+
+fn who_of(s: &ScanAsk) -> Who {
+    (s.handle, s.keep.who())
 }
 
 fn scan_key(handle: u32, most: usize, keep: &Keep, a: &Affine) -> ScanKey {
@@ -126,6 +149,7 @@ fn base_most(most: usize) -> usize {
 
 struct Job {
     key: ScanKey,
+    who: Who,
     index: Arc<Index>,
     affine: Affine,
     keep: Keep,
@@ -139,6 +163,7 @@ struct Job {
 
 struct Done {
     key: ScanKey,
+    who: Who,
     /// The view its detail is for; none: its base.
     detail: Option<usize>,
     cloud: Cloud,
@@ -241,7 +266,7 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
         let cloud = sender.upload(&points);
         let shade_ms = points.shade_ms;
         drop(points);
-        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some().then_some(job.slot), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0, shade_ms });
+        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, who: job.who, detail: job.camera.is_some().then_some(job.slot), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0, shade_ms });
         shared.busy.store(false, Ordering::SeqCst);
     }
 }
@@ -249,8 +274,25 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
 /// A scan's points on the card: its base, and the detail for each view that shows it.
 struct Held {
     key: ScanKey,
+    who: Who,
     base: Option<Cloud>,
     detail: [Option<(Cloud, Taken)>; VIEWS],
+    /// For each view: its detail has come, or was looked for and isn't needed (the base holds it all). With its base, the reading is whole there.
+    ready: [bool; VIEWS],
+    /// Counted up as readings become whole: the newest whole one of a scan is the one kept while it's read again.
+    seq: u64,
+}
+
+impl Held {
+    /// Whole for a view: its base, and that view's detail (or none needed).
+    fn whole_in(&self, slot: usize) -> bool {
+        self.base.is_some() && self.ready.get(slot).copied().unwrap_or(false)
+    }
+
+    /// Whole for some view.
+    fn whole(&self) -> bool {
+        self.base.is_some() && self.ready.iter().any(|r| *r)
+    }
 }
 
 /// When a view last changed and was last looked at for detail.
@@ -273,13 +315,15 @@ pub struct Stage {
     /// The last sample's reading and sending, ms, and its shading's share of that.
     pub load_ms: f64,
     pub shade_ms: f64,
+    /// The next whole reading's count.
+    seq: u64,
 }
 
 impl Stage {
     pub fn new(sender: Sender) -> Result<Stage, String> {
         let now = Instant::now();
         let watch = Watch { looked: None, seen: None, changed_at: now, looked_at: now };
-        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), watch: vec![watch; VIEWS], load_ms: 0.0, shade_ms: 0.0 })
+        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), watch: vec![watch; VIEWS], load_ms: 0.0, shade_ms: 0.0, seq: 0 })
     }
 
     /// Whether a sample is being read now.
@@ -304,18 +348,6 @@ impl Stage {
         let asks = &asks[..asks.len().min(VIEWS)];
         let asked = |key: &ScanKey| asks.iter().any(|a| a.scans.iter().any(|s| key_of(s) == *key));
         let mut changed = false;
-        // No longer asked for by any view: off the card. By one of them no longer: its detail off.
-        let before = self.held.len();
-        self.held.retain(|h| asked(&h.key));
-        changed |= self.held.len() != before;
-        for h in &mut self.held {
-            for (slot, detail) in h.detail.iter_mut().enumerate() {
-                if detail.is_some() && !asks.get(slot).is_some_and(|a| a.scans.iter().any(|s| key_of(s) == h.key)) {
-                    *detail = None;
-                    changed = true;
-                }
-            }
-        }
         for done in std::mem::take(&mut *self.loader.shared.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // Asked for no longer (the scans changed while it was read): dropped.
             if !asked(&done.key) {
@@ -326,16 +358,60 @@ impl Stage {
             let at = match self.held.iter().position(|h| h.key == done.key) {
                 Some(k) => k,
                 None => {
-                    self.held.push(Held { key: done.key.clone(), base: None, detail: std::array::from_fn(|_| None) });
+                    self.held.push(Held { key: done.key.clone(), who: done.who.clone(), base: None, detail: std::array::from_fn(|_| None), ready: [false; VIEWS], seq: 0 });
                     self.held.len() - 1
                 }
             };
             match done.detail {
-                Some(slot) if slot < VIEWS => self.held[at].detail[slot] = Some((done.cloud, done.taken)),
+                Some(slot) if slot < VIEWS => {
+                    self.held[at].detail[slot] = Some((done.cloud, done.taken));
+                    self.held[at].ready[slot] = true;
+                }
                 Some(_) => {}
-                None => self.held[at].base = Some(done.cloud),
+                None => {
+                    self.held[at].base = Some(done.cloud);
+                    // Its detail is looked for now, though no view has moved (it was last looked for with another reading of the scan).
+                    for w in &mut self.watch {
+                        w.looked = None;
+                    }
+                }
+            }
+            if self.held[at].seq == 0 && self.held[at].whole() {
+                self.seq += 1;
+                self.held[at].seq = self.seq;
             }
             changed = true;
+        }
+        // No longer asked for by any view: off the card; but where a view asks for it (`stale`), the newest whole
+        // reading of a scan stays till the one asked for is whole in that view. By one view no longer: its detail off.
+        let mut stale: Vec<ScanKey> = Vec::new();
+        for (slot, ask) in asks.iter().enumerate().filter(|(_, a)| a.stale) {
+            for s in &ask.scans {
+                let key = key_of(s);
+                if self.held.iter().any(|h| h.key == key && h.whole_in(slot)) {
+                    continue;
+                }
+                let who = who_of(s);
+                if let Some(h) = self.held.iter().filter(|h| h.who == who && h.whole() && !asked(&h.key)).max_by_key(|h| h.seq) {
+                    if !stale.contains(&h.key) {
+                        stale.push(h.key.clone());
+                    }
+                }
+            }
+        }
+        let before = self.held.len();
+        self.held.retain(|h| asked(&h.key) || stale.contains(&h.key));
+        changed |= self.held.len() != before;
+        for h in &mut self.held {
+            if stale.contains(&h.key) {
+                continue;
+            }
+            for (slot, detail) in h.detail.iter_mut().enumerate() {
+                if detail.is_some() && !asks.get(slot).is_some_and(|a| a.scans.iter().any(|s| key_of(s) == h.key)) {
+                    *detail = None;
+                    changed = true;
+                }
+            }
         }
         // When each view last changed (its detail waits for it to rest, or is looked for now and then while it moves).
         for (slot, ask) in asks.iter().enumerate() {
@@ -353,7 +429,7 @@ impl Stage {
             for s in &ask.scans {
                 let key = key_of(s);
                 if !self.held.iter().any(|h| h.key == key && h.base.is_some()) {
-                    self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, slot: 0, clip: Clip::default() });
+                    self.loader.give(Job { key, who: who_of(s), index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, slot: 0, clip: Clip::default() });
                     return Ok(changed);
                 }
             }
@@ -373,16 +449,22 @@ impl Stage {
             watch.looked_at = Instant::now();
             for s in &ask.scans {
                 let key = key_of(s);
-                let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
+                let Some(at) = self.held.iter().position(|h| h.key == key) else { continue };
                 let want = wanted(&s.index, s.most, Some(&Sight::new(&cam, &s.affine)), Some((&ask.clip, &s.affine)));
-                if want.of == 0 {
+                // None of it in view, or its detail for the view is on the card already: whole there as it is.
+                if want.of == 0 || self.held[at].detail[slot].as_ref().is_some_and(|(_, t)| t.covers(&want)) {
+                    let h = &mut self.held[at];
+                    if !h.ready[slot] {
+                        h.ready[slot] = true;
+                        if h.seq == 0 && h.whole() {
+                            self.seq += 1;
+                            h.seq = self.seq;
+                        }
+                        changed = true;
+                    }
                     continue;
                 }
-                // The base holds it already (a small scan, or all of it in view at no more than the base's share).
-                if h.detail[slot].as_ref().is_some_and(|(_, t)| t.covers(&want)) {
-                    continue;
-                }
-                self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam), slot, clip: ask.clip.clone() });
+                self.loader.give(Job { key, who: who_of(s), index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam), slot, clip: ask.clip.clone() });
                 // Looked at again once this one's in (another scan may want its own).
                 self.watch[slot].looked = None;
                 return Ok(changed);
@@ -408,8 +490,7 @@ impl Stage {
             return out;
         }
         for s in &ask.scans {
-            let key = key_of(s);
-            let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
+            let Some((h, _)) = self.pick(slot, ask, s) else { continue };
             if let Some(base) = &h.base {
                 if let Some((detail, _)) = h.detail.get(slot).and_then(Option::as_ref) {
                     out.push((detail, s.affine, &s.look));
@@ -418,6 +499,21 @@ impl Stage {
             }
         }
         out
+    }
+
+    /// The reading of a scan a view draws, and whether it's an older one
+    /// than was asked for: the one asked for once its base is on the card;
+    /// but where the view asks for it (`Ask::stale`), the newest whole
+    /// reading the scan had until the one asked for is whole there too.
+    fn pick(&self, slot: usize, ask: &Ask, s: &ScanAsk) -> Option<(&Held, bool)> {
+        let key = key_of(s);
+        let fresh = self.held.iter().find(|h| h.key == key && h.base.is_some());
+        if !ask.stale || fresh.is_some_and(|h| h.whole_in(slot)) {
+            return fresh.map(|h| (h, false));
+        }
+        let who = who_of(s);
+        let asked = |key: &ScanKey| ask.scans.iter().any(|s| key_of(s) == *key);
+        self.held.iter().filter(|h| h.who == who && h.whole() && !asked(&h.key)).max_by_key(|h| h.seq).map(|h| (h, true)).or(fresh.map(|h| (h, false)))
     }
 
     /// The drawing area's: `held_in` for the first view.
@@ -430,8 +526,7 @@ impl Stage {
         let mut on = 0;
         let mut detail = 0;
         for s in &ask.scans {
-            let key = key_of(s);
-            if let Some(h) = self.held.iter().find(|h| h.key == key && h.base.is_some()) {
+            if let Some((h, false)) = self.pick(slot, ask, s) {
                 on += 1;
                 if h.detail.get(slot).is_some_and(Option::is_some) {
                     detail += 1;
@@ -439,6 +534,11 @@ impl Stage {
             }
         }
         (on, detail)
+    }
+
+    /// How many of a view's asked scans are drawn from an older reading than was asked for (`Ask::stale`).
+    pub fn stale_in(&self, slot: usize, ask: &Ask) -> u32 {
+        ask.scans.iter().filter(|s| matches!(self.pick(slot, ask, s), Some((_, true)))).count() as u32
     }
 }
 
@@ -718,6 +818,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         };
         let mut points = 0u64;
         let mut drew = [(0u32, 0u32); VIEWS];
+        let mut older = [0u32; VIEWS];
         if let (true, Some(ring)) = (ask.test, ring.as_ref()) {
             // Turning about its middle, a turn every 6 s, the ring 60% of the window's shorter side.
             let a = started.elapsed().as_secs_f64() * std::f64::consts::TAU / 6.0;
@@ -740,12 +841,13 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
                 points += lists[slot].iter().map(|(c, _, _)| c.count as u64).sum::<u64>();
                 if !a.hide {
                     drew[slot] = stage.held_in(slot, a);
+                    older[slot] = stage.stale_in(slot, a);
                 }
                 let own = match a.clear {
                     Some([r, g, b]) => [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0],
                     None => clear,
                 };
-                views.push(crate::gpu::ViewDraw { slot, camera, clouds: &lists[slot], edl: &a.edl, shading: &a.shading, clip: &a.clip, clear: own });
+                views.push(crate::gpu::ViewDraw { slot, camera, clouds: &lists[slot], edl: &a.edl, shading: &a.shading, clip: &a.clip, clear: own, brush: a.brush.as_ref(), strokes: &a.strokes });
             }
             gpu.draw_views(&target, size, &views, clear);
         }
@@ -763,6 +865,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         stats.detail = drew[0].1;
         stats.drawn = ask.serial;
         stats.views = (0..VIEWS).map(|slot| [drew[slot].0 as u64, drew[slot].1 as u64, asks[slot].serial]).collect();
+        stats.stale = older.to_vec();
         stats.size = size;
         let over = second.elapsed().as_secs_f64();
         if over >= 0.5 {

@@ -1,6 +1,6 @@
 [package]
 name = "cadp-engine-view"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "CAD Protocol's scan engine drawing its scans itself, on the graphics card, in a window of its own under the app's page (desktop 1.35, the layer trial)."
@@ -10,7 +10,7 @@ cadp-engine-core = { path = "../core" }
 wgpu = { version = "24", default-features = false, features = ["dx12", "wgsl"] }
 pollster = "0.4"
 rayon = "1"
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { version = "1", features = ["derive", "min_const_generics"] }
 raw-window-handle = "0.6"
 
 [target.'cfg(windows)'.dependencies]

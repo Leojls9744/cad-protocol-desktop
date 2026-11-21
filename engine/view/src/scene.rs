@@ -139,6 +139,40 @@ impl BorrowPoints {
         }
         best
     }
+
+    /// As `nearest`, and where none's in the 27 cells, the nearest of those a cell further out (a colour is taken from a little further than a class is: a point left grey shows).
+    pub fn nearest_wide(&self, p: [f64; 3]) -> Option<u32> {
+        if let Some(i) = self.nearest(p) {
+            return Some(i);
+        }
+        let at = [p[0] - self.origin[0], p[1] - self.origin[1], p[2] - self.origin[2]];
+        let (ix, iy, iz) = cell_at(at, self.cell)?;
+        let mut best = None;
+        let mut best_d = f64::INFINITY;
+        for dz in -2i64..=2 {
+            for dy in -2i64..=2 {
+                for dx in -2i64..=2 {
+                    // The shell alone: the cells inside it were looked in.
+                    if dx.abs() < 2 && dy.abs() < 2 && dz.abs() < 2 {
+                        continue;
+                    }
+                    let (x, y, z) = (ix + dx, iy + dy, iz + dz);
+                    if x < 0 || y < 0 || z < 0 || x >= 2 * HALF || y >= 2 * HALF || z >= 2 * HALF {
+                        continue;
+                    }
+                    if let Some(i) = self.grid.get(&pack(x, y, z)) {
+                        let k = *i as usize * 3;
+                        let d = (self.xyz[k] as f64 - at[0]).powi(2) + (self.xyz[k + 1] as f64 - at[1]).powi(2) + (self.xyz[k + 2] as f64 - at[2]).powi(2);
+                        if d < best_d {
+                            best_d = d;
+                            best = Some(*i);
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
 }
 
 fn cell_at(at: [f64; 3], cell: f64) -> Option<(i64, i64, i64)> {
@@ -180,20 +214,106 @@ impl Borrow {
     }
 }
 
+/// The page's own colouring of its points, for a colouring the engine
+/// hasn't (height above ground, density, how far scans disagree, classes
+/// against the file's, how sure each class is; setups each in a colour of
+/// their own): the colour a point of the scan's file takes is its nearest's
+/// (red, green, blue and a byte to spare for each of the page's points).
+///
+/// The page's points are filed again here by cells half the size the
+/// classes' are (about a point a cell): a class is the same for yards, but
+/// a colouring's edges (where scans disagree, where a class differs from
+/// the file's) are a point wide.
+pub struct Tint {
+    pub key: String,
+    pub points: Arc<BorrowPoints>,
+    cell: f64,
+    grid: CellMap,
+    rgba: Vec<u8>,
+}
+
+/// A point with none of the page's near it.
+pub const TINT_NONE: [u8; 3] = [150, 150, 150];
+
+impl Tint {
+    /// None when the colours aren't the points' length.
+    pub fn new(key: String, points: Arc<BorrowPoints>, rgba: Vec<u8>) -> Option<Tint> {
+        if rgba.len() != points.count() * 4 {
+            return None;
+        }
+        let cell = points.cell / 2.0;
+        let n = points.count();
+        let mut grid = CellMap::with_capacity_and_hasher(n + 16, Default::default());
+        for i in 0..n {
+            let at = [points.xyz[i * 3] as f64, points.xyz[i * 3 + 1] as f64, points.xyz[i * 3 + 2] as f64];
+            if let Some(k) = cell_of(at, cell) {
+                grid.insert(k, i as u32);
+            }
+        }
+        Some(Tint { key, points, cell, grid, rgba })
+    }
+
+    /// The page's point whose colour a place in the drawing takes: its own small cell's, else the nearest of those in the cells round it, else (none that near) as a class is found, from further off.
+    fn nearest(&self, p: [f64; 3]) -> Option<u32> {
+        let o = self.points.origin;
+        let at = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+        let (ix, iy, iz) = cell_at(at, self.cell)?;
+        if let Some(i) = self.grid.get(&pack(ix, iy, iz)) {
+            return Some(*i);
+        }
+        let xyz = &self.points.xyz;
+        let mut best = None;
+        let mut best_d = f64::INFINITY;
+        for dz in -1..=1 {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let (x, y, z) = (ix + dx, iy + dy, iz + dz);
+                    if x < 0 || y < 0 || z < 0 || x >= 2 * HALF || y >= 2 * HALF || z >= 2 * HALF {
+                        continue;
+                    }
+                    if let Some(i) = self.grid.get(&pack(x, y, z)) {
+                        let k = *i as usize * 3;
+                        let d = (xyz[k] as f64 - at[0]).powi(2) + (xyz[k + 1] as f64 - at[1]).powi(2) + (xyz[k + 2] as f64 - at[2]).powi(2);
+                        if d < best_d {
+                            best_d = d;
+                            best = Some(*i);
+                        }
+                    }
+                }
+            }
+        }
+        best.or_else(|| self.points.nearest_wide(p))
+    }
+
+    /// The colour a place in the drawing takes.
+    #[inline]
+    pub fn at(&self, p: [f64; 3]) -> [u8; 3] {
+        match self.nearest(p) {
+            Some(i) => {
+                let k = i as usize * 4;
+                [self.rgba[k], self.rgba[k + 1], self.rgba[k + 2]]
+            }
+            None => TINT_NONE,
+        }
+    }
+}
+
 /// Which of a scan's points are drawn, and with what class: an E57's one
 /// setup alone, or all but those turned off; the file's class codes read
 /// as the scan's class map has them; and, for a scan the page has
 /// classified or edited, the page's own classes and removals (`borrow`).
 /// Withheld points never are. `isolate`: only the points the shapes
 /// isolated keep (shapes.rs), by where they are in the drawing and their
-/// class. `shade`: their shading from the shape of their surface is worked
-/// out with them (surface.rs). `key` tells one from another.
+/// class. `tint`: their colours are the page's own colouring's (each its
+/// nearest's). `shade`: their shading from the shape of their surface is
+/// worked out with them (surface.rs). `key` tells one from another.
 #[derive(Clone, Default)]
 pub struct Keep {
     pub setup: Option<u16>,
     pub off: Vec<u16>,
     pub map: Option<Arc<[u8; 256]>>,
     pub borrow: Option<Arc<Borrow>>,
+    pub tint: Option<Arc<Tint>>,
     pub isolate: Option<Arc<Shapes>>,
     pub shade: bool,
     /// Each point's spacing is measured with them (the page's Fill gaps).
@@ -220,7 +340,17 @@ impl Keep {
             if self.gaps { "gaps" } else { "" },
             self.isolate.as_ref().map(|s| s.key.as_str()).unwrap_or("")
         );
+        // Told only where there's one, so a scan without is keyed as it was.
+        if let Some(t) = &self.tint {
+            self.key.push_str("|tint ");
+            self.key.push_str(&t.key);
+        }
         self
+    }
+
+    /// Which scan this is whatever its classes, colours, shading or isolated points are: its setups. A reading of it under another key is the same scan read another way.
+    pub fn who(&self) -> String {
+        format!("{:?}|{:?}", self.setup, self.off)
     }
 
     #[inline]
@@ -244,8 +374,8 @@ pub struct Clip {
     pub key: String,
 }
 
-/// The most limit boxes the card tests (the page's CARD_BOXES).
-pub const CLIP_BOXES: usize = 8;
+/// The most limit boxes the card tests (the page's own card tests 8, its CARD_BOXES; a drawing with more than this many on is the page's to draw).
+pub const CLIP_BOXES: usize = 64;
 
 impl Clip {
     /// Nothing clipped.
@@ -521,7 +651,11 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
                     }
                     out.push(PointVertex {
                         pos: [(at[0] - centre[0]) as f32, (at[1] - centre[1]) as f32, (at[2] - centre[2]) as f32],
-                        rgb: if ix.has_rgb { [byte(p.rgb[0]), byte(p.rgb[1]), byte(p.rgb[2])] } else { [0, 0, 0] },
+                        rgb: match &keep.tint {
+                            Some(t) => t.at(drawn(at)),
+                            None if ix.has_rgb => [byte(p.rgb[0]), byte(p.rgb[1]), byte(p.rgb[2])],
+                            None => [0, 0, 0],
+                        },
                         class,
                         intensity: p.intensity,
                         setup: p.setup,
@@ -552,7 +686,7 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
         gap = surface::gap_points(&mut data, turn.as_ref()) * if turn.is_none() { affine[0].abs() } else { 1.0 };
         shade_ms += t.elapsed().as_secs_f64() * 1000.0;
     }
-    (Points { centre, radius, colours: ix.has_rgb, shaded: keep.shade, shade_ms, gap, data }, taken)
+    (Points { centre, radius, colours: ix.has_rgb || keep.tint.is_some(), shaded: keep.shade, shade_ms, gap, data }, taken)
 }
 
 /// The check's own picture: a ring of `n` points 100 across, coloured round

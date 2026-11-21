@@ -579,8 +579,94 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       out.splitDrawn = near(c.leftPost, [175, 175, 175], 12) && near(c.leftFloor, CLASS_FLOOR, 12) && near(c.between, SCAN_CLEAR, 12) && near(c.rightPost, RAMP_HIGH, 30) && near(c.rightFloor, RAMP_LOW, 30);
     }
     await engine.ask({ kind: "view", scans: [], ask: { slot: 1 } });
+    // 1.39. The brush's preview: hovering over the floor (20 px from its middle out, in red) tints the points under it;
+    // painting with Hide takes them out at once. The floor away from it as it was.
+    const tinted = CLASS_FLOOR.map((v, i) => Math.round(v * 0.55 + [255, 0, 0][i] * 0.45));
+    const brushAt = { x: (cx - 100) * k, y: (cy + 30) * k, r: 20 * k, color: [1, 0, 0] };
+    const hovering = await showAndLook(21, byClass, { brush: brushAt }, png ? png.replace(/\.png$/, ".brush.png") : null);
+    const hiding = await showAndLook(22, byClass, { brush: { ...brushAt, painting: true, hide: true } }, null);
+    if (hovering.picture && hiding.picture) {
+      out.brushPixels = {
+        under: hovering.picture.at(cx - 100, cy + 30),
+        want: tinted,
+        away: hovering.picture.at(cx - 40, cy + 30),
+        hidden: hiding.picture.at(cx - 100, cy + 30),
+        kept: hiding.picture.at(cx - 40, cy + 30),
+      };
+      const c = out.brushPixels;
+      out.brushDrawn = near(c.under, tinted, 12) && near(c.away, CLASS_FLOOR, 12) && near(c.hidden, SCAN_CLEAR, 12) && near(c.kept, CLASS_FLOOR, 12);
+    }
+    // Its strokes on the card: a press's dabs over that same floor (0.6 units from each one's middle out: 20 px), across the
+    // plan view. Giving the post's class: that floor in the post's colour. Hiding: gone. Keeping only: the rest gone.
+    const way = { right: [1, 0, 0], up: [0, 1, 0] };
+    const dabs = new Float64Array([6000005 - 100 * 0.03, 2000005 - 30 * 0.03, 0.6]);
+    const strokeShot = async (serial, key, stroke) => {
+      const took = await engine.ask({ kind: "view-strokes", key, strokes: [{ ...way, dabs, ...stroke }] });
+      if (took.error || !took.ok) throw new Error(took.error || "the strokes weren't taken");
+      return showAndLook(serial, byClass, { strokes: key }, null);
+    };
+    const classed = await strokeShot(23, "check class", { op: "class", cls: 5 });
+    const struck = await strokeShot(24, "check out", { op: "out" });
+    const keptOnly = await strokeShot(25, "check keep", { op: "keep" });
+    out.stroked = keptOnly.stats;
+    if (classed.picture && struck.picture && keptOnly.picture) {
+      const here = (p) => p.at(cx - 100, cy + 30);
+      const there = (p) => p.at(cx - 40, cy + 30);
+      out.strokePixels = { classed: here(classed.picture), classedAway: there(classed.picture), out: here(struck.picture), outAway: there(struck.picture), keep: here(keptOnly.picture), keepAway: there(keptOnly.picture) };
+      const c = out.strokePixels;
+      out.strokeDrawn =
+        near(c.classed, [175, 175, 175], 12) && near(c.classedAway, CLASS_FLOOR, 12) && near(c.out, SCAN_CLEAR, 12) && near(c.outAway, CLASS_FLOOR, 12) && near(c.keep, CLASS_FLOOR, 12) && near(c.keepAway, SCAN_CLEAR, 12);
+    }
+    // The page's own colouring for the scan (one the engine hasn't): the page's points of it (one every unit over the
+    // floor, each magenta) given with their places; the scan in its own colours is then theirs. Filed on a thread of
+    // the engine's own: asked for till it's in.
+    const mine = [];
+    for (let i = 0; i <= 10; i += 1) for (let j = 0; j <= 10; j += 1) mine.push(i, j, 0);
+    const took = await engine.ask({
+      kind: "view-colours",
+      token: engine.token,
+      key: "check colours",
+      pointsKey: "check points",
+      cell: 2,
+      origin: [6000000, 2000000, 100],
+      xyz: Float32Array.from(mine),
+      rgba: Uint8Array.from(mine.filter((_, n) => n % 3 === 0).flatMap(() => [255, 0, 255, 255])),
+    });
+    out.coloursTaken = took.ok === true;
+    if (took.ok) {
+      const inColours = { tint: "check colours", look: { by: 0, px: 5 * k } };
+      for (let i = 0; i < 40; i += 1) {
+        const said = await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, ...inColours }], ask: { ...view, serial: 26 } });
+        if (said.error || said.shown >= 1) break;
+        await wait(100);
+      }
+      const coloured = await showAndLook(27, inColours, {}, null);
+      out.coloured = coloured.stats;
+      if (coloured.picture) {
+        out.colourPixels = { floor: coloured.picture.at(cx - 100, cy + 30), off: coloured.picture.at(cx + 230, cy) };
+        out.coloursDrawn = near(out.colourPixels.floor, [255, 0, 255], 12) && near(out.colourPixels.off, SCAN_CLEAR, 12);
+      }
+    }
+    // A scan asked for another way with its older reading kept meanwhile: never left out. Read again (here with its
+    // shading worked out), it's drawn all the while, from the older reading and then the new.
+    const again = await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, look: { by: 1, px: 5 * k, classes: postOn, shade: [100, 100, 100] } }], ask: { ...view, serial: 60, stale: true } });
+    let kept = again.stats || null;
+    let seenOlder = 0;
+    let leftOut = 0;
+    for (let i = 0; i < 80; i += 1) {
+      if (kept && kept.drawn === 60) {
+        const older = Array.isArray(kept.stale) ? kept.stale[0] || 0 : 0;
+        if (older) seenOlder += 1;
+        if (kept.scans + older < 1) leftOut += 1;
+        if (kept.scans >= 1 && !older) break;
+      }
+      await wait(50);
+      kept = (await engine.ask({ kind: "view-stats" })).stats || null;
+    }
+    out.keptOlder = { seenOlder, leftOut, stats: kept };
+    out.olderKept = Boolean(kept && kept.drawn === 60 && kept.scans >= 1 && leftOut === 0 && Array.isArray(kept.stale));
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await showAndLook(20, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    const hidden = await showAndLook(70, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;
     if (hidden.picture) {
       out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };

@@ -495,6 +495,15 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
       // Told only their classes the first time: their places are needed too.
       return args[5] !== null || calls.filter((c) => c[0] === "borrow").length > 1;
     },
+    viewTint: (...args) => {
+      calls.push(["tint", args]);
+      return args[5] !== null;
+    },
+    viewStrokes: (...args) => {
+      calls.push(["strokes", args]);
+      // No more than the card tests at once.
+      return args[1].length <= 4;
+    },
   };
   createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
   const page = port();
@@ -646,10 +655,73 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 23, key: "k", missing: ["nope"] });
   page.emit("message", { data: { kind: "view-classes", id: 24, token: "t1", key: "k", pointsKey: "p", cell: 0, origin: [0, 0, 0], classification: cls } });
   assert.match(page.out.at(-1).error, /weren't as the engine reads them/);
+  // 1.39: the page's own colouring for a scan (a colouring the engine hasn't): its colours alone first, then with their places.
+  const rgba = new Uint8Array([10, 20, 30, 255, 40, 50, 60, 255]);
+  page.emit("message", { data: { kind: "view-colours", id: 40, token: "t1", key: "c1", pointsKey: "p1", cell: 0.4, origin: [100, 200, 3], rgba } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-colours", id: 40, key: "c1", needPoints: true });
+  assert.deepEqual(calls.at(-1), ["tint", [7, "c1", "p1", 0.4, [100, 200, 3], null, rgba]]);
+  page.emit("message", { data: { kind: "view-colours", id: 41, token: "t1", key: "c1", pointsKey: "p1", cell: 0.4, origin: [100, 200, 3], xyz, rgba } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-colours", id: 41, key: "c1", ok: true });
+  assert.deepEqual(calls.at(-1), ["tint", [7, "c1", "p1", 0.4, [100, 200, 3], xyz, rgba]]);
+  page.emit("message", { data: { kind: "view-colours", id: 42, token: "nope", key: "c", pointsKey: "p", cell: 1, origin: [0, 0, 0], rgba } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-colours", id: 42, key: "c", missing: ["nope"] });
+  page.emit("message", { data: { kind: "view-colours", id: 43, token: "t1", key: "c", pointsKey: "p", cell: 1, origin: [0, 0, 0], rgba: [1, 2, 3, 4] } });
+  assert.match(page.out.at(-1).error, /colours weren't as the engine reads them/);
+  // The brush's strokes for the card, given under their key as they change.
+  page.emit("message", {
+    data: {
+      kind: "view-strokes",
+      id: 44,
+      key: "press 3",
+      strokes: [
+        { op: "class", cls: 6, right: [1, 0, 0], up: [0, 1, 0], dabs: new Float64Array([1, 2, 0.5, 2, 2, 0.5]), off: [7, 999], junk: 1 },
+        { op: "out", right: [1, 0, 0], up: [0, 0, 1], dabs: [3, 4, 1], near: [9.5] },
+        { op: "keep", right: [1, 0, 0], up: [0, 1, 0], dabs: [] },
+      ],
+    },
+  });
+  assert.deepEqual(page.out.at(-1), { kind: "view-strokes", id: 44, key: "press 3", ok: true });
+  assert.deepEqual(calls.at(-1), [
+    "strokes",
+    [
+      "press 3",
+      [
+        { op: "class", cls: 6, right: [1, 0, 0], up: [0, 1, 0], dabs: new Float64Array([1, 2, 0.5, 2, 2, 0.5]), off: [7] },
+        { op: "out", right: [1, 0, 0], up: [0, 0, 1], dabs: new Float64Array([3, 4, 1]), near: new Float64Array([9.5]) },
+        { op: "keep", right: [1, 0, 0], up: [0, 1, 0], dabs: new Float64Array([]) },
+      ],
+    ],
+  ]);
+  // More than the card tests: said, so the page draws the scans itself meanwhile.
+  const one = { op: "out", right: [1, 0, 0], up: [0, 1, 0], dabs: [0, 0, 1] };
+  page.emit("message", { data: { kind: "view-strokes", id: 45, key: "many", strokes: [one, one, one, one, one] } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-strokes", id: 45, key: "many", tooMany: true });
+  // Not as the engine reads them: a class stroke with no class, a way of two numbers.
+  page.emit("message", { data: { kind: "view-strokes", id: 46, key: "k", strokes: [{ op: "class", right: [1, 0, 0], up: [0, 1, 0], dabs: [] }] } });
+  assert.match(page.out.at(-1).error, /strokes weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view-strokes", id: 47, key: "k", strokes: [{ op: "out", right: [1, 0], up: [0, 1, 0], dabs: [] }] } });
+  assert.match(page.out.at(-1).error, /strokes weren't as the engine reads them/);
+  // With a view: a scan's own colouring by its key, the brush's preview, its strokes' key, and the scan's older reading drawn while it's read again.
+  page.emit("message", {
+    data: {
+      kind: "view",
+      id: 48,
+      scans: [{ token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], tint: "c1" }],
+      ask: { ...boxed, brush: { x: 120, y: 80, r: 24, painting: true, color: [1, 0, 0], hide: false, cut: 12.5, dabs: [100, 80, 110, 80], junk: 1 }, strokes: "press 3", stale: true },
+    },
+  });
+  const brushed = calls.at(-1)[1];
+  assert.equal(brushed.scans[0].tint, "c1");
+  assert.deepEqual(brushed.brush, { x: 120, y: 80, r: 24, painting: true, color: [1, 0, 0], hide: false, cut: 12.5, dabs: [100, 80, 110, 80] });
+  assert.equal(brushed.strokes, "press 3");
+  assert.equal(brushed.stale, true);
+  // None of them: none said. A preview with no size: left out.
+  page.emit("message", { data: { kind: "view", id: 49, scans: [], ask: { ...boxed, brush: { x: 1, y: 2, r: 0 } } } });
+  assert.equal("brush" in calls.at(-1)[1] || "strokes" in calls.at(-1)[1] || "stale" in calls.at(-1)[1], false);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 6);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 8);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });

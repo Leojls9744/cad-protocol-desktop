@@ -11,7 +11,9 @@
 //! bytes, at the strengths the view asks for). Nearer points cover further
 //! ones (a depth buffer). A point the view's limit boxes or slice don't
 //! show is put nowhere (`Clip`, tested on the card as the page's own card
-//! tests its boxes, so a box dragged shows at once).
+//! tests its boxes, so a box dragged shows at once). The brush's strokes
+//! the points haven't been read with yet are tested on the card too, and
+//! its preview drawn under the cursor (brush.rs).
 //!
 //! A frame is two passes: the points into a picture of the engine's own
 //! with their depths, then that picture onto the window shaded from the
@@ -22,6 +24,7 @@
 //! into a picture read back (the tests', and the build's check where
 //! there's no window).
 
+use crate::brush::{pack, Head, Preview, Strokes, HOVER_TINT, PREVIEW_DABS, STROKES};
 use crate::camera::{columns, Affine, Camera};
 use crate::scene::{Clip, PointVertex, Points, CLIP_BOXES, RAMP};
 use crate::surface;
@@ -82,7 +85,9 @@ pub const VIEWS: usize = 2;
 
 /// One view of a frame: where it looks and where in the window it is, its
 /// scans as their looks have them, its shading, and the limit boxes and
-/// slice it shows by. `slot`: which of the frame's views it is (under VIEWS).
+/// slice it shows by; the brush's preview there (none: no brush) and its
+/// strokes the points on the card haven't been read with. `slot`: which of
+/// the frame's views it is (under VIEWS).
 pub struct ViewDraw<'a> {
     pub slot: usize,
     pub camera: &'a Camera,
@@ -92,7 +97,12 @@ pub struct ViewDraw<'a> {
     pub clip: &'a Clip,
     /// Its background (red, green, blue, 0 to 1).
     pub clear: [f64; 4],
+    pub brush: Option<&'a Preview>,
+    pub strokes: &'a Strokes,
 }
+
+/// No strokes.
+pub static NO_STROKES: Strokes = Strokes { key: String::new(), list: Vec::new() };
 
 /// The darkest eye-dome lighting makes a pixel (the page's EYE_DOME_DARKEST).
 pub const EDL_DARKEST: f32 = 0.45;
@@ -156,9 +166,64 @@ struct U {{
   boxc: array<vec4<f32>, {slots}>,
   boxh: array<vec4<f32>, {slots}>,
   boxr: array<vec4<f32>, {slots}>,
+  // The view's toward-the-eye in the scan's own axes; w: the brush's cut, from the scan's middle along it (a point behind it isn't the brush's).
+  eye: vec4<f32>,
+  // Each stroke's across, up and toward-the-eye in the scan's own axes; w: the scan's middle along it, from the stroke's own origin.
+  ways: array<vec4<f32>, {ways}>,
   classes: array<vec4<f32>, 256>,
 }};
 @group(0) @binding(0) var<uniform> u: U;
+
+// The brush in this view (brush.rs): its preview and its strokes.
+struct B {{
+  // The preview's middle (the window's pixels) and radius; w: 0 none, 1 hovering, 2 painting.
+  brush: vec4<f32>,
+  // Its colour; a: painting takes the points out.
+  tint: vec4<f32>,
+  // x: how many of its latest dabs; y: how many strokes; zw: the window's size, pixels.
+  counts: vec4<f32>,
+  dabs: array<vec4<f32>, {preview}>,
+  // Each stroke: its cells' low corner (across and up, from its origin), one over a cell's size, and what it does (0 gives a class, 1 hides, 2 keeps only).
+  sa: array<vec4<f32>, {strokes}>,
+  // Its cells across and up, where they start in `cells`, and the class it gives.
+  sb: array<vec4<u32>, {strokes}>,
+  // The classes it leaves alone: 256 bits, two rows a stroke.
+  soff: array<vec4<u32>, {offs}>,
+}};
+@group(1) @binding(0) var<uniform> b: B;
+@group(1) @binding(1) var<storage, read> cells: array<u32>;
+@group(1) @binding(2) var<storage, read> sdabs: array<vec4<f32>>;
+
+// Whether a stroke leaves a class alone.
+fn left_alone(k: u32, cls: u32) -> bool {{
+  let row = b.soff[k * 2u + (cls >> 7u)];
+  return ((row[(cls >> 5u) & 3u] >> (cls & 31u)) & 1u) == 1u;
+}}
+
+// Whether a point (from its scan's middle, the scan's own axes) is inside one of a stroke's dabs.
+fn under(k: u32, p: vec3<f32>) -> bool {{
+  let wu = u.ways[k * 3u];
+  let wv = u.ways[k * 3u + 1u];
+  let wd = u.ways[k * 3u + 2u];
+  let at = vec2<f32>(dot(wu.xyz, p) + wu.w, dot(wv.xyz, p) + wv.w);
+  let deep = dot(wd.xyz, p) + wd.w;
+  let a = b.sa[k];
+  let n = b.sb[k];
+  let f = (at - a.xy) * a.z;
+  if (!(f.x >= 0.0 && f.y >= 0.0 && f.x < f32(n.x) && f.y < f32(n.y))) {{
+    return false;
+  }}
+  let cell = n.z + u32(f.y) * n.x + u32(f.x);
+  let last = cells[cell + 1u];
+  for (var i = cells[cell]; i < last; i++) {{
+    let d = sdabs[i];
+    let e = at - d.xy;
+    if (dot(e, e) <= d.z * d.z && deep >= d.w) {{
+      return true;
+    }}
+  }}
+  return false;
+}}
 
 struct VOut {{
   @builtin(position) pos: vec4<f32>,
@@ -210,7 +275,15 @@ fn ramp(t: f32) -> vec3<f32> {{
 fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<u32>, @location(2) iv: vec2<u32>, @location(3) sh: vec4<u32>, @location(4) mo: vec4<u32>) -> VOut {{
   var corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0));
   let q = corners[vi];
-  let entry = u.classes[c.w];
+  // Its class as the brush's strokes give it (those the points weren't read with), each in turn.
+  var cls = c.w;
+  let strokes = u32(b.counts.y);
+  for (var k = 0u; k < strokes; k++) {{
+    if (b.sa[k].w < 0.5 && !left_alone(k, cls) && under(k, p)) {{
+      cls = b.sb[k].w;
+    }}
+  }}
+  let entry = u.classes[cls];
   var o: VOut;
   o.q = q;
   o.color = vec3<f32>(0.0);
@@ -223,6 +296,17 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c:
   if (u.clips.x + u.clips.y > 0.5 && !shown(vec3<f32>(dot(u.turn[0].xyz, p), dot(u.turn[1].xyz, p), dot(u.turn[2].xyz, p)))) {{
     o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     return o;
+  }}
+  // Hidden by a stroke, or outside one that keeps only what's inside it: nowhere.
+  for (var k = 0u; k < strokes; k++) {{
+    let op = b.sa[k].w;
+    if (op > 0.5) {{
+      let inside = !left_alone(k, cls) && under(k, p);
+      if ((op < 1.5) == inside) {{
+        o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return o;
+      }}
+    }}
   }}
   let centre = u.m * vec4<f32>(p, 1.0);
   // Its size: the size set, or (Fill gaps) as big as its spacing where it is, a whole pixel up, never under the size set nor over the most.
@@ -270,6 +354,30 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c:
     let g = pow(f, 0.41666667);
     col = clamp(select((col + 0.055) * g - 0.055, col * f, col <= vec3<f32>(0.04045)), vec3<f32>(0.0), vec3<f32>(1.0));
   }}
+  // The brush's preview (the page's own, cloud-gl.ts): under it or one of its latest dabs while it paints, painted (its colour, or gone); under it while it hovers, tinted. Only the points at its cut or in front of it.
+  if (b.brush.w > 0.5 && dot(u.eye.xyz, p) >= u.eye.w) {{
+    let at = vec2<f32>((centre.x + 1.0) * 0.5 * b.counts.z, (1.0 - centre.y) * 0.5 * b.counts.w);
+    let r2 = b.brush.z * b.brush.z;
+    let d = at - b.brush.xy;
+    let over = dot(d, d) <= r2;
+    var painted = b.brush.w > 1.5 && over;
+    let dabs = u32(b.counts.x);
+    for (var i = 0u; i < dabs; i++) {{
+      let e = at - b.dabs[i].xy;
+      if (dot(e, e) <= r2) {{
+        painted = true;
+      }}
+    }}
+    if (painted) {{
+      if (b.tint.a > 0.5) {{
+        o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        return o;
+      }}
+      col = b.tint.rgb;
+    }} else if (over) {{
+      col = mix(col, b.tint.rgb, {hover:.2});
+    }}
+  }}
   o.color = col;
   return o;
 }}
@@ -285,7 +393,12 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {{
         stops = stops.join(", "),
         level = surface::light_level(),
         slots = CLIP_BOXES + 1,
-        boxes = CLIP_BOXES
+        boxes = CLIP_BOXES,
+        ways = STROKES * 3,
+        preview = PREVIEW_DABS,
+        strokes = STROKES,
+        offs = STROKES * 2,
+        hover = HOVER_TINT,
     )
 }
 
@@ -503,7 +616,67 @@ struct Uniforms {
     boxc: [[f32; 4]; CLIP_BOXES + 1],
     boxh: [[f32; 4]; CLIP_BOXES + 1],
     boxr: [[f32; 4]; CLIP_BOXES + 1],
+    eye: [f32; 4],
+    ways: [[f32; 4]; STROKES * 3],
     classes: [[f32; 4]; 256],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BrushUniforms {
+    brush: [f32; 4],
+    tint: [f32; 4],
+    counts: [f32; 4],
+    dabs: [[f32; 4]; PREVIEW_DABS],
+    sa: [[f32; 4]; STROKES],
+    sb: [[u32; 4]; STROKES],
+    soff: [[u32; 4]; STROKES * 2],
+}
+
+/// The brush in one of a frame's views, on the card: its preview's and its strokes' numbers, the strokes' cells and dabs, and the strokes they're of (their key: given again only when it's another).
+struct BrushCard {
+    uniforms: wgpu::Buffer,
+    cells: wgpu::Buffer,
+    dabs: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    /// How many numbers the cells' buffer holds, and how many dabs the dabs'.
+    room: [usize; 2],
+    key: Option<String>,
+    heads: Vec<Head>,
+}
+
+impl BrushCard {
+    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> BrushCard {
+        let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cadp brush"),
+            size: std::mem::size_of::<BrushUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let room = [64, 64];
+        let (cells, dabs) = Self::stores(device, room);
+        let bind = Self::bound(device, layout, &uniforms, &cells, &dabs);
+        BrushCard { uniforms, cells, dabs, bind, room, key: None, heads: Vec::new() }
+    }
+
+    fn stores(device: &wgpu::Device, room: [usize; 2]) -> (wgpu::Buffer, wgpu::Buffer) {
+        let make = |label: &str, size: usize| {
+            device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: size as u64, usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+        };
+        (make("cadp stroke cells", room[0] * 4), make("cadp stroke dabs", room[1] * 16))
+    }
+
+    fn bound(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, uniforms: &wgpu::Buffer, cells: &wgpu::Buffer, dabs: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("cadp brush"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: cells.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: dabs.as_entire_binding() },
+            ],
+        })
+    }
 }
 
 #[repr(C)]
@@ -609,6 +782,9 @@ pub struct Gpu {
     shade: wgpu::RenderPipeline,
     shade_layout: wgpu::BindGroupLayout,
     shade_uniforms: [wgpu::Buffer; VIEWS],
+    brush_layout: wgpu::BindGroupLayout,
+    /// The brush in each of a frame's views.
+    brush: Vec<BrushCard>,
     frame: Option<Frame>,
 }
 
@@ -676,9 +852,24 @@ impl Gpu {
                 count: None,
             }],
         });
+        // The brush: its numbers, and its strokes' cells and dabs (read by each point as it's placed).
+        let stored = || wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None };
+        let brush_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cadp brush"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::VERTEX, ty: stored(), count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::VERTEX, ty: stored(), count: None },
+            ],
+        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("cadp points"),
-            bind_group_layouts: &[&layout],
+            bind_group_layouts: &[&layout, &brush_layout],
             push_constant_ranges: &[],
         });
         let attributes = [
@@ -780,7 +971,8 @@ impl Gpu {
                 mapped_at_creation: false,
             })
         });
-        Ok(Gpu { device, queue, format, adapter: name, pipeline, layout, shade, shade_layout, shade_uniforms, frame: None })
+        let brush = (0..VIEWS).map(|_| BrushCard::new(&device, &brush_layout)).collect();
+        Ok(Gpu { device, queue, format, adapter: name, pipeline, layout, shade, shade_layout, shade_uniforms, brush_layout, brush, frame: None })
     }
 
     /// What sends points to this card, for this thread or another.
@@ -846,7 +1038,7 @@ impl Gpu {
         clear: [f64; 4],
     ) {
         match camera {
-            Some(camera) => self.draw_views(target, size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear }], clear),
+            Some(camera) => self.draw_views(target, size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES }], clear),
             None => self.draw_views(target, size, &[], clear),
         }
     }
@@ -857,6 +1049,7 @@ impl Gpu {
         self.frame_for(size);
         let views: Vec<&ViewDraw<'_>> = views.iter().filter(|v| v.slot < VIEWS).collect();
         for view in &views {
+            self.set_brush(size, view);
             self.set_view(size, view);
         }
         let frame = self.frame.as_ref().expect("the frame's picture");
@@ -881,6 +1074,7 @@ impl Gpu {
             for view in &views {
                 let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
                 pass.set_scissor_rect(x, y, w, h);
+                pass.set_bind_group(1, &self.brush[view.slot].bind, &[]);
                 for (cloud, _, _) in view.clouds {
                     if cloud.count == 0 {
                         continue;
@@ -913,6 +1107,48 @@ impl Gpu {
             }
         }
         self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// A view's brush given to the card: its preview's numbers each frame, its strokes' cells and dabs when they're other strokes.
+    fn set_brush(&mut self, size: [u32; 2], view: &ViewDraw<'_>) {
+        let card = &mut self.brush[view.slot];
+        if card.key.as_deref() != Some(view.strokes.key.as_str()) {
+            let packed = pack(&view.strokes.list);
+            // More than the buffers hold: bigger ones (twice what's needed, so a press growing isn't one a frame).
+            if packed.cells.len() > card.room[0] || packed.dabs.len() > card.room[1] {
+                card.room = [card.room[0].max(packed.cells.len() * 2), card.room[1].max(packed.dabs.len() * 2)];
+                let (cells, dabs) = BrushCard::stores(&self.device, card.room);
+                card.bind = BrushCard::bound(&self.device, &self.brush_layout, &card.uniforms, &cells, &dabs);
+                card.cells = cells;
+                card.dabs = dabs;
+            }
+            if !packed.cells.is_empty() {
+                self.queue.write_buffer(&card.cells, 0, bytemuck::cast_slice(&packed.cells));
+            }
+            if !packed.dabs.is_empty() {
+                self.queue.write_buffer(&card.dabs, 0, bytemuck::cast_slice(&packed.dabs));
+            }
+            card.heads = packed.heads;
+            card.key = Some(view.strokes.key.clone());
+        }
+        let mut u = BrushUniforms { brush: [0.0; 4], tint: [0.0; 4], counts: [0.0, card.heads.len() as f32, size[0] as f32, size[1] as f32], dabs: [[0.0; 4]; PREVIEW_DABS], sa: [[0.0; 4]; STROKES], sb: [[0; 4]; STROKES], soff: [[0; 4]; STROKES * 2] };
+        if let Some(p) = view.brush.filter(|p| p.r > 0.0 && p.at.iter().all(|v| v.is_finite())) {
+            u.brush = [p.at[0] as f32, p.at[1] as f32, p.r as f32, if p.painting { 2.0 } else { 1.0 }];
+            u.tint = [p.color[0], p.color[1], p.color[2], if p.hide { 1.0 } else { 0.0 }];
+            // Its latest dabs.
+            let from = p.dabs.len().saturating_sub(PREVIEW_DABS);
+            for (k, d) in p.dabs[from..].iter().enumerate() {
+                u.dabs[k] = [d[0] as f32, d[1] as f32, 0.0, 0.0];
+            }
+            u.counts[0] = (p.dabs.len() - from) as f32;
+        }
+        for (k, h) in card.heads.iter().enumerate().take(STROKES) {
+            u.sa[k] = [h.lo[0], h.lo[1], h.inv_cell, h.op as f32];
+            u.sb[k] = [h.nx, h.ny, h.first, h.class];
+            u.soff[k * 2] = [h.off[0], h.off[1], h.off[2], h.off[3]];
+            u.soff[k * 2 + 1] = [h.off[4], h.off[5], h.off[6], h.off[7]];
+        }
+        self.queue.write_buffer(&card.uniforms, 0, bytemuck::bytes_of(&u));
     }
 
     /// A view's numbers given to the card: each of its scans' and its shading's.
@@ -967,6 +1203,23 @@ impl Gpu {
                         boxr[k] = [b.cos as f32, b.sin as f32, 0.0, 0.0];
                     }
                 }
+                // The view's line of sight and each stroke's own axes, over the scan's (a point's place from its middle is in the scan's own): worked out in f64.
+                let over = |axis: &[f64; 3]| [
+                    (axis[0] * affine[0] + axis[1] * affine[4] + axis[2] * affine[8]) as f32,
+                    (axis[0] * affine[1] + axis[1] * affine[5] + axis[2] * affine[9]) as f32,
+                    (axis[0] * affine[2] + axis[1] * affine[6] + axis[2] * affine[10]) as f32,
+                ];
+                let along = |axis: &[f64; 3]| axis[0] * mid[0] + axis[1] * mid[1] + axis[2] * mid[2];
+                let sight = over(&cam.to_eye);
+                // No cut: every point, however far back.
+                let cut = view.brush.and_then(|b| b.cut).map_or(-3.0e38, |c| (c - along(&cam.to_eye)).clamp(-3.0e38, 3.0e38) as f32);
+                let mut ways = [[0.0f32; 4]; STROKES * 3];
+                for (k, h) in self.brush[view.slot].heads.iter().enumerate().take(STROKES) {
+                    for (a, axis) in [&h.right, &h.up, &h.eye].into_iter().enumerate() {
+                        let row = over(axis);
+                        ways[k * 3 + a] = [row[0], row[1], row[2], (along(axis) - h.origin[a]) as f32];
+                    }
+                }
                 let u = Uniforms {
                     m: columns(&m),
                     size: [(1.0 / size[0].max(1) as f64) as f32, (1.0 / size[1].max(1) as f64) as f32, if look.round { 1.0 } else { 0.0 }, look.by as f32],
@@ -987,6 +1240,8 @@ impl Gpu {
                     boxc,
                     boxh,
                     boxr,
+                    eye: [sight[0], sight[1], sight[2], cut],
+                    ways,
                     classes,
                 };
                 self.queue.write_buffer(&cloud.uniforms[view.slot], 0, bytemuck::bytes_of(&u));
@@ -1029,7 +1284,7 @@ impl Gpu {
         clear: [f64; 4],
     ) -> Result<Vec<u8>, String> {
         match camera {
-            Some(camera) => self.picture_views(size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear }], clear),
+            Some(camera) => self.picture_views(size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear, brush: None, strokes: &NO_STROKES }], clear),
             None => self.picture_views(size, &[], clear),
         }
     }
