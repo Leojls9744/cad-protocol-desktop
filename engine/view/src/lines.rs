@@ -106,6 +106,8 @@ impl LineItem {
 
 /// The stencil the areas are worked out in.
 pub(crate) const STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
+/// How many samples a pixel the filled shapes' own picture has (1.45): their edges come out smooth, as the page's canvas smooths its own.
+pub(crate) const SAMPLES: u32 = 4;
 
 /// Where `along` a line falls in a dash pattern, as the page's shader
 /// works it out (gl-lines.ts dashHere; its dashHereOnCpu is the same on
@@ -445,6 +447,24 @@ fn fs_fill() -> @location(0) vec4<f32> {
 "#
 }
 
+/// What puts the filled shapes' picture over the window (1.45): each pixel of it as it is (colour times opacity), blended over what's there.
+fn put_shader() -> &'static str {
+    r#"
+@group(0) @binding(0) var layer: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
+    return textureLoad(layer, vec2<i32>(at.xy), 0);
+}
+"#
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ViewUniforms {
@@ -475,11 +495,32 @@ struct Listed {
     thin: f32,
 }
 
+/// The filled shapes' own picture (1.45), the window's size: drawn with `SAMPLES` samples a pixel through a stencil
+/// as fine, read down to one a pixel (`one`), and put over the scans before the lines. Made when a list first has a
+/// filled shape; let go when none has had one for a while.
+pub(crate) struct Smooth {
+    size: [u32; 2],
+    pub(crate) many: wgpu::TextureView,
+    pub(crate) stencil: wgpu::TextureView,
+    pub(crate) one: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    /// Frames since a list had a filled shape.
+    idle: u32,
+}
+
+/// How many frames with no filled shape before their picture's let go (it's made again in a moment when one comes).
+const SMOOTH_IDLE: u32 = 600;
+
 /// The lines on the card: their strips (kept while the page keeps them), and what draws them.
 pub(crate) struct LineCard {
     pipeline: wgpu::RenderPipeline,
-    /// Filled batches' (triangles).
+    /// Filled batches' (triangles), into the filled shapes' picture.
     fills: wgpu::RenderPipeline,
+    /// That picture put over the window, and what it's read by.
+    put: wgpu::RenderPipeline,
+    put_layout: wgpu::BindGroupLayout,
+    smooth: Option<Smooth>,
+    format: wgpu::TextureFormat,
     /// The areas': their fans marked in the stencil (even-odd, nonzero), then covered in their colour.
     mark_evenodd: wgpu::RenderPipeline,
     mark_nonzero: wgpu::RenderPipeline,
@@ -559,8 +600,15 @@ impl LineCard {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            // In the filled shapes' pass (1.45), which has a stencil: not looked at, not written.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: STENCIL,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
             multiview: None,
             cache: None,
         });
@@ -591,7 +639,7 @@ impl LineCard {
                     stencil: wgpu::StencilState { front, back, read_mask: 0xff, write_mask: 0xff },
                     bias: wgpu::DepthBiasState::default(),
                 }),
-                multisample: wgpu::MultisampleState::default(),
+                multisample: wgpu::MultisampleState { count: SAMPLES, ..Default::default() },
                 multiview: None,
                 cache: None,
             })
@@ -601,6 +649,34 @@ impl LineCard {
         let mark_nonzero = stenciled("cadp areas nonzero", face(wgpu::StencilOperation::IncrementWrap, always), face(wgpu::StencilOperation::DecrementWrap, always), false);
         let inside = face(wgpu::StencilOperation::Zero, wgpu::CompareFunction::NotEqual);
         let cover = stenciled("cadp areas cover", inside, inside, true);
+        // The filled shapes' picture over the window: read a pixel at a time, blended as the lines are.
+        let put_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("cadp fills over"), source: wgpu::ShaderSource::Wgsl(put_shader().into()) });
+        let put_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("cadp fills over"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                count: None,
+            }],
+        });
+        let put_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("cadp fills over"), bind_group_layouts: &[&put_layout], push_constant_ranges: &[] });
+        let put = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("cadp fills over"),
+            layout: Some(&put_pipeline_layout),
+            vertex: wgpu::VertexState { module: &put_module, entry_point: Some("vs"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &put_module,
+                entry_point: Some("fs"),
+                targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
         let views: [wgpu::Buffer; VIEWS] = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor { label: Some("cadp lines view"), size: std::mem::size_of::<ViewUniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
         });
@@ -608,7 +684,7 @@ impl LineCard {
             device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("cadp lines view"), layout: &view_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: views[k].as_entire_binding() }] })
         });
         let step = (device.limits().min_uniform_buffer_offset_alignment as u64).max(std::mem::size_of::<BatchUniforms>() as u64);
-        LineCard { pipeline, fills, mark_evenodd, mark_nonzero, cover, batch_layout, views, view_binds, listed: std::array::from_fn(|_| None), strips: HashMap::new(), step }
+        LineCard { pipeline, fills, put, put_layout, smooth: None, format, mark_evenodd, mark_nonzero, cover, batch_layout, views, view_binds, listed: std::array::from_fn(|_| None), strips: HashMap::new(), step }
     }
 
     /// A view's lines made ready for its frame: strips the card hasn't
@@ -695,9 +771,51 @@ impl LineCard {
         self.strips.len()
     }
 
-    /// A view's filled shapes drawn into its part of the window, in their turn (a pass with the stencil; its scissor
-    /// is the view's): each one's fans marked in the stencil, then covered in its colour.
-    pub(crate) fn draw_areas(&self, pass: &mut wgpu::RenderPass<'_>, slot: usize, lines: &Lines) {
+    /// The filled shapes' picture made ready for a frame of `size` pixels with one in it (`wanted`), or counted idle
+    /// and let go in time. What a frame with one draws into.
+    pub(crate) fn smooth_for(&mut self, device: &wgpu::Device, size: [u32; 2], wanted: bool) {
+        if !wanted {
+            if let Some(s) = self.smooth.as_mut() {
+                s.idle += 1;
+                if s.idle > SMOOTH_IDLE {
+                    self.smooth = None;
+                }
+            }
+            return;
+        }
+        if let Some(s) = self.smooth.as_mut() {
+            if s.size == size {
+                s.idle = 0;
+                return;
+            }
+        }
+        let extent = wgpu::Extent3d { width: size[0].max(1), height: size[1].max(1), depth_or_array_layers: 1 };
+        let make = |label: &str, format: wgpu::TextureFormat, samples: u32, usage: wgpu::TextureUsages| {
+            device
+                .create_texture(&wgpu::TextureDescriptor { label: Some(label), size: extent, mip_level_count: 1, sample_count: samples, dimension: wgpu::TextureDimension::D2, format, usage, view_formats: &[] })
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        let many = make("cadp fills", self.format, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let stencil = make("cadp fills stencil", STENCIL, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
+        let one = make("cadp fills read down", self.format, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("cadp fills over"), layout: &self.put_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&one) }] });
+        self.smooth = Some(Smooth { size, many, stencil, one, bind, idle: 0 });
+    }
+
+    /// The filled shapes' picture, when there's one.
+    pub(crate) fn smooth(&self) -> Option<&Smooth> {
+        self.smooth.as_ref()
+    }
+
+    /// Whether a view's lines have anything filled (a shape of the page's, or a filled batch).
+    pub(crate) fn fills_in(lines: &Lines) -> bool {
+        lines.list.items.iter().any(|i| i.area || i.fill)
+    }
+
+    /// A view's filled shapes and filled batches drawn into its part of their own picture, in the list's order (a
+    /// pass with the stencil and `SAMPLES` samples; its scissor is the view's): a shape's fans marked in the
+    /// stencil, then covered in its colour; a filled batch's triangles as they are.
+    pub(crate) fn draw_under(&self, pass: &mut wgpu::RenderPass<'_>, slot: usize, lines: &Lines) {
         let Some(listed) = self.listed.get(slot).and_then(Option::as_ref) else { return };
         if listed.of != at(&lines.list) || listed.key != lines.list.key {
             return;
@@ -705,7 +823,7 @@ impl LineCard {
         pass.set_bind_group(0, &self.view_binds[slot], &[]);
         pass.set_stencil_reference(0);
         for (k, item) in lines.list.items.iter().enumerate() {
-            if !item.area {
+            if !item.area && !item.fill {
                 continue;
             }
             let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };
@@ -714,11 +832,23 @@ impl LineCard {
             }
             pass.set_bind_group(1, &listed.bind, &[(k as u64 * self.step) as u32]);
             pass.set_vertex_buffer(0, buffer.slice(..));
-            pass.set_pipeline(if item.nonzero { &self.mark_nonzero } else { &self.mark_evenodd });
-            pass.draw(0..s.corners(), 0..1);
-            pass.set_pipeline(&self.cover);
+            if item.area {
+                pass.set_pipeline(if item.nonzero { &self.mark_nonzero } else { &self.mark_evenodd });
+                pass.draw(0..s.corners(), 0..1);
+                pass.set_pipeline(&self.cover);
+            } else {
+                pass.set_pipeline(&self.fills);
+            }
             pass.draw(0..s.corners(), 0..1);
         }
+    }
+
+    /// The filled shapes' picture put over the window (a pass with no scissor set: where nothing was filled it's clear).
+    pub(crate) fn put_under(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(s) = self.smooth.as_ref() else { return };
+        pass.set_pipeline(&self.put);
+        pass.set_bind_group(0, &s.bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// A view's lines drawn into its part of the window (the pass's scissor is the view's): each batch in turn, its segments as strips.
@@ -727,23 +857,7 @@ impl LineCard {
         if listed.of != at(&lines.list) || listed.key != lines.list.key {
             return;
         }
-        // The filled batches first, beneath the lines (a wide dashed polyline's dashes).
-        if lines.list.items.iter().any(|i| i.fill && !i.area) {
-            pass.set_pipeline(&self.fills);
-            pass.set_bind_group(0, &self.view_binds[slot], &[]);
-            for (k, item) in lines.list.items.iter().enumerate() {
-                if !item.fill || item.area {
-                    continue;
-                }
-                let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };
-                if s.corners() == 0 || !Arc::ptr_eq(s, &item.strips) {
-                    continue;
-                }
-                pass.set_bind_group(1, &listed.bind, &[(k as u64 * self.step) as u32]);
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..s.corners(), 0..1);
-            }
-        }
+        // (The filled batches and shapes are in their own picture, already put under these: draw_under, put_under.)
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.view_binds[slot], &[]);
         for (k, item) in lines.list.items.iter().enumerate() {

@@ -769,8 +769,6 @@ struct Frame {
     size: [u32; 2],
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
-    /// Which pixels a filled shape of the page's covers, as it's worked out (1.44: lines.rs, the areas).
-    stencil: wgpu::TextureView,
     /// Each view's own reading of them (its shading's numbers).
     bind: [wgpu::BindGroup; VIEWS],
 }
@@ -1020,19 +1018,6 @@ impl Gpu {
         };
         let color = make("cadp points picture", PICTURE);
         let depth = make("cadp depth", DEPTH);
-        let stencil = self
-            .device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("cadp areas"),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: crate::lines::STENCIL,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&wgpu::TextureViewDescriptor::default());
         let bind: [wgpu::BindGroup; VIEWS] = std::array::from_fn(|k| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("cadp shade"),
@@ -1044,7 +1029,7 @@ impl Gpu {
                 ],
             })
         });
-        self.frame = Some(Frame { size, color, depth, stencil, bind });
+        self.frame = Some(Frame { size, color, depth, bind });
     }
 
     /// A frame of one view: each scan through it, as its look has it, into
@@ -1084,6 +1069,9 @@ impl Gpu {
         // Strips the page no longer keeps: off the card.
         let drawn: Vec<&Lines> = views.iter().filter_map(|v| v.lines).collect();
         self.lines.tidy(&drawn);
+        // The filled shapes' own picture (1.45), when a view's lines have any.
+        let filled = drawn.iter().any(|l| LineCard::fills_in(l));
+        self.lines.smooth_for(&self.device, size, filled);
         let frame = self.frame.as_ref().expect("the frame's picture");
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cadp frame") });
         {
@@ -1139,13 +1127,19 @@ impl Gpu {
             }
         }
         // Then each view's linework over its scans (1.41), in the same part of the window: the page's filled shapes
-        // first (1.44: hatches, worked out through the stencil), then its lines.
-        if views.iter().any(|v| v.lines.is_some_and(|l| l.list.items.iter().any(|i| i.area))) {
+        // first (1.44: hatches, worked out through the stencil; 1.45: in a picture of their own with four samples a
+        // pixel, read down to one and put over the scans, so their edges are smooth), then its lines.
+        let smooth = if filled { self.lines.smooth() } else { None };
+        if let Some(smooth) = smooth {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cadp areas"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                label: Some("cadp fills"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &smooth.many,
+                    resolve_target: Some(&smooth.one),
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Discard },
+                })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &frame.stencil,
+                    view: &smooth.stencil,
                     depth_ops: None,
                     stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
                 }),
@@ -1156,7 +1150,7 @@ impl Gpu {
                 let Some(lines) = view.lines else { continue };
                 let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
                 pass.set_scissor_rect(x, y, w, h);
-                self.lines.draw_areas(&mut pass, view.slot, lines);
+                self.lines.draw_under(&mut pass, view.slot, lines);
             }
         }
         if views.iter().any(|v| v.lines.is_some()) {
@@ -1167,6 +1161,9 @@ impl Gpu {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if smooth.is_some() {
+                self.lines.put_under(&mut pass);
+            }
             for view in &views {
                 let Some(lines) = view.lines else { continue };
                 let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };

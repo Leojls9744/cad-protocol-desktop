@@ -490,3 +490,51 @@ fn the_page_s_filled_shapes_fill_by_its_rule_under_its_lines() {
     assert_eq!(pixel(&p, 300, 165, 60), clear);
     assert_eq!(pixel(&p, 300, 80, 60), clear, "not outside its view's part of the window");
 }
+
+#[test]
+fn a_filled_shape_s_edges_are_smooth() {
+    let Some(mut card) = card() else { return };
+    let gpu = &mut card.gpu;
+    let cam = plan(200.0, 120.0);
+    let clear = clear_bytes();
+    let lines_of = |items: Vec<LineItem>, key: &str| Lines { list: list(key, items), scale: 1.0, e: 0.0, f: 60.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
+    let green = [0.0f32, 1.0, 0.0];
+    // A square whose left edge is half way across a column of pixels (20.5) and whose top and bottom are half way
+    // down a row (40.5, 80.5); and a triangle with a slanted side.
+    let square: &[[f32; 2]] = &[[20.5, -20.0], [60.0, -20.0], [60.0, 20.0], [20.5, 20.0]];
+    let slanted: &[[f32; 2]] = &[[100.0, -30.0], [160.0, -30.0], [100.0, 30.0]];
+    let l = lines_of(vec![area(1, &[square], [0.0, 1.0, 0.0, 1.0], false), area(2, &[slanted], [0.0, 1.0, 0.0, 1.0], false)], "a");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    assert_eq!(at(30, 60), [0, 255, 0], "inside");
+    assert_eq!(at(19, 60), clear, "outside");
+    assert_eq!(at(59, 60), [0, 255, 0], "an edge on a pixel's side is as sharp as it was");
+    assert_eq!(at(60, 60), clear);
+    assert!(near(at(20, 60), over(green, clear, 0.5), 3), "half a pixel across: half the colour, {:?}", at(20, 60));
+    assert!(near(at(30, 40), over(green, clear, 0.5), 3), "half a pixel down: {:?}", at(30, 40));
+    assert!(near(at(30, 80), over(green, clear, 0.5), 3), "{:?}", at(30, 80));
+    assert!(near(at(20, 40), over(green, clear, 0.25), 3), "a corner's quarter: {:?}", at(20, 40));
+    // Along the slanted side, a row has pixels partly covered: neither the fill's colour nor what's under it.
+    let partly = (100..170).filter(|&x| at(x, 60) != clear && at(x, 60) != [0, 255, 0]).count();
+    assert!(partly >= 1, "a slanted side's pixels are partly covered");
+    assert_eq!(at(110, 60), [0, 255, 0]);
+    assert_eq!(at(150, 60), clear);
+    // See-through: half a pixel of a half-solid fill is a quarter of its colour; where two of a fan's triangles meet
+    // inside, once.
+    let l = lines_of(vec![area(3, &[square], [0.0, 1.0, 0.0, 0.5], false)], "b");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert!(near(pixel(&p, 200, 20, 60), over(green, clear, 0.25), 3));
+    assert!(near(pixel(&p, 200, 40, 60), over(green, clear, 0.5), 2));
+    // A filled batch's triangles (a wide dashed polyline's dashes) the same way.
+    let band: Vec<f32> = [[20.5f32, -20.0], [60.0, -20.0], [60.0, 20.0], [20.5, -20.0], [60.0, 20.0], [20.5, 20.0]].iter().flat_map(|c| [c[0], c[1], 0.0]).collect();
+    let fill = LineItem { fill: true, ..LineItem::solid(Arc::new(Strips { id: 4, floats: band }), [0.0, 1.0, 0.0, 1.0], false) };
+    let l = lines_of(vec![fill], "c");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert!(near(pixel(&p, 200, 20, 60), over(green, clear, 0.5), 3));
+    assert_eq!(pixel(&p, 200, 30, 60), [0, 255, 0]);
+    // A frame with no filled shape after one with: nothing of the last one's left.
+    let l = lines_of(vec![batch(9, &[strip([10.0, 0.0, 0.0], [110.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 1.0, 1.0, 1.0], false)], "d");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert_eq!(pixel(&p, 200, 30, 50), clear);
+    assert_eq!(pixel(&p, 200, 30, 60), [255, 255, 255]);
+}

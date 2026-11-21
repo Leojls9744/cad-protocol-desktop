@@ -735,14 +735,18 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
         return o;
       };
       const boxOf = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
-      const gaveArea = await engine.ask({ kind: "view-line-strips", batch: 3, strips: Float32Array.from([...fanOf(boxOf(cx - 90, cy + 25, cx - 10, cy + 85)), ...fanOf(boxOf(cx - 60, cy + 30, cx - 40, cy + 50))]) });
+      // (1.45: its left side half way across a column of pixels: that column's half its colour, the fills' edges being smooth.)
+      const gaveArea = await engine.ask({ kind: "view-line-strips", batch: 3, strips: Float32Array.from([...fanOf(boxOf(cx - 90.5, cy + 25, cx - 10, cy + 85)), ...fanOf(boxOf(cx - 60, cy + 30, cx - 40, cy + 50))]) });
       const listedArea = gaveArea.ok ? await engine.ask({ kind: "view-lines", key: "check areas", items: [{ id: 1, rgba: [1, 0, 1, 1] }, { id: 3, rgba: [0, 1, 0, 1], area: true }] }) : gaveArea;
       if (listedArea.ok) {
         const areaShot = await showAndLook(67, byClass, { lines: { key: "check areas", place: [1, 0, 0], half: 2 * k, ratio: k } }, null);
         if (areaShot.picture) {
-          out.areaPixels = { fill: areaShot.picture.at(cx - 80, cy + 75), hole: areaShot.picture.at(cx - 50, cy + 40), line: areaShot.picture.at(cx - 50, cy + 60), past: areaShot.picture.at(cx + 30, cy + 40) };
+          out.areaPixels = { fill: areaShot.picture.at(cx - 80, cy + 75), hole: areaShot.picture.at(cx - 50, cy + 40), line: areaShot.picture.at(cx - 50, cy + 60), past: areaShot.picture.at(cx + 30, cy + 40), edge: areaShot.picture.at(cx - 91, cy + 75), beside: areaShot.picture.at(cx - 92, cy + 75) };
           const c = out.areaPixels;
           out.areasDrawn = near(c.fill, [0, 255, 0], 12) && near(c.hole, CLASS_FLOOR, 12) && near(c.line, [255, 0, 255], 12) && near(c.past, CLASS_FLOOR, 12);
+          // Half the fill's green over half the floor, at a screen that draws a pixel a pixel.
+          const half = [0, 1, 2].map((i) => Math.round(([0, 255, 0][i] + CLASS_FLOOR[i]) / 2));
+          out.smoothDrawn = k !== 1 || (near(c.edge, half, 24) && near(c.beside, CLASS_FLOOR, 12));
         }
       } else out.areasError = listedArea.error || "not taken";
       // A view that names no lines: none drawn (the page's own again).

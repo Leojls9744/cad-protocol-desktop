@@ -1,6 +1,6 @@
 [package]
 name = "cadp-engine-view"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 license = "MIT"
 description = "CAD Protocol's scan engine drawing its scans itself, on the graphics card, in a window of its own under the app's page (desktop 1.35, the layer trial)."
