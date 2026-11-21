@@ -605,6 +605,12 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   // None: none said. Scans shown faint: at 0.3 of their strength.
   page.emit("message", { data: { kind: "view", id: 31, scans: [], ask: { ...boxed, boxes: [], strength: 0.3 } } });
   assert.equal(calls.at(-1)[1].strength, 0.3);
+  assert.equal("slot" in calls.at(-1)[1], false);
+  // The split view's other side: the frame's second view.
+  page.emit("message", { data: { kind: "view", id: 36, scans: [], ask: { ...boxed, slot: 1 } } });
+  assert.equal(calls.at(-1)[1].slot, 1);
+  page.emit("message", { data: { kind: "view", id: 37, scans: [], ask: { ...boxed, slot: 7 } } });
+  assert.equal("slot" in calls.at(-1)[1], false);
   assert.equal("boxes" in calls.at(-1)[1] || "slice" in calls.at(-1)[1] || "isolate" in calls.at(-1)[1], false);
   // A box not as the engine reads it: said, and nothing shown without it.
   const shows = calls.filter((c) => c[0] === "show").length;
@@ -643,7 +649,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 4);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 6);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });

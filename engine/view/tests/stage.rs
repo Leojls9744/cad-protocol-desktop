@@ -145,6 +145,31 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     // The same view again: nothing read again.
     assert!(!stage.step(&ask).unwrap());
     assert!(!stage.loading());
+    // A second view of the same scan (the split view's other side), looking at its north-east corner: the scan's base
+    // is shared, and that view gets detail of its own, the first view's left as it was.
+    let corner = Camera { target: [6_000_195.0, 2_000_145.0, 100.0], units_per_pixel: 0.025, rect: [400.0, 0.0, 400.0, 300.0], ..whole };
+    let other = Ask { camera: Some(corner), scans: vec![scan.clone()], serial: 9, ..Ask::default() };
+    let both = [ask.clone(), other.clone()];
+    assert_eq!(stage.held_in(1, &other), (1, 0));
+    let first: Vec<u32> = stage.list_in(0, &ask).iter().map(|(c, _, _)| c.count).collect();
+    for _ in 0..600 {
+        let changed = stage.step_all(&both).expect("a step");
+        if !changed && !stage.loading() && stage.held_in(1, &other) == (1, 1) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(stage.held_in(1, &other), (1, 1));
+    assert_eq!(stage.held_in(0, &ask), (1, 1));
+    assert_eq!(stage.list_in(0, &ask).iter().map(|(c, _, _)| c.count).collect::<Vec<u32>>(), first);
+    let second = stage.list_in(1, &other);
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[1].0.count, first[1], "the same base in both views");
+    assert_ne!(second[0].0.count, first[0], "its own detail");
+    // The second view gone: its detail's let go, the first's kept.
+    stage.step_all(std::slice::from_ref(&ask)).expect("a step");
+    assert_eq!(stage.held_in(1, &other), (1, 0));
+    assert_eq!(stage.held_in(0, &ask), (1, 1));
     // Hidden (the page draws them itself): kept on the card, none drawn.
     ask.hide = true;
     assert!(stage.list(&ask).is_empty());

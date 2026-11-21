@@ -38,7 +38,7 @@ pub mod surface;
 pub mod view;
 
 pub use camera::{Affine, Camera, IDENTITY};
-pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST};
+pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST};
 pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, CLIP_BOXES, RAMP};
 pub use shapes::{Op, ShapeIn, Shapes};
 pub use view::{Ask, ScanAsk, Stage, Stats, View};

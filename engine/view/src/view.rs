@@ -17,7 +17,7 @@
 //! them.
 
 use crate::camera::{Affine, Camera};
-use crate::gpu::{Cloud, Edl, Look, Sender, Shading};
+use crate::gpu::{Cloud, Edl, Look, Sender, Shading, VIEWS};
 use crate::scene::{sample, wanted, Clip, Keep, Sight, Taken};
 use cadp_engine_core::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -90,6 +90,8 @@ pub struct Stats {
     pub detail: u32,
     /// The serial of the ask the last frame showed.
     pub drawn: u64,
+    /// Those three for each of the frame's views (the first: the drawing area's, as above).
+    pub views: Vec<[u64; 3]>,
 }
 
 /// What tells one scan's points on the card from another's: the scan, how
@@ -122,15 +124,17 @@ struct Job {
     affine: Affine,
     keep: Keep,
     most: usize,
-    /// The view its detail is for; none: its base.
+    /// The view its detail is for (and which of the frame's views that is); none: its base.
     camera: Option<Camera>,
+    slot: usize,
     /// The limit boxes and slice its detail is read by (its base is of the whole scan, so what a box moved lays bare is there at once, thinly).
     clip: Clip,
 }
 
 struct Done {
     key: ScanKey,
-    detail: bool,
+    /// The view its detail is for; none: its base.
+    detail: Option<usize>,
     cloud: Cloud,
     taken: Taken,
     ms: f64,
@@ -231,28 +235,35 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
         let cloud = sender.upload(&points);
         let shade_ms = points.shade_ms;
         drop(points);
-        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some(), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0, shade_ms });
+        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some().then_some(job.slot), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0, shade_ms });
         shared.busy.store(false, Ordering::SeqCst);
     }
 }
 
-/// A scan's points on the card: its base, and the detail for a view.
+/// A scan's points on the card: its base, and the detail for each view that shows it.
 struct Held {
     key: ScanKey,
     base: Option<Cloud>,
-    detail: Option<(Cloud, Taken)>,
+    detail: [Option<(Cloud, Taken)>; VIEWS],
 }
 
-/// What's on the card for the scans asked for, and the loader that puts it there.
-pub struct Stage {
-    loader: Loader,
-    held: Vec<Held>,
+/// When a view last changed and was last looked at for detail.
+#[derive(Clone)]
+struct Watch {
     /// The view last looked at for detail, with its limit boxes and slice (their key).
     looked: Option<(Camera, String)>,
     /// The view as it last was (and its boxes and slice), and when it last changed; when detail was last looked for.
     seen: Option<(Camera, String)>,
     changed_at: Instant,
     looked_at: Instant,
+}
+
+/// What's on the card for the scans asked for, and the loader that puts it there.
+pub struct Stage {
+    loader: Loader,
+    held: Vec<Held>,
+    /// Each of the frame's views, watched for when its detail is due.
+    watch: Vec<Watch>,
     /// The last sample's reading and sending, ms, and its shading's share of that.
     pub load_ms: f64,
     pub shade_ms: f64,
@@ -261,7 +272,8 @@ pub struct Stage {
 impl Stage {
     pub fn new(sender: Sender) -> Result<Stage, String> {
         let now = Instant::now();
-        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), looked: None, seen: None, changed_at: now, looked_at: now, load_ms: 0.0, shade_ms: 0.0 })
+        let watch = Watch { looked: None, seen: None, changed_at: now, looked_at: now };
+        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), watch: vec![watch; VIEWS], load_ms: 0.0, shade_ms: 0.0 })
     }
 
     /// Whether a sample is being read now.
@@ -269,22 +281,38 @@ impl Stage {
         self.loader.busy()
     }
 
+    /// One view's: `step_all` with the drawing area's alone.
+    pub fn step(&mut self, ask: &Ask) -> Result<bool, String> {
+        self.step_all(std::slice::from_ref(ask))
+    }
+
     /// What the loader's read taken in, what's no longer asked for let go,
     /// and the next sample asked of it (a base first, then the detail for
-    /// the view where a scan's hasn't it). True when what's on the card
-    /// changed (a frame's due).
-    pub fn step(&mut self, ask: &Ask) -> Result<bool, String> {
+    /// each view where a scan's hasn't it). `asks`: the frame's views in
+    /// turn (the drawing area's, then the split view's other side). True
+    /// when what's on the card changed (a frame's due).
+    pub fn step_all(&mut self, asks: &[Ask]) -> Result<bool, String> {
         if let Some(e) = self.loader.shared.failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
             return Err(e);
         }
+        let asks = &asks[..asks.len().min(VIEWS)];
+        let asked = |key: &ScanKey| asks.iter().any(|a| a.scans.iter().any(|s| key_of(s) == *key));
         let mut changed = false;
-        // No longer asked for: off the card.
+        // No longer asked for by any view: off the card. By one of them no longer: its detail off.
         let before = self.held.len();
-        self.held.retain(|h| ask.scans.iter().any(|s| key_of(s) == h.key));
+        self.held.retain(|h| asked(&h.key));
         changed |= self.held.len() != before;
+        for h in &mut self.held {
+            for (slot, detail) in h.detail.iter_mut().enumerate() {
+                if detail.is_some() && !asks.get(slot).is_some_and(|a| a.scans.iter().any(|s| key_of(s) == h.key)) {
+                    *detail = None;
+                    changed = true;
+                }
+            }
+        }
         for done in std::mem::take(&mut *self.loader.shared.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // Asked for no longer (the scans changed while it was read): dropped.
-            if !ask.scans.iter().any(|s| key_of(s) == done.key) {
+            if !asked(&done.key) {
                 continue;
             }
             self.load_ms = done.ms;
@@ -292,73 +320,83 @@ impl Stage {
             let at = match self.held.iter().position(|h| h.key == done.key) {
                 Some(k) => k,
                 None => {
-                    self.held.push(Held { key: done.key.clone(), base: None, detail: None });
+                    self.held.push(Held { key: done.key.clone(), base: None, detail: std::array::from_fn(|_| None) });
                     self.held.len() - 1
                 }
             };
-            if done.detail {
-                self.held[at].detail = Some((done.cloud, done.taken));
-            } else {
-                self.held[at].base = Some(done.cloud);
+            match done.detail {
+                Some(slot) if slot < VIEWS => self.held[at].detail[slot] = Some((done.cloud, done.taken)),
+                Some(_) => {}
+                None => self.held[at].base = Some(done.cloud),
             }
             changed = true;
         }
-        // When the view last changed (its detail waits for it to rest, or is looked for now and then while it moves).
-        let now = ask.camera.map(|c| (c, ask.clip.key.clone()));
-        if now != self.seen {
-            self.seen = now;
-            self.changed_at = Instant::now();
+        // When each view last changed (its detail waits for it to rest, or is looked for now and then while it moves).
+        for (slot, ask) in asks.iter().enumerate() {
+            let now = ask.camera.map(|c| (c, ask.clip.key.clone()));
+            if now != self.watch[slot].seen {
+                self.watch[slot].seen = now;
+                self.watch[slot].changed_at = Instant::now();
+            }
         }
         if self.loader.busy() {
             return Ok(changed);
         }
         // A scan with no base yet: that first.
-        for s in &ask.scans {
-            let key = key_of(s);
-            if !self.held.iter().any(|h| h.key == key && h.base.is_some()) {
-                self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, clip: Clip::default() });
+        for ask in asks {
+            for s in &ask.scans {
+                let key = key_of(s);
+                if !self.held.iter().any(|h| h.key == key && h.base.is_some()) {
+                    self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, slot: 0, clip: Clip::default() });
+                    return Ok(changed);
+                }
+            }
+        }
+        // Then each view's detail, looked at as the view changes (not every frame of a move).
+        for (slot, ask) in asks.iter().enumerate() {
+            let Some(cam) = ask.camera.filter(|_| !ask.hide && !ask.test) else { continue };
+            let watch = &mut self.watch[slot];
+            if watch.looked.as_ref().is_some_and(|(c, k)| *c == cam && *k == ask.clip.key) {
+                continue;
+            }
+            let rested = watch.changed_at.elapsed() >= Duration::from_millis(DETAIL_REST_MS);
+            if !rested && watch.looked_at.elapsed() < Duration::from_millis(DETAIL_MOVING_MS) {
+                continue;
+            }
+            watch.looked = Some((cam, ask.clip.key.clone()));
+            watch.looked_at = Instant::now();
+            for s in &ask.scans {
+                let key = key_of(s);
+                let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
+                let want = wanted(&s.index, s.most, Some(&Sight::new(&cam, &s.affine)), Some((&ask.clip, &s.affine)));
+                if want.of == 0 {
+                    continue;
+                }
+                // The base holds it already (a small scan, or all of it in view at no more than the base's share).
+                if h.detail[slot].as_ref().is_some_and(|(_, t)| t.covers(&want)) {
+                    continue;
+                }
+                self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam), slot, clip: ask.clip.clone() });
+                // Looked at again once this one's in (another scan may want its own).
+                self.watch[slot].looked = None;
                 return Ok(changed);
             }
-        }
-        // Then the view's detail, looked at as the view changes (not every frame of a move).
-        let Some(cam) = ask.camera.filter(|_| !ask.hide && !ask.test) else {
-            return Ok(changed);
-        };
-        if self.looked.as_ref().is_some_and(|(c, k)| *c == cam && *k == ask.clip.key) {
-            return Ok(changed);
-        }
-        let rested = self.changed_at.elapsed() >= Duration::from_millis(DETAIL_REST_MS);
-        if !rested && self.looked_at.elapsed() < Duration::from_millis(DETAIL_MOVING_MS) {
-            return Ok(changed);
-        }
-        self.looked = Some((cam, ask.clip.key.clone()));
-        self.looked_at = Instant::now();
-        for s in &ask.scans {
-            let key = key_of(s);
-            let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
-            let want = wanted(&s.index, s.most, Some(&Sight::new(&cam, &s.affine)), Some((&ask.clip, &s.affine)));
-            if want.of == 0 {
-                continue;
-            }
-            // The base holds it already (a small scan, or all of it in view at no more than the base's share).
-            if h.detail.as_ref().is_some_and(|(_, t)| t.covers(&want)) {
-                continue;
-            }
-            self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam), clip: ask.clip.clone() });
-            // Looked at again once this one's in (another scan may want its own).
-            self.looked = None;
-            break;
         }
         Ok(changed)
     }
 
-    /// The points to draw for the ask: each scan's detail for the view, then
-    /// its base. A point of the base in the view is one of the detail's
-    /// too, at the same place; the first drawn there stays, so it's the
-    /// detail's shading that shows (worked out from all the points round
-    /// it, where the base's is from a sixth of them), and the base's only
-    /// where the detail doesn't reach.
+    /// The drawing area's: `list_in` for the first view.
     pub fn list<'a>(&'a self, ask: &'a Ask) -> Vec<(&'a Cloud, Affine, &'a Look)> {
+        self.list_in(0, ask)
+    }
+
+    /// The points to draw for a view's ask: each scan's detail for that
+    /// view, then its base. A point of the base in the view is one of the
+    /// detail's too, at the same place; the first drawn there stays, so
+    /// it's the detail's shading that shows (worked out from all the points
+    /// round it, where the base's is from a sixth of them), and the base's
+    /// only where the detail doesn't reach.
+    pub fn list_in<'a>(&'a self, slot: usize, ask: &'a Ask) -> Vec<(&'a Cloud, Affine, &'a Look)> {
         let mut out = Vec::new();
         if ask.hide {
             return out;
@@ -367,7 +405,7 @@ impl Stage {
             let key = key_of(s);
             let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
             if let Some(base) = &h.base {
-                if let Some((detail, _)) = &h.detail {
+                if let Some((detail, _)) = h.detail.get(slot).and_then(Option::as_ref) {
                     out.push((detail, s.affine, &s.look));
                 }
                 out.push((base, s.affine, &s.look));
@@ -376,15 +414,20 @@ impl Stage {
         out
     }
 
-    /// How many of the asked scans are on the card (their base at least), and how many with a view's detail.
+    /// The drawing area's: `held_in` for the first view.
     pub fn held(&self, ask: &Ask) -> (u32, u32) {
+        self.held_in(0, ask)
+    }
+
+    /// How many of a view's asked scans are on the card (their base at least), and how many with that view's detail.
+    pub fn held_in(&self, slot: usize, ask: &Ask) -> (u32, u32) {
         let mut on = 0;
         let mut detail = 0;
         for s in &ask.scans {
             let key = key_of(s);
             if let Some(h) = self.held.iter().find(|h| h.key == key && h.base.is_some()) {
                 on += 1;
-                if h.detail.is_some() {
+                if h.detail.get(slot).is_some_and(Option::is_some) {
                     detail += 1;
                 }
             }
@@ -433,7 +476,8 @@ impl Pace {
 }
 
 struct Shared {
-    ask: Mutex<(Ask, u64)>,
+    /// Each of the frame's views' ask, and a count of the asks given it.
+    ask: Mutex<Vec<(Ask, u64)>>,
     /// Told as a new ask comes (the drawing thread wakes for it at once).
     came: Condvar,
     stats: Mutex<Stats>,
@@ -457,7 +501,7 @@ impl View {
         }
         let shared = Arc::new(Shared {
             // Until the page says what to show: its own background, nothing on it.
-            ask: Mutex::new((Ask::default(), 0)),
+            ask: Mutex::new(vec![(Ask::default(), 0); VIEWS]),
             came: Condvar::new(),
             stats: Mutex::new(Stats::default()),
             stop: AtomicBool::new(false),
@@ -481,11 +525,19 @@ impl View {
         Ok(View { shared, thread: Some(thread) })
     }
 
-    /// What to show from now on.
+    /// What the drawing area shows from now on.
     pub fn show(&self, ask: Ask) {
+        self.show_in(0, ask);
+    }
+
+    /// What one of the frame's views shows from now on (0: the drawing area; 1: the split view's other side; an ask with no view: nothing there).
+    pub fn show_in(&self, slot: usize, ask: Ask) {
+        if slot >= VIEWS {
+            return;
+        }
         let mut held = self.shared.ask.lock().unwrap_or_else(|e| e.into_inner());
-        held.0 = ask;
-        held.1 += 1;
+        held[slot].0 = ask;
+        held[slot].1 += 1;
         self.shared.came.notify_one();
     }
 
@@ -569,9 +621,10 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         );
     };
     let mut size = [0u32; 2];
-    let mut seen = u64::MAX;
-    let mut ask = Ask::default();
-    let mut pace = Pace::default();
+    // Each of the frame's views: the count of the asks seen for it, the one showing, and those held before they show.
+    let mut seen = [u64::MAX; VIEWS];
+    let mut asks: Vec<Ask> = vec![Ask::default(); VIEWS];
+    let mut paces: Vec<Pace> = (0..VIEWS).map(|_| Pace::default()).collect();
     let mut ring: Option<Cloud> = None;
     let ring_look = Look { px: 3.0, ..Look::own() };
     let started = Instant::now();
@@ -595,22 +648,27 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         }
         {
             let held = shared.ask.lock().unwrap();
-            if held.1 != seen {
-                seen = held.1;
-                pace.push(Instant::now(), held.0.clone());
+            for slot in 0..VIEWS {
+                if held[slot].1 != seen[slot] {
+                    seen[slot] = held[slot].1;
+                    paces[slot].push(Instant::now(), held[slot].0.clone());
+                }
             }
         }
-        // Shown once it's been held as long as it asks (the page's own picture lands that much later).
-        if let Some(due) = pace.due(Instant::now()) {
-            ask = due;
-            dirty = true;
+        // Each shown once it's been held as long as it asks (the page's own picture lands that much later).
+        for slot in 0..VIEWS {
+            if let Some(due) = paces[slot].due(Instant::now()) {
+                asks[slot] = due;
+                dirty = true;
+            }
         }
+        let ask = &asks[0];
         if size[0] == 0 || size[1] == 0 {
             std::thread::sleep(Duration::from_millis(30));
             continue;
         }
         // The scans' points, read by the loader while frames go on: what's come is on the card from this frame.
-        if stage.step(&ask)? {
+        if stage.step_all(&asks)? {
             dirty = true;
             let mut stats = shared.stats.lock().unwrap();
             stats.load_ms = stage.load_ms;
@@ -623,9 +681,10 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         if !dirty && !ask.test {
             // Till the next ask's hold is up, a sample's read, or an ask comes (woken for it at once).
             let nap = Duration::from_millis(if stage.loading() { 2 } else { 4 });
-            let wait = pace.next().map(|at| at.saturating_duration_since(Instant::now())).map_or(nap, |d| d.min(nap));
+            let next = paces.iter().filter_map(Pace::next).min();
+            let wait = next.map(|at| at.saturating_duration_since(Instant::now())).map_or(nap, |d| d.min(nap));
             let held = shared.ask.lock().unwrap();
-            if held.1 == seen && !wait.is_zero() {
+            if (0..VIEWS).all(|slot| held[slot].1 == seen[slot]) && !wait.is_zero() {
                 let _ = shared.came.wait_timeout(held, wait);
             }
             continue;
@@ -652,7 +711,7 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             None => CLEAR,
         };
         let mut points = 0u64;
-        let mut drew = (0u32, 0u32);
+        let mut drew = [(0u32, 0u32); VIEWS];
         if let (true, Some(ring)) = (ask.test, ring.as_ref()) {
             // Turning about its middle, a turn every 6 s, the ring 60% of the window's shorter side.
             let a = started.elapsed().as_secs_f64() * std::f64::consts::TAU / 6.0;
@@ -667,12 +726,22 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
             points = ring.count as u64;
             gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY, &ring_look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR);
         } else {
-            let list = stage.list(&ask);
-            points = list.iter().map(|(c, _, _)| c.count as u64).sum::<u64>().max(points);
-            if ask.camera.is_some() && !ask.hide {
-                drew = stage.held(&ask);
+            // Each view with something to show, in its own part of the window.
+            let lists: Vec<Vec<(&Cloud, Affine, &Look)>> = asks.iter().enumerate().map(|(slot, a)| stage.list_in(slot, a)).collect();
+            let mut views = Vec::new();
+            for (slot, a) in asks.iter().enumerate() {
+                let Some(camera) = a.camera.as_ref() else { continue };
+                points += lists[slot].iter().map(|(c, _, _)| c.count as u64).sum::<u64>();
+                if !a.hide {
+                    drew[slot] = stage.held_in(slot, a);
+                }
+                let own = match a.clear {
+                    Some([r, g, b]) => [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0), 1.0],
+                    None => clear,
+                };
+                views.push(crate::gpu::ViewDraw { slot, camera, clouds: &lists[slot], edl: &a.edl, shading: &a.shading, clip: &a.clip, clear: own });
             }
-            gpu.draw(&target, size, ask.camera.as_ref(), &list, &ask.edl, &ask.shading, &ask.clip, clear);
+            gpu.draw_views(&target, size, &views, clear);
         }
         frame.present();
         dirty = false;
@@ -684,9 +753,10 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         stats.frames += 1;
         stats.frame_ms = took;
         stats.points = points;
-        stats.scans = drew.0;
-        stats.detail = drew.1;
+        stats.scans = drew[0].0;
+        stats.detail = drew[0].1;
         stats.drawn = ask.serial;
+        stats.views = (0..VIEWS).map(|slot| [drew[slot].0 as u64, drew[slot].1 as u64, asks[slot].serial]).collect();
         stats.size = size;
         let over = second.elapsed().as_secs_f64();
         if over >= 0.5 {

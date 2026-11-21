@@ -77,6 +77,23 @@ pub struct Edl {
     pub noise: f64,
 }
 
+/// How many views a frame draws at most: the drawing area, and the split view's other side.
+pub const VIEWS: usize = 2;
+
+/// One view of a frame: where it looks and where in the window it is, its
+/// scans as their looks have them, its shading, and the limit boxes and
+/// slice it shows by. `slot`: which of the frame's views it is (under VIEWS).
+pub struct ViewDraw<'a> {
+    pub slot: usize,
+    pub camera: &'a Camera,
+    pub clouds: &'a [(&'a Cloud, Affine, &'a Look)],
+    pub edl: &'a Edl,
+    pub shading: &'a Shading,
+    pub clip: &'a Clip,
+    /// Its background (red, green, blue, 0 to 1).
+    pub clear: [f64; 4],
+}
+
 /// The darkest eye-dome lighting makes a pixel (the page's EYE_DOME_DARKEST).
 pub const EDL_DARKEST: f32 = 0.45;
 
@@ -304,6 +321,8 @@ struct E {{
   shade: vec4<f32>,
   // The first and last pixels off a neighbour's looked for; Z's share up the screen and toward the eye.
   reach: vec4<f32>,
+  // The view's own part of the picture: its left, top, right and bottom (a neighbour past them is another view's, or none).
+  rect: vec4<f32>,
 }};
 @group(0) @binding(0) var<uniform> e: E;
 @group(0) @binding(1) var t_color: texture_2d<f32>;
@@ -327,11 +346,12 @@ fn look(at: vec2<i32>, dir: vec2<i32>) -> Hit {{
   h.ok = false;
   h.d = 0.0;
   h.at = 0.0;
-  let size = vec2<i32>(e.more.zw);
+  let lo = vec2<i32>(e.rect.xy);
+  let hi = vec2<i32>(e.rect.zw);
   let last = i32(e.reach.y);
   for (var t = i32(e.reach.x); t <= last; t++) {{
     let p = at + dir * t;
-    if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {{
+    if (p.x < lo.x || p.y < lo.y || p.x >= hi.x || p.y >= hi.y) {{
       return h;
     }}
     let w = textureLoad(t_depth, p, 0);
@@ -433,12 +453,13 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {{
   if (e.edl.x > 0.0) {{
     let zc = e.edl.z;
     let least = zc / 256.0;
-    let size = vec2<i32>(e.more.zw);
+    let lo = vec2<i32>(e.rect.xy);
+    let hi = vec2<i32>(e.rect.zw);
     var sum = 0.0;
     for (var i = 0; i < 8; i++) {{
       let a = f32(i) * 0.78539816;
       let p = at + vec2<i32>(floor(vec2<f32>(cos(a), sin(a)) * e.edl.y + 0.5));
-      if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {{
+      if (p.x < lo.x || p.y < lo.y || p.x >= hi.x || p.y >= hi.y) {{
         continue;
       }}
       let wn = textureLoad(t_depth, p, 0);
@@ -493,6 +514,7 @@ struct ShadeUniforms {
     more: [f32; 4],
     shade: [f32; 4],
     reach: [f32; 4],
+    rect: [f32; 4],
 }
 
 /// The points' own picture's colours (the window's may be another).
@@ -502,8 +524,9 @@ const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// A scan's points on the card.
 pub struct Cloud {
     buffer: wgpu::Buffer,
-    uniforms: wgpu::Buffer,
-    bind: wgpu::BindGroup,
+    /// What each view of a frame draws it by (a scan's base is in every view that shows the scan).
+    uniforms: [wgpu::Buffer; VIEWS],
+    bind: [wgpu::BindGroup; VIEWS],
     pub count: u32,
     pub centre: [f64; 3],
     pub radius: f64,
@@ -546,16 +569,20 @@ impl Sender {
             self.queue.write_buffer(&buffer, at as u64, &bytes[at..end]);
             at = end;
         }
-        let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cadp view"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let uniforms: [wgpu::Buffer; VIEWS] = std::array::from_fn(|_| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cadp view"),
+                size: std::mem::size_of::<Uniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cadp view"),
-            layout: &self.layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+        let bind: [wgpu::BindGroup; VIEWS] = std::array::from_fn(|k| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cadp view"),
+                layout: &self.layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms[k].as_entire_binding() }],
+            })
         });
         Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius, colours: points.colours, shaded: points.shaded, shade_ms: points.shade_ms, gap: points.gap }
     }
@@ -566,7 +593,8 @@ struct Frame {
     size: [u32; 2],
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
-    bind: wgpu::BindGroup,
+    /// Each view's own reading of them (its shading's numbers).
+    bind: [wgpu::BindGroup; VIEWS],
 }
 
 /// The card, ready to draw.
@@ -580,7 +608,7 @@ pub struct Gpu {
     layout: wgpu::BindGroupLayout,
     shade: wgpu::RenderPipeline,
     shade_layout: wgpu::BindGroupLayout,
-    shade_uniforms: wgpu::Buffer,
+    shade_uniforms: [wgpu::Buffer; VIEWS],
     frame: Option<Frame>,
 }
 
@@ -744,11 +772,13 @@ impl Gpu {
             multiview: None,
             cache: None,
         });
-        let shade_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("cadp shade"),
-            size: std::mem::size_of::<ShadeUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
+        let shade_uniforms: [wgpu::Buffer; VIEWS] = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("cadp shade"),
+                size: std::mem::size_of::<ShadeUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
         Ok(Gpu { device, queue, format, adapter: name, pipeline, layout, shade, shade_layout, shade_uniforms, frame: None })
     }
@@ -785,19 +815,21 @@ impl Gpu {
         };
         let color = make("cadp points picture", PICTURE);
         let depth = make("cadp depth", DEPTH);
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("cadp shade"),
-            layout: &self.shade_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.shade_uniforms.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&color) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
-            ],
+        let bind: [wgpu::BindGroup; VIEWS] = std::array::from_fn(|k| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("cadp shade"),
+                layout: &self.shade_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: self.shade_uniforms[k].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&color) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
+                ],
+            })
         });
         self.frame = Some(Frame { size, color, depth, bind });
     }
 
-    /// A frame: each scan through the view, as its look has it, into
+    /// A frame of one view: each scan through it, as its look has it, into
     /// `target` (`size` pixels), shaded from its depths (`shading`) and
     /// with eye-dome lighting, only what the limit boxes and slice show
     /// (`clip`). With no view, the background alone.
@@ -813,7 +845,80 @@ impl Gpu {
         clip: &Clip,
         clear: [f64; 4],
     ) {
+        match camera {
+            Some(camera) => self.draw_views(target, size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear }], clear),
+            None => self.draw_views(target, size, &[], clear),
+        }
+    }
+
+    /// A frame: each of its views in its own part of `target` (`size`
+    /// pixels; their parts apart), `clear` wherever none is.
+    pub fn draw_views(&mut self, target: &wgpu::TextureView, size: [u32; 2], views: &[ViewDraw<'_>], clear: [f64; 4]) {
         self.frame_for(size);
+        let views: Vec<&ViewDraw<'_>> = views.iter().filter(|v| v.slot < VIEWS).collect();
+        for view in &views {
+            self.set_view(size, view);
+        }
+        let frame = self.frame.as_ref().expect("the frame's picture");
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cadp frame") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cadp points"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &frame.color,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &frame.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            for view in &views {
+                let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
+                pass.set_scissor_rect(x, y, w, h);
+                for (cloud, _, _) in view.clouds {
+                    if cloud.count == 0 {
+                        continue;
+                    }
+                    pass.set_bind_group(0, &cloud.bind[view.slot], &[]);
+                    pass.set_vertex_buffer(0, cloud.buffer.slice(..));
+                    pass.draw(0..4, 0..cloud.count);
+                }
+            }
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cadp shade"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0], g: clear[1], b: clear[2], a: clear[3] }), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shade);
+            // Each view's own part of the window, shaded by its own numbers.
+            for view in &views {
+                let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
+                pass.set_scissor_rect(x, y, w, h);
+                pass.set_bind_group(0, &frame.bind[view.slot], &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        self.queue.submit(Some(encoder.finish()));
+    }
+
+    /// A view's numbers given to the card: each of its scans' and its shading's.
+    fn set_view(&self, size: [u32; 2], view: &ViewDraw<'_>) {
+        let (cam, clouds, edl, shading, clip, clear) = (view.camera, view.clouds, view.edl, view.shading, view.clip, view.clear);
+        let camera = Some(cam);
         // How far the scans reach from the target along the line of sight: what the depth runs over.
         let mut reach = 1.0f64;
         if let Some(cam) = camera {
@@ -884,7 +989,7 @@ impl Gpu {
                     boxr,
                     classes,
                 };
-                self.queue.write_buffer(&cloud.uniforms, 0, bytemuck::bytes_of(&u));
+                self.queue.write_buffer(&cloud.uniforms[view.slot], 0, bytemuck::bytes_of(&u));
             }
         }
         // Depth's 0 to 1 is `reach × 1.05` drawing units each side of the target: as pixels of nearness.
@@ -901,62 +1006,18 @@ impl Gpu {
             shade: [strength(shading.depth), strength(shading.relief), strength(shading.faces), px as f32],
             // The drawing's Z up the screen and toward the eye (the view's up and line of sight, their z).
             reach: [first as f32, last as f32, camera.map(|c| c.up[2]).unwrap_or(0.0) as f32, camera.map(|c| c.to_eye[2]).unwrap_or(1.0) as f32],
+            rect: match cam.scissor(size) {
+                Some([x, y, w, h]) => [x as f32, y as f32, (x + w) as f32, (y + h) as f32],
+                None => [0.0; 4],
+            },
         };
-        self.queue.write_buffer(&self.shade_uniforms, 0, bytemuck::bytes_of(&shade));
-        let frame = self.frame.as_ref().expect("the frame's picture");
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cadp frame") });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cadp points"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &frame.color,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &frame.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            if let Some(cam) = camera {
-                if let Some([x, y, w, h]) = cam.scissor(size) {
-                    pass.set_scissor_rect(x, y, w, h);
-                    pass.set_pipeline(&self.pipeline);
-                    for (cloud, _, _) in clouds {
-                        if cloud.count == 0 {
-                            continue;
-                        }
-                        pass.set_bind_group(0, &cloud.bind, &[]);
-                        pass.set_vertex_buffer(0, cloud.buffer.slice(..));
-                        pass.draw(0..4, 0..cloud.count);
-                    }
-                }
-            }
-        }
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("cadp shade"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: clear[0], g: clear[1], b: clear[2], a: clear[3] }), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.shade);
-            pass.set_bind_group(0, &frame.bind, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        self.queue.submit(Some(encoder.finish()));
+        self.queue.write_buffer(&self.shade_uniforms[view.slot], 0, bytemuck::bytes_of(&shade));
     }
 
-    /// A frame drawn into a picture of the engine's own, and read back: its
-    /// pixels, red green blue and how solid, row by row from the top.
+    /// A frame of one view drawn into a picture of the engine's own, and
+    /// read back: its pixels, red green blue and how solid, row by row from
+    /// the top.
+    #[allow(clippy::too_many_arguments)]
     pub fn picture(
         &mut self,
         size: [u32; 2],
@@ -967,6 +1028,14 @@ impl Gpu {
         clip: &Clip,
         clear: [f64; 4],
     ) -> Result<Vec<u8>, String> {
+        match camera {
+            Some(camera) => self.picture_views(size, &[ViewDraw { slot: 0, camera, clouds, edl, shading, clip, clear }], clear),
+            None => self.picture_views(size, &[], clear),
+        }
+    }
+
+    /// A frame of several views drawn into a picture, and read back.
+    pub fn picture_views(&mut self, size: [u32; 2], views: &[ViewDraw<'_>], clear: [f64; 4]) -> Result<Vec<u8>, String> {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cadp picture"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
@@ -978,7 +1047,7 @@ impl Gpu {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw(&view, size, camera, clouds, edl, shading, clip, clear);
+        self.draw_views(&view, size, views, clear);
         // Rows are sent padded to 256 bytes.
         let row = (size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

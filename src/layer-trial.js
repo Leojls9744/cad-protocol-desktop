@@ -408,7 +408,8 @@ const CLASS_FLOOR = [200, 120, 40];
  * overhead: by height (its post's top the high colour at the middle, its
  * floor the low one beside it), by class with the post's layer off, with
  * eye-dome lighting, shaded as the page shades (1.37), by a limit box and
- * by a slice, faint, and with its gaps filled (1.37), and kept undrawn;
+ * by a slice, faint, with its gaps filled, and in two views at once (1.37),
+ * and kept undrawn;
  * and how it went (frames drawn, the card's name).
  */
 async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
@@ -548,8 +549,37 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       out.fillPixels = { faint: faint.picture.at(cx - 100, cy + 30), want, open: block(open.picture), filled: block(filled.picture) };
       out.fillDrawn = near(out.fillPixels.faint, want, 12) && out.fillPixels.open < 16 && out.fillPixels.open > 0 && out.fillPixels.filled === 16;
     }
+    // Two views in one frame (1.37; the split view): the drawing area's in the window's left half by class, the other
+    // side's in its right half by height, each about the post; the page's background between them. Then the other side gone.
+    const wide = inside.width * k;
+    const half = Math.floor(wide / 2);
+    const leftRect = [0, 0, half - 4, inside.height * k];
+    const rightRect = [half + 4, 0, wide - half - 4, inside.height * k];
+    await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, look: { by: 2, px: 5 * k, heights: [100, 104] } }], ask: { ...view, rect: rightRect, slot: 1, serial: 18 } });
+    let two = await showAndLook(19, byClass, { rect: leftRect }, null);
+    for (let i = 0; i < 60 && !(two.stats && Array.isArray(two.stats.views) && two.stats.views[5] === 18 && two.stats.views[3] >= 1); i += 1) {
+      await wait(250);
+      two = { ...two, stats: (await engine.ask({ kind: "view-stats" })).stats || null };
+    }
+    await wait(400);
+    two.picture = await look(png ? png.replace(/\.png$/, ".split.png") : null);
+    out.split = two.stats;
+    if (two.picture) {
+      const lx = Math.round((half - 4) / 2 / k);
+      const rx = Math.round((half + 4 + (wide - half - 4) / 2) / k);
+      out.splitPixels = {
+        leftPost: two.picture.at(lx, cy),
+        leftFloor: two.picture.at(lx - 60, cy + 30),
+        between: two.picture.at(Math.round(half / k), cy + 30),
+        rightPost: two.picture.at(rx, cy),
+        rightFloor: two.picture.at(rx - 60, cy + 30),
+      };
+      const c = out.splitPixels;
+      out.splitDrawn = near(c.leftPost, [175, 175, 175], 12) && near(c.leftFloor, CLASS_FLOOR, 12) && near(c.between, SCAN_CLEAR, 12) && near(c.rightPost, RAMP_HIGH, 30) && near(c.rightFloor, RAMP_LOW, 30);
+    }
+    await engine.ask({ kind: "view", scans: [], ask: { slot: 1 } });
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await showAndLook(17, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    const hidden = await showAndLook(20, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;
     if (hidden.picture) {
       out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };

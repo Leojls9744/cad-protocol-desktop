@@ -1339,6 +1339,8 @@ pub struct ViewAskJs {
     pub slice: Option<CropBoxJs>,
     /// The points isolated (1.37): the key of the shapes given with view_shapes. Scans are left out till they're in.
     pub isolate: Option<String>,
+    /// Which of the frame's views this is (1.37): 0 or none the drawing area, 1 the split view's other side.
+    pub slot: Option<u32>,
 }
 
 #[napi(object)]
@@ -1364,6 +1366,8 @@ pub struct ViewStatsJs {
     pub detail: u32,
     /// The serial of the ask the last frame showed.
     pub drawn: f64,
+    /// Those three for each of the frame's views (1.37), three numbers a view: the drawing area's first.
+    pub views: Vec<f64>,
 }
 
 fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
@@ -1573,7 +1577,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     if let Some(b) = &ask.slice {
         clip.slice = Some(crop_box(b)?);
     }
-    view.show(cadp_engine_view::Ask {
+    view.show_in(ask.slot.unwrap_or(0) as usize, cadp_engine_view::Ask {
         camera,
         scans,
         test: ask.test.unwrap_or(false),
@@ -1609,6 +1613,7 @@ pub fn view_stats() -> ViewStatsJs {
         scans: s.scans,
         detail: s.detail,
         drawn: s.drawn as f64,
+        views: s.views.iter().flatten().map(|v| *v as f64).collect(),
     }
 }
 

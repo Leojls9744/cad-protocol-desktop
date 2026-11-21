@@ -393,6 +393,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           ...(Array.isArray(a.boxes) && a.boxes.length ? { boxes: a.boxes.map(boxOf) } : {}),
           ...(a.slice != null ? { slice: boxOf(a.slice) } : {}),
           ...(typeof a.isolate === "string" && a.isolate ? { isolate: a.isolate } : {}),
+          // 1.37: which of the frame's views this is (the split view's other side: 1).
+          ...(a.slot === 1 ? { slot: 1 } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };

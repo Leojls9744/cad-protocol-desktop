@@ -2,7 +2,7 @@
 //! where the view puts it, and a scan's sample from its index.
 
 use cadp_engine_core::crop::CropBox;
-use cadp_engine_view::{test_ring, Camera, Clip, Edl, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
+use cadp_engine_view::{test_ring, Camera, Clip, Edl, ViewDraw, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
 
 /// One test draws at a time: the build computer's stand-in for a card (Windows' own, on the processor) has
 /// stopped the whole run when several tests each started and ended a card of their own at once. The app has one.
@@ -495,4 +495,44 @@ fn fill_gaps_draws_each_point_as_big_as_its_spacing() {
     let plain = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data });
     let p = shot(&mut gpu, &plain, &fill, &cam);
     assert_eq!(run(&p, 99), 11);
+}
+
+#[test]
+fn a_frame_draws_two_views_each_in_its_own_part_of_the_window() {
+    let Some(mut gpu) = card() else { return };
+    // The floor with a step (its east half 10 higher), grey; drawn in the window's left 190 px from overhead, and in its right 200 from the south, 40° down.
+    let step = gpu.upload(&ground(|x, _| if x >= 0.0 { 10.0 } else { 0.0 }));
+    let left = Camera { rect: [0.0, 0.0, 190.0, 200.0], ..plan(200.0) };
+    let (s, c) = (40f64.to_radians().sin(), 40f64.to_radians().cos());
+    let right = Camera { target: [0.0, 0.0, 0.0], right: [1.0, 0.0, 0.0], up: [0.0, c, s], to_eye: [0.0, -s, c], units_per_pixel: 1.0, rect: [200.0, 0.0, 200.0, 200.0] };
+    let small = Look { px: 2.0, ..Look::own() };
+    let red = Look { by: BY_ONE, one: [1.0, 0.0, 0.0], px: 2.0, ..Look::own() };
+    let edl = Edl { strength: 1.0, radius: 1.4, eye: 200.0 * 0.055, noise: 0.0 };
+    let none = Edl::default();
+    let (shading, clip) = (Shading::default(), Clip::default());
+    let boxed = Clip { boxes: vec![limit([-1e6, -30.0, -1e6], [1e6, 30.0, 1e6], 0.0, false)], slice: None, key: String::new() }.keyed();
+    let left_clouds = [(&step, IDENTITY, &small)];
+    let right_clouds = [(&step, IDENTITY, &red)];
+    let bg = [0.2, 0.4, 0.6, 1.0];
+    let views = [
+        ViewDraw { slot: 0, camera: &left, clouds: &left_clouds, edl: &edl, shading: &shading, clip: &clip, clear: CLEAR },
+        ViewDraw { slot: 1, camera: &right, clouds: &right_clouds, edl: &none, shading: &shading, clip: &boxed, clear: [0.0, 0.0, 0.0, 1.0] },
+    ];
+    let p = gpu.picture_views([400, 200], &views, bg).expect("a picture");
+    let at = |x: u32, y: u32| pixel(&p, 400, x, y);
+    // The left view: the same scan in its own colours, its own eye-dome lighting (the step's foot dark), nothing clipped.
+    assert!(near(at(60, 100), [200, 200, 200], 1) && near(at(60, 20), [200, 200, 200], 1));
+    assert!((93..97).any(|x| at(x, 100)[0] < 150), "the step's edge, lit by the left view's own lighting");
+    // Between the views (the split's bar): the frame's own background.
+    assert!(near(at(194, 100), [51, 102, 153], 1));
+    // The right view: the same scan in one colour, from the side, by its own limit box (a band 60 across), its own background beyond; no lighting.
+    assert!(near(at(300, 100), [255, 0, 0], 1), "{:?}", at(300, 100));
+    assert!(near(at(300, 10), [0, 0, 0], 1) && near(at(300, 190), [0, 0, 0], 1), "past its box: its own background");
+    assert!((250..399).all(|x| { let v = at(x, 100); near(v, [255, 0, 0], 1) || near(v, [0, 0, 0], 1) }), "no lighting in the right view");
+    // The left view's ground ends 15 px short of its right edge: its last pixels as the rest of it, then its own background to the edge.
+    assert!(near(at(172, 150), [200, 200, 200], 1), "{:?}", at(172, 150));
+    assert!(near(at(188, 150), clear_bytes(), 1), "{:?}", at(188, 150));
+    // One view alone, in the second place: the first's part is the frame's background.
+    let p = gpu.picture_views([400, 200], &views[1..], bg).expect("a picture");
+    assert!(near(pixel(&p, 400, 60, 100), [51, 102, 153], 1) && near(pixel(&p, 400, 300, 100), [255, 0, 0], 1));
 }
