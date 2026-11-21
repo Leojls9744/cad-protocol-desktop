@@ -769,13 +769,19 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(calls.at(-1), ["lines", ["lines 7", [{ id: 7, rgba: [1, 0, 0, 0.5], area: true }, { id: 9, rgba: [0, 1, 0, 1], area: true, nonzero: true }, { id: 7, rgba: [1, 1, 1, 1] }]]]);
   page.emit("message", { data: { kind: "view", id: 66, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5, junk: 1 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5 });
-  // No right and up for the drawing's own: only the plane's are placed. Not whole, or the split view's other side: none.
+  // No right and up for the drawing's own: only the plane's are placed. Not whole: none.
   page.emit("message", { data: { kind: "view", id: 67, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 });
   page.emit("message", { data: { kind: "view", id: 68, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10], half: 0.625, ratio: 1 } } } });
   assert.equal("lines" in calls.at(-1)[1], false);
-  page.emit("message", { data: { kind: "view", id: 69, scans: [], ask: { ...boxed, slot: 1, lines: { key: "lines 1", place: [2, 10, 20], half: 0.625, ratio: 1 } } } });
-  assert.equal("lines" in calls.at(-1)[1], false);
+  // 1.46: the split view's other side's lines too, and its lists said to be its own.
+  page.emit("message", { data: { kind: "view", id: 69, scans: [], ask: { ...boxed, slot: 1, lines: { key: "lines 1.0:1", place: [2, 10, 20], half: 0.625, ratio: 1 } } } });
+  assert.equal(calls.at(-1)[1].slot, 1);
+  assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1.0:1", place: [2, 10, 20], half: 0.625, ratio: 1 });
+  page.emit("message", { data: { kind: "view-lines", id: 76, key: "lines 1.0:1", owner: 1, items: [{ id: 7, rgba: [1, 0, 0, 1] }] } });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 1.0:1", [{ id: 7, rgba: [1, 0, 0, 1] }], 1]]);
+  page.emit("message", { data: { kind: "view-lines", id: 77, key: "lines 0:9", owner: 5, items: [{ id: 7, rgba: [1, 0, 0, 1] }] } });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 0:9", [{ id: 7, rgba: [1, 0, 0, 1] }]]]);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });

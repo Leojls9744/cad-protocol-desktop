@@ -424,7 +424,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         // 1.44: a filled shape of the page's (a hatch's fill): its floats are its loops as triangle fans, filled even-odd or nonzero.
         items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}), ...(dash ? { dash: dash.map(Number) } : {}), ...(it.fill === true ? { fill: true } : {}), ...(it.thin === true ? { thin: true } : {}), ...(it.lettered === true ? { lettered: true } : {}), ...(it.area === true ? { area: true } : {}), ...(it.area === true && it.nonzero === true ? { nonzero: true } : {}) });
       }
-      const took = engine.viewLines(String(msg.key), items);
+      // 1.46: whose list it is (the split view's other side's: 1), so each view's newest lists are kept apart.
+      const took = msg.owner === 1 ? engine.viewLines(String(msg.key), items, 1) : engine.viewLines(String(msg.key), items);
       return took && took.ok ? { ok: true } : { missing: took && Array.isArray(took.missing) ? took.missing : [] };
     } catch (err) {
       return { error: String((err && err.message) || err) };
@@ -518,8 +519,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           ...(a.stale === true ? { stale: true } : {}),
           // 1.40: an older reading drawn only till the new one's first sample is in.
           ...(a.staleBase === true && a.stale !== true ? { staleBase: true } : {}),
-          // 1.41: the view's linework, drawn over its scans in the same frame (the drawing area's alone for now).
-          ...(a.slot !== 1 && linesOf(a.lines) ? { lines: linesOf(a.lines) } : {}),
+          // 1.41: the view's linework, drawn over its scans in the same frame (1.46: the split view's other side's too).
+          ...(linesOf(a.lines) ? { lines: linesOf(a.lines) } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };

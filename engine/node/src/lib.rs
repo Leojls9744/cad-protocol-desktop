@@ -1348,7 +1348,9 @@ pub fn view_strokes(key: String, strokes: Vec<ViewStrokeJs>) -> Result<bool> {
 /// are kept (the page names one with each view; a turning view's and a resting one's take turns), and the strips of
 /// those; a batch in none of them is let go (asked for again, the page hears it's missing and gives it again).
 static LINE_STRIPS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::Strips>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static LINE_LISTS: LazyLock<Mutex<Vec<Arc<cadp_engine_view::LineList>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+/// (1.46: each with whose it is: the drawing area's 0, the split view's other side's 1. The newest few are kept for
+/// each, so one view's lists coming fast, a turn's, never push out the list the other is still drawing.)
+static LINE_LISTS: LazyLock<Mutex<Vec<(u32, Arc<cadp_engine_view::LineList>)>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const LINE_LISTS_KEPT: usize = 4;
 
 /// A batch of the page's lines: its segments as strips, nine floats each (its two ends, whether each end is soft, its span).
@@ -1386,9 +1388,10 @@ pub struct ViewLinesTakenJs {
     pub missing: Vec<u32>,
 }
 
-/// A list of the page's lines, kept under `key` for the views that name it.
+/// A list of the page's lines, kept under `key` for the views that name it. `owner` (1.46): whose list it is (the
+/// drawing area's 0, with none; the split view's other side's 1): the newest few of each owner's are kept.
 #[napi]
-pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJs> {
+pub fn view_lines(key: String, items: Vec<ViewLineJs>, owner: Option<u32>) -> Result<ViewLinesTakenJs> {
     let mut strips = LINE_STRIPS.lock().unwrap();
     let mut list = Vec::with_capacity(items.len());
     let mut missing = Vec::new();
@@ -1417,15 +1420,18 @@ pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJ
     if !missing.is_empty() {
         return Ok(ViewLinesTakenJs { ok: false, missing });
     }
+    let owner = owner.unwrap_or(0);
     let made = Arc::new(cadp_engine_view::LineList { key, items: list });
     let mut lists = LINE_LISTS.lock().unwrap();
-    lists.retain(|l| l.key != made.key);
-    lists.push(made);
-    if lists.len() > LINE_LISTS_KEPT {
-        lists.remove(0);
+    lists.retain(|(_, l)| l.key != made.key);
+    lists.push((owner, made));
+    // This owner's oldest, past the few kept.
+    while lists.iter().filter(|(o, _)| *o == owner).count() > LINE_LISTS_KEPT {
+        let Some(at) = lists.iter().position(|(o, _)| *o == owner) else { break };
+        lists.remove(at);
     }
     // Strips no kept list names: let go.
-    strips.retain(|id, _| lists.iter().any(|l| l.items.iter().any(|i| i.strips.id == *id as u64)));
+    strips.retain(|id, _| lists.iter().any(|(_, l)| l.items.iter().any(|i| i.strips.id == *id as u64)));
     Ok(ViewLinesTakenJs { ok: true, missing })
 }
 
@@ -1457,7 +1463,7 @@ fn view_lines_of(ask: &Option<ViewLinesJs>) -> Option<cadp_engine_view::Lines> {
         Some(w) if w.len() == 8 && w.iter().all(|v| v.is_finite()) => Some(cadp_engine_view::LineWorld { right: [w[0], w[1], w[2]], up: [w[3], w[4], w[5]], e: w[6], f: w[7] }),
         _ => None,
     };
-    let list = LINE_LISTS.lock().unwrap().iter().find(|l| l.key == a.key).cloned()?;
+    let list = LINE_LISTS.lock().unwrap().iter().find(|(_, l)| l.key == a.key).map(|(_, l)| l.clone())?;
     // A dot's radius (1.42): the page's, or with none the line's half-width.
     let dot = a.dot.filter(|d| ok(*d, 64.0)).unwrap_or(a.half);
     let thin = a.thin.filter(|t| ok(*t, 64.0)).unwrap_or(0.0);

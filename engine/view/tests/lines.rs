@@ -538,3 +538,54 @@ fn a_filled_shape_s_edges_are_smooth() {
     assert_eq!(pixel(&p, 200, 30, 50), clear);
     assert_eq!(pixel(&p, 200, 30, 60), [255, 255, 255]);
 }
+
+#[test]
+fn two_views_in_a_frame_each_draw_their_own_lines_in_their_own_part() {
+    let Some(mut card) = card() else { return };
+    let gpu = &mut card.gpu;
+    let clear = clear_bytes();
+    let (edl, shading, clip) = (Edl::default(), Shading::default(), Clip::default());
+    let left = Camera { rect: [0.0, 0.0, 150.0, 120.0], ..plan(150.0, 120.0) };
+    let right = Camera { rect: [150.0, 0.0, 150.0, 120.0], ..plan(150.0, 120.0) };
+    // The drawing area's: a white line along row 60 and a green square above it. The other side's: a red line along
+    // row 30, longer than its view is wide.
+    let square: &[[f32; 2]] = &[[20.0, 10.0], [60.0, 10.0], [60.0, 40.0], [20.0, 40.0]];
+    let a = Lines {
+        list: list("lines 0:1", vec![area(1, &[square], [0.0, 1.0, 0.0, 1.0], false), batch(2, &[strip([10.0, 0.0, 0.0], [140.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 1.0, 1.0, 1.0], false)]),
+        scale: 1.0,
+        e: 0.0,
+        f: 60.5,
+        world: None,
+        half: HALF,
+        ratio: 1.0,
+        dot: 0.0,
+        thin: 0.0,
+    };
+    let b = Lines { list: list("lines 1.0:1", vec![batch(3, &[strip([-50.0, 0.0, 0.0], [400.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false)]), scale: 1.0, e: 0.0, f: 30.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
+    let views = [
+        ViewDraw { slot: 0, camera: &left, clouds: &[], edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES, lines: Some(&a) },
+        ViewDraw { slot: 1, camera: &right, clouds: &[], edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES, lines: Some(&b) },
+    ];
+    let p = gpu.picture_views([300, 120], &views, CLEAR).expect("a picture");
+    let at = |x: u32, y: u32| pixel(&p, 300, x, y);
+    // The drawing area's part: its line and its square, none of the other side's.
+    assert_eq!(at(50, 60), [255, 255, 255]);
+    assert_eq!(at(40, 30), [0, 255, 0], "its square (row 30 is inside it: 20.5 to 50.5 down)");
+    assert_eq!(at(100, 30), clear, "not the other side's line");
+    assert_eq!(at(145, 60), clear, "its line ends at 140");
+    // The other side's part, from its own corner: its line all the way across, none of the first's.
+    assert_eq!(at(150, 30), [255, 0, 0]);
+    assert_eq!(at(200, 30), [255, 0, 0]);
+    assert_eq!(at(299, 30), [255, 0, 0]);
+    assert_eq!(at(200, 60), clear, "not the drawing area's line");
+    assert_eq!(at(190, 35), clear, "nor its square");
+    // The other side alone the next frame (the drawing area's lines the page's again): the first's part clear.
+    let views = [
+        ViewDraw { slot: 0, camera: &left, clouds: &[], edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES, lines: None },
+        ViewDraw { slot: 1, camera: &right, clouds: &[], edl: &edl, shading: &shading, clip: &clip, clear: CLEAR, brush: None, strokes: &NO_STROKES, lines: Some(&b) },
+    ];
+    let p = gpu.picture_views([300, 120], &views, CLEAR).expect("a picture");
+    assert_eq!(pixel(&p, 300, 50, 60), clear);
+    assert_eq!(pixel(&p, 300, 40, 30), clear);
+    assert_eq!(pixel(&p, 300, 200, 30), [255, 0, 0]);
+}
