@@ -70,6 +70,23 @@ fn every_point_when_there_s_room_and_an_even_share_when_there_isn_t() {
     // Its own colours, its class and its intensity, for the card to colour by.
     assert!(all.colours);
     assert!(all.data.iter().all(|v| v.rgb == [200, 100, 50] && v.class == 2 && v.intensity == 9));
+    // Unshaded till asked: each point lit as level ground, on its surface, seeing all the sky.
+    assert!(!all.shaded && all.data.iter().all(|v| v.shade == cadp_engine_view::surface::plain()));
+    // Asked for (`shade`): worked out from the points' own shape. The floor's a plane, its slope too
+    // slight to tell from level by its light; nothing on it stands off it or hides the sky.
+    let shade = Keep { shade: true, ..Keep::all() }.keyed();
+    assert_ne!(shade.key, Keep::all().keyed().key);
+    let (lit, _) = sample(&ix, 10_000_000, &shade, &IDENTITY, None);
+    assert!(lit.shaded && lit.data.len() == n);
+    let level = cadp_engine_view::surface::plain()[0] as i32;
+    let range = |k: usize| (lit.data.iter().map(|v| if k == 1 { v.shade[1] as i8 as i32 } else { v.shade[k] as i32 }).min().unwrap(), lit.data.iter().map(|v| if k == 1 { v.shade[1] as i8 as i32 } else { v.shade[k] as i32 }).max().unwrap());
+    // Its light a little over level ground's (it tips toward the light's side, 4°); on its surface; next to all the sky (the rise up the slope hides a sliver).
+    let (light, relief, sky) = (range(0), range(1), range(3));
+    // (But for a patch at the floor's rim that holds one row of this floor's even grid: a line has no one way to face.)
+    let lit_right = lit.data.iter().filter(|v| (v.shade[0] as i32) >= level && (v.shade[0] as i32) <= level + 8).count();
+    assert!(lit_right * 100 >= n * 97 && light.1 <= level + 8, "a plane's light: {light:?} about {level}, {lit_right} of {n}");
+    assert!(relief.0 >= -8 && relief.1 <= 8, "a plane's relief: {relief:?}");
+    assert!(sky.0 >= 240, "a plane's sky: {sky:?}");
     // A tenth: about a tenth, from every part of the floor (each cell's first share).
     let (some, taken) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None);
     assert!(some.data.len() >= n / 10 && some.data.len() <= n / 10 + ix.cells * 2, "{} of {n}, {} cells", some.data.len(), ix.cells);

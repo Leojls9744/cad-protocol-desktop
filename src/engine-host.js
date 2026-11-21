@@ -256,7 +256,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     const out = Array.from(v, (x) => x >>> 0);
     return out.every(Number.isFinite) ? out : undefined;
   };
-  /** A scan's look as the page gave it (1.36), only what the engine reads. */
+  /** A scan's look as the page gave it (1.36; 1.37: its shading from the shape of its surface), only what the engine reads. */
   function lookOf(l) {
     if (!l || typeof l !== "object") return undefined;
     return {
@@ -268,6 +268,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       ...(nums(l.intensity, 2) ? { intensity: nums(l.intensity, 2) } : {}),
       ...(nums(l.mix, 3) ? { mix: nums(l.mix, 3) } : {}),
       ...(table(l.classes) ? { classes: table(l.classes) } : {}),
+      ...(nums(l.shade, 3) ? { shade: nums(l.shade, 3) } : {}),
     };
   }
 
@@ -345,6 +346,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           // 1.36: eye-dome lighting as the page has it, and how long the ask is held so the page's own picture lands with it.
           edl: nums(a.edl, 4),
           holdMs: typeof a.holdMs === "number" && a.holdMs > 0 ? a.holdMs : undefined,
+          // 1.37: depth shading, relief and face shading, each as the page's own factor.
+          shade: nums(a.shade, 3),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };

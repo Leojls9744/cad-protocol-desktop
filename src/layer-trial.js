@@ -407,8 +407,8 @@ const CLASS_FLOOR = [200, 120, 40];
  * it, where the frame's page was magenta), then the check's scan from
  * overhead: by height (its post's top the high colour at the middle, its
  * floor the low one beside it), by class with the post's layer off, with
- * eye-dome lighting, and kept undrawn; and how it went (frames drawn, the
- * card's name).
+ * eye-dome lighting, shaded as the page shades (1.37), and kept undrawn;
+ * and how it went (frames drawn, the card's name).
  */
 async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
   const out = {};
@@ -499,8 +499,21 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       const floorDarkened = (p) => p[0] < CLASS_FLOOR[0] - 40 && p[1] > 30 && p[1] < CLASS_FLOOR[1] - 20;
       out.litDrawn = near(out.litPixels.away, CLASS_FLOOR, 12) && beside.some(floorDarkened);
     }
+    // Shaded as the page shades (1.37): its points lit by the shape of their surface (level ground stays its
+    // colour), depth shading (the floor at the post's foot in a fold: darker) and face shading (the post's own
+    // pixels stand steep against Z: darker); the floor away from the post as it was.
+    const postOn = table.map((v, c) => (c === 5 ? (175 | (175 << 8) | (175 << 16) | (255 << 24)) >>> 0 : v));
+    const shaded = await showAndLook(11, { look: { by: 1, px: 5 * k, classes: postOn, shade: [100, 100, 100] } }, { shade: [0.14, 0, 0.6] }, png ? png.replace(/\.png$/, ".shade.png") : null);
+    out.shaded = shaded.stats;
+    if (shaded.picture) {
+      const beside = [];
+      for (let dx = -9; dx <= -2; dx += 1) beside.push(shaded.picture.at(cx + dx, cy));
+      out.shadePixels = { beside, post: shaded.picture.at(cx, cy), away: shaded.picture.at(cx - 100, cy + 30) };
+      const inFold = (p) => p[0] < CLASS_FLOOR[0] - 90 && p[0] > p[2];
+      out.shadeDrawn = near(out.shadePixels.away, CLASS_FLOOR, 12) && beside.some(inFold) && out.shadePixels.post[0] < 130 && out.shadePixels.post[0] > 30;
+    }
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await showAndLook(10, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    const hidden = await showAndLook(12, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;
     if (hidden.picture) {
       out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };

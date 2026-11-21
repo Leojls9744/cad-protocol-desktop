@@ -1224,6 +1224,8 @@ pub struct ViewLookJs {
     pub mix: Option<Vec<f64>>,
     /// Each class's colour and whether its layer shows: 256 numbers, red | green << 8 | blue << 16 | shown << 24.
     pub classes: Option<Vec<u32>>,
+    /// The shading from the shape of the points' surface (1.37), each 0 to 100 as the page's settings: lighting, detail and hollows. Any over 0: worked out as the points are read.
+    pub shade: Option<Vec<f64>>,
 }
 
 /// A scan to draw: its handle, its file's coordinates into the drawing (12 numbers), about how many points at most, which of them and how they look.
@@ -1269,6 +1271,8 @@ pub struct ViewAskJs {
     pub edl: Option<Vec<f64>>,
     /// How long the ask is held before it's shown, ms (1.36): the page's own picture lands that much later.
     pub hold_ms: Option<f64>,
+    /// The shading from the picture's depths (1.37), each as the page's own factor: depth shading (shadingFactor), relief (reliefFactor) and face shading (faceFactor).
+    pub shade: Option<Vec<f64>>,
 }
 
 #[napi(object)]
@@ -1282,6 +1286,8 @@ pub struct ViewStatsJs {
     pub worst_ms: f64,
     pub points: f64,
     pub load_ms: f64,
+    /// Of that, working out the points' shading from their surfaces, ms (1.37).
+    pub shade_ms: f64,
     pub width: u32,
     pub height: u32,
     pub adapter: String,
@@ -1342,6 +1348,9 @@ fn view_look(look: &Option<ViewLookJs>, allow: &Option<Vec<u32>>, px: Option<f64
         for (entry, v) in out.classes.iter_mut().zip(classes) {
             *entry = [(*v & 255) as u8, (*v >> 8 & 255) as u8, (*v >> 16 & 255) as u8, (*v >> 24 & 255) as u8];
         }
+    }
+    if let Some(sh) = view_three(&l.shade) {
+        out.shade = [(sh[0] / 100.0).clamp(0.0, 1.0) as f32, (sh[1] / 100.0).clamp(0.0, 1.0) as f32, (sh[2] / 100.0).clamp(0.0, 1.0) as f32];
     }
     out
 }
@@ -1460,6 +1469,8 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
             let hi = index.file_xyz(index.max[0], index.max[1], index.max[2]);
             look.heights = [affine[10] * lo[2] + affine[11], affine[10] * hi[2] + affine[11]];
         }
+        // Lit by the shape of its surface: that's worked out as its points are read.
+        keep.shade = look.shade.iter().any(|v| *v > 0.0);
         scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep: keep.keyed(), look });
     }
     let shown = scans.len() as u32;
@@ -1467,6 +1478,10 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     let edl = match ask.edl.as_ref().filter(|e| e.len() == 4 && e.iter().all(|v| v.is_finite())) {
         Some(e) => cadp_engine_view::Edl { strength: e[0], radius: e[1], eye: e[2], noise: e[3] },
         None => cadp_engine_view::Edl::default(),
+    };
+    let shading = match view_three(&ask.shade) {
+        Some(s) => cadp_engine_view::Shading { depth: s[0].max(0.0), relief: s[1].max(0.0), faces: s[2].clamp(0.0, 1.0) },
+        None => cadp_engine_view::Shading::default(),
     };
     view.show(cadp_engine_view::Ask {
         camera,
@@ -1476,6 +1491,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         hide: ask.hide.unwrap_or(false),
         serial,
         edl,
+        shading,
         hold_ms: ask.hold_ms.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0),
     });
     Ok(shown)
@@ -1494,6 +1510,7 @@ pub fn view_stats() -> ViewStatsJs {
         worst_ms: s.worst_ms,
         points: s.points as f64,
         load_ms: s.load_ms,
+        shade_ms: s.shade_ms,
         width: s.size[0],
         height: s.size[1],
         adapter: s.adapter,

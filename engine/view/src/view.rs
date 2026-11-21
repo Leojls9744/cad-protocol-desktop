@@ -17,7 +17,7 @@
 //! them.
 
 use crate::camera::{Affine, Camera};
-use crate::gpu::{Cloud, Edl, Look, Sender};
+use crate::gpu::{Cloud, Edl, Look, Sender, Shading};
 use crate::scene::{sample, wanted, Keep, Sight, Taken};
 use cadp_engine_core::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +53,8 @@ pub struct Ask {
     pub serial: u64,
     /// Eye-dome lighting, as the page has it.
     pub edl: Edl,
+    /// Depth shading, relief and face shading, as the page has them.
+    pub shading: Shading,
     /// How long it's held before it's shown, ms: the page's own picture
     /// (its linework, over the scans) reaches the screen a refresh or so
     /// after the page paints it, and the two are to land together.
@@ -75,6 +77,8 @@ pub struct Stats {
     pub points: u64,
     /// The last sample's reading and sending, ms.
     pub load_ms: f64,
+    /// Of that, working out its points' shading from their surfaces, ms.
+    pub shade_ms: f64,
     pub size: [u32; 2],
     pub adapter: String,
     pub error: Option<String>,
@@ -86,11 +90,17 @@ pub struct Stats {
     pub drawn: u64,
 }
 
-/// What tells one scan's points on the card from another's: the scan, how many, and which of them.
+/// What tells one scan's points on the card from another's: the scan, how
+/// many, and which of them; with their shading worked out, which way round
+/// the scan is in the drawing too (the light is the drawing's north-west).
 type ScanKey = (u32, usize, String);
 
 fn key_of(s: &ScanAsk) -> ScanKey {
-    (s.handle, s.most, s.keep.key.clone())
+    let key = match crate::surface::turn_of(&s.affine).filter(|_| s.keep.shade) {
+        Some(turn) => format!("{}|{:?}", s.keep.key, turn.map(|v| (v * 1e9).round() as i64)),
+        None => s.keep.key.clone(),
+    };
+    (s.handle, s.most, key)
 }
 
 /// A scan's base is this share of its points' budget (the rest is for the view's detail), and never under BASE_LEAST where the budget's that much.
@@ -120,6 +130,7 @@ struct Done {
     cloud: Cloud,
     taken: Taken,
     ms: f64,
+    shade_ms: f64,
 }
 
 struct LoaderShared {
@@ -214,8 +225,9 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
             None => read(),
         };
         let cloud = sender.upload(&points);
+        let shade_ms = points.shade_ms;
         drop(points);
-        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some(), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0 });
+        shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some(), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0, shade_ms });
         shared.busy.store(false, Ordering::SeqCst);
     }
 }
@@ -237,14 +249,15 @@ pub struct Stage {
     seen: Option<Camera>,
     changed_at: Instant,
     looked_at: Instant,
-    /// The last sample's reading and sending, ms.
+    /// The last sample's reading and sending, ms, and its shading's share of that.
     pub load_ms: f64,
+    pub shade_ms: f64,
 }
 
 impl Stage {
     pub fn new(sender: Sender) -> Result<Stage, String> {
         let now = Instant::now();
-        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), looked: None, seen: None, changed_at: now, looked_at: now, load_ms: 0.0 })
+        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), looked: None, seen: None, changed_at: now, looked_at: now, load_ms: 0.0, shade_ms: 0.0 })
     }
 
     /// Whether a sample is being read now.
@@ -271,6 +284,7 @@ impl Stage {
                 continue;
             }
             self.load_ms = done.ms;
+            self.shade_ms = done.shade_ms;
             let at = match self.held.iter().position(|h| h.key == done.key) {
                 Some(k) => k,
                 None => {
@@ -333,7 +347,12 @@ impl Stage {
         Ok(changed)
     }
 
-    /// The points to draw for the ask: each scan's base, and its detail over it.
+    /// The points to draw for the ask: each scan's detail for the view, then
+    /// its base. A point of the base in the view is one of the detail's
+    /// too, at the same place; the first drawn there stays, so it's the
+    /// detail's shading that shows (worked out from all the points round
+    /// it, where the base's is from a sixth of them), and the base's only
+    /// where the detail doesn't reach.
     pub fn list<'a>(&'a self, ask: &'a Ask) -> Vec<(&'a Cloud, Affine, &'a Look)> {
         let mut out = Vec::new();
         if ask.hide {
@@ -343,10 +362,10 @@ impl Stage {
             let key = key_of(s);
             let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
             if let Some(base) = &h.base {
-                out.push((base, s.affine, &s.look));
                 if let Some((detail, _)) = &h.detail {
                     out.push((detail, s.affine, &s.look));
                 }
+                out.push((base, s.affine, &s.look));
             }
         }
         out
@@ -588,7 +607,9 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
         // The scans' points, read by the loader while frames go on: what's come is on the card from this frame.
         if stage.step(&ask)? {
             dirty = true;
-            shared.stats.lock().unwrap().load_ms = stage.load_ms;
+            let mut stats = shared.stats.lock().unwrap();
+            stats.load_ms = stage.load_ms;
+            stats.shade_ms = stage.shade_ms;
         }
         if ask.test && ring.is_none() {
             ring = Some(gpu.upload(&test_ring(6000, [0.0, 0.0, 0.0])));
@@ -639,14 +660,14 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
                 rect: [0.0, 0.0, size[0] as f64, size[1] as f64],
             };
             points = ring.count as u64;
-            gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY, &ring_look)], &Edl::default(), CLEAR);
+            gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY, &ring_look)], &Edl::default(), &Shading::default(), CLEAR);
         } else {
             let list = stage.list(&ask);
             points = list.iter().map(|(c, _, _)| c.count as u64).sum::<u64>().max(points);
             if ask.camera.is_some() && !ask.hide {
                 drew = stage.held(&ask);
             }
-            gpu.draw(&target, size, ask.camera.as_ref(), &list, &ask.edl, clear);
+            gpu.draw(&target, size, ask.camera.as_ref(), &list, &ask.edl, &ask.shading, clear);
         }
         frame.present();
         dirty = false;

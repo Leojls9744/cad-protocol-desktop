@@ -554,11 +554,11 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
           most: 7,
           map: new Uint8Array(256).fill(3),
           borrow: "its classes",
-          look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, junk: "left out" },
+          look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50], junk: "left out" },
         },
-        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { by: -1, px: 0, classes: [1, 2] }, map: [1, 2] },
+        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { by: -1, px: 0, classes: [1, 2], shade: [60, 55] }, map: [1, 2] },
       ],
-      ask: { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [0, 0, 300, 200], edl: [1, 1.4, 16.5, 0.0066], holdMs: 16.6 },
+      ask: { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [0, 0, 300, 200], edl: [1, 1.4, 16.5, 0.0066], holdMs: 16.6, shade: [0.14, 0, 0.3] },
     },
   });
   const looked = calls.at(-1)[1];
@@ -568,12 +568,15 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
     most: 7,
     map: new Array(256).fill(3),
     borrow: "its classes",
-    look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes },
+    // 1.37: its shading from the shape of its surface (lighting, detail, hollows).
+    look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50] },
   });
   // What isn't as the engine reads it is left out (it draws by what it's given, or as 1.35 did).
   assert.deepEqual(looked.scans[1], { handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { round: false } });
   assert.deepEqual(looked.edl, [1, 1.4, 16.5, 0.0066]);
   assert.equal(looked.holdMs, 16.6);
+  // 1.37: depth shading, relief and face shading with the view.
+  assert.deepEqual(looked.shade, [0.14, 0, 0.3]);
   // The page's own classes for a scan: their classes alone first (the engine says their places are needed), then with their places.
   const cls = new Uint8Array([2, 6]);
   const gone = new Uint8Array([0, 1]);

@@ -1,7 +1,7 @@
 //! A frame drawn on the card into a picture and read back: the check's ring
 //! where the view puts it, and a scan's sample from its index.
 
-use cadp_engine_view::{test_ring, Camera, Edl, Gpu, Look, PointVertex, Points, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
+use cadp_engine_view::{test_ring, Camera, Edl, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
 
 /// One test draws at a time: the build computer's stand-in for a card (Windows' own, on the processor) has
 /// stopped the whole run when several tests each started and ended a card of their own at once. The app has one.
@@ -61,7 +61,7 @@ fn plan(size: f64) -> Camera {
 }
 
 fn point(x: f32, y: f32, z: f32, rgb: [u8; 3], class: u8, intensity: u16) -> PointVertex {
-    PointVertex { pos: [x, y, z], rgb, class, intensity, setup: 0 }
+    PointVertex { pos: [x, y, z], rgb, class, intensity, setup: 0, shade: cadp_engine_view::surface::plain() }
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn the_ring_is_drawn_where_the_view_puts_it() {
         rect: [100.0, 0.0, 300.0, 300.0],
     };
     let look = Look { px: 3.0, ..Look::own() };
-    let picture = gpu.picture([400, 300], Some(&cam), &[(&ring, IDENTITY, &look)], &Edl::default(), CLEAR).expect("a picture");
+    let picture = gpu.picture([400, 300], Some(&cam), &[(&ring, IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
     assert_eq!(picture.len(), 400 * 300 * 4);
     // The drawing area's middle is pixel 250, 150; the ring's is 40 px right of it: its white dot.
     assert!(near(pixel(&picture, 400, 290, 150), [255, 255, 255], 2), "{:?}", pixel(&picture, 400, 290, 150));
@@ -118,13 +118,13 @@ fn nearer_points_cover_further_ones_and_no_view_draws_the_background() {
     let look = Look { px: 4.0, ..Look::own() };
     // Whichever is drawn first, the higher (nearer the eye, from overhead) shows.
     for order in [[&low, &high], [&high, &low]] {
-        let picture = gpu.picture([200, 200], Some(&cam), &[(order[0], IDENTITY, &look), (order[1], IDENTITY, &look)], &Edl::default(), CLEAR).expect("a picture");
+        let picture = gpu.picture([200, 200], Some(&cam), &[(order[0], IDENTITY, &look), (order[1], IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
         assert!(near(pixel(&picture, 200, 100, 100), [255, 0, 0], 2), "{:?}", pixel(&picture, 200, 100, 100));
     }
-    let empty = gpu.picture([64, 64], None, &[(&low, IDENTITY, &look)], &Edl::default(), CLEAR).expect("a picture");
+    let empty = gpu.picture([64, 64], None, &[(&low, IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
     assert!(near(pixel(&empty, 64, 32, 32), clear_bytes(), 2));
     // A background of the page's own.
-    let own = gpu.picture([64, 64], None, &[], &Edl::default(), [0.2, 0.4, 0.6, 1.0]).expect("a picture");
+    let own = gpu.picture([64, 64], None, &[], &Edl::default(), &Shading::default(), [0.2, 0.4, 0.6, 1.0]).expect("a picture");
     assert!(near(pixel(&own, 64, 5, 60), [51, 102, 153], 1));
 }
 
@@ -138,10 +138,10 @@ fn points_are_coloured_as_the_page_colours_them() {
         point(20.0, 0.0, 20.0, [10, 10, 200], 7, 2000),
         point(60.0, 0.0, 30.0, [200, 200, 10], 2, 4000),
     ];
-    let cloud = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: true, data: data.clone() });
+    let cloud = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: true, shaded: false, shade_ms: 0.0, data: data.clone() });
     let cam = Camera { target: [1000.0, 2000.0, 50.0], ..plan(200.0) };
     let at = |k: usize| 100 + [-60i32, -20, 20, 60][k];
-    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
     let base = Look { px: 9.0, ..Look::own() };
     // Their own colours.
     let p = shot(&mut gpu, &cloud, &base);
@@ -170,7 +170,7 @@ fn points_are_coloured_as_the_page_colours_them() {
     // A third of the way: between the third and fourth colours (35, 136, 142).
     assert!(near(pixel(&p, 200, at(1) as u32, 100), [35, 136, 142], 2), "{:?}", pixel(&p, 200, at(1) as u32, 100));
     // A scan with no colours of its own, asked for them: by height.
-    let plain = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: false, data: data.clone() });
+    let plain = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: false, shaded: false, shade_ms: 0.0, data: data.clone() });
     let p = shot(&mut gpu, &plain, &Look { heights: [50.0, 80.0], ..base });
     assert!(near(pixel(&p, 200, at(3) as u32, 100), [189, 223, 38], 2));
     // By intensity, read on 100 to 2000: 40 at the weakest, 255 at and past the strongest.
@@ -208,10 +208,10 @@ fn eye_dome_lighting_darkens_where_the_ground_steps_as_the_pages_does() {
             data.push(point(i as f32 + 0.5, j as f32 + 0.5, if i >= 0 { 10.0 } else { 0.0 }, [200, 200, 200], 2, 0));
         }
     }
-    let cloud = gpu.upload(&Points { centre: [0.0, 0.0, 0.0], radius: 100.0, colours: true, data });
+    let cloud = gpu.upload(&Points { centre: [0.0, 0.0, 0.0], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, data });
     let cam = plan(200.0);
     let look = Look { px: 2.0, ..Look::own() };
-    let shot = |gpu: &mut Gpu, edl: &Edl| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], edl, CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, edl: &Edl| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], edl, &Shading::default(), CLEAR).expect("a picture");
     // Off: every point its own colour.
     let flat = shot(&mut gpu, &Edl::default());
     assert!(near(pixel(&flat, 200, 99, 100), [200, 200, 200], 1));
@@ -236,6 +236,166 @@ fn eye_dome_lighting_darkens_where_the_ground_steps_as_the_pages_does() {
     let v = pixel(&soft, 200, 94 + dark[0] as u32, 100)[0];
     assert!(v > darkest + 20 && v < 190, "{v}");
     // Where there's no point: the background, not darkened.
-    let far = gpu.picture([200, 200], Some(&Camera { target: [500.0, 0.0, 0.0], ..cam }), &[(&cloud, IDENTITY, &look)], &edl, CLEAR).expect("a picture");
+    let far = gpu.picture([200, 200], Some(&Camera { target: [500.0, 0.0, 0.0], ..cam }), &[(&cloud, IDENTITY, &look)], &edl, &Shading::default(), CLEAR).expect("a picture");
     assert!(near(pixel(&far, 200, 100, 100), clear_bytes(), 1));
+}
+
+/// A colour's byte made `f` times as bright in linear light, as the page's shadeDetail makes it.
+fn brightened(v: u8, f: f64) -> u8 {
+    let c = v as f64 / 255.0;
+    let linear = if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let t = (linear * f).min(1.0);
+    let s = if t <= 0.0031308 { t * 12.92 } else { 1.055 * t.powf(1.0 / 2.4) - 0.055 };
+    (s.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+#[test]
+fn points_are_brightened_and_darkened_by_the_shape_of_their_surface_as_the_page_s_are() {
+    let Some(mut gpu) = card() else { return };
+    // Six points 30 apart, each with its own shading: nothing known; lit full on; well below the surface
+    // round it; on an edge; half the sky hidden; and a dark one well below its surface.
+    let shades: [[u8; 4]; 6] = [cadp_engine_view::surface::plain(), [255, 0, 0, 255], [214, (-127i8) as u8, 0, 255], [214, 0, 255, 255], [214, 0, 0, 128], [214, (-127i8) as u8, 0, 255]];
+    let colour = |k: usize| if k == 5 { [8, 8, 8] } else { [180, 120, 60] };
+    let data: Vec<PointVertex> = shades.iter().enumerate().map(|(k, s)| PointVertex { shade: *s, ..point(k as f32 * 30.0 - 75.0, 0.0, 0.0, colour(k), 2, 0) }).collect();
+    let shaded = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: true, shade_ms: 0.0, data: data.clone() });
+    let cam = plan(200.0);
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let at = |p: &[u8], k: usize| pixel(p, 200, (100.0 + k as f32 * 30.0 - 75.0) as u32, 100);
+    let base = Look { px: 9.0, ..Look::own() };
+    // No strengths: each its own colour.
+    let p = shot(&mut gpu, &shaded, &base);
+    for k in 0..6 {
+        assert!(near(at(&p, k), colour(k), 1), "{k}: {:?}", at(&p, k));
+    }
+    // The page's start: lighting 60, detail 55, hollows 50.
+    let look = Look { shade: [0.6, 0.55, 0.5], ..base };
+    let p = shot(&mut gpu, &shaded, &look);
+    let level = cadp_engine_view::surface::light_level();
+    let lit = |light: f64| (1.0 + 0.6 * (light / 255.0 - level)).clamp(0.75, 1.25);
+    let factors = [
+        lit(214.0),
+        lit(255.0),
+        lit(214.0) * (1.0f64 - 0.55 * 0.55).clamp(0.7, 1.3),
+        lit(214.0) * (1.0f64 - 0.55 * 0.2).clamp(0.88, 1.0),
+        lit(214.0) * (1.0f64 - 0.5 * 2.0 * (1.0 - 128.0 / 255.0)).max(0.5),
+        lit(214.0) * (1.0f64 - 0.55 * 0.55).clamp(0.7, 1.3),
+    ];
+    for k in 0..6 {
+        let c = colour(k);
+        let want = [brightened(c[0], factors[k]), brightened(c[1], factors[k]), brightened(c[2], factors[k])];
+        assert!(near(at(&p, k), want, 2), "{k}: {:?} for {want:?} (×{:.3})", at(&p, k), factors[k]);
+    }
+    // Level ground's light leaves a colour as it is; full on is brighter; the rest darker.
+    assert!(near(at(&p, 0), [180, 120, 60], 1));
+    assert!(at(&p, 1)[0] > 185 && at(&p, 2)[0] < 160 && at(&p, 3)[0] < 175 && at(&p, 4)[0] < 140);
+    // Each strength its own: lighting alone leaves the hollow and the edge as they were.
+    let p = shot(&mut gpu, &shaded, &Look { shade: [0.6, 0.0, 0.0], ..base });
+    assert!(near(at(&p, 3), [180, 120, 60], 1) && near(at(&p, 4), [180, 120, 60], 1) && at(&p, 1)[0] > 185);
+    // Points whose shading wasn't worked out are drawn as they are, whatever's asked.
+    let plain = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, data });
+    let p = shot(&mut gpu, &plain, &look);
+    for k in 0..6 {
+        assert!(near(at(&p, k), colour(k), 1), "{k}: {:?}", at(&p, k));
+    }
+}
+
+/// A floor of grey points a unit apart (a pixel each in the plan view), each one's height by where it is.
+fn ground(height: impl Fn(f32, f32) -> f32) -> Points {
+    let mut data = Vec::new();
+    for i in -80..80 {
+        for j in -80..80 {
+            let (x, y) = (i as f32 + 0.5, j as f32 + 0.5);
+            data.push(point(x, y, height(x, y), [200, 200, 200], 2, 0));
+        }
+    }
+    Points { centre: [0.0, 0.0, 0.0], radius: 400.0, colours: true, shaded: false, shade_ms: 0.0, data }
+}
+
+#[test]
+fn depth_shading_darkens_a_fold_and_leaves_a_slope_as_the_pages_does() {
+    let Some(mut gpu) = card() else { return };
+    // West of x = 20 a slope down to the east (4 a unit), then level ground: a fold along x = 20, its
+    // foot the level ground's first point. East of x = 50 a slope up (1 a unit).
+    let cloud = gpu.upload(&ground(|x, _| if x < 20.0 { (20.0 - x) * 4.0 } else if x > 50.0 { x - 50.0 } else { 0.0 }));
+    let cam = plan(200.0);
+    let look = Look { px: 1.0, ..Look::own() };
+    let shot = |gpu: &mut Gpu, shading: &Shading| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], &Edl::default(), shading, CLEAR).expect("a picture");
+    let grey = |p: &[u8], x: u32| pixel(p, 200, x, 100)[0];
+    // Off: every point its own colour.
+    let off = shot(&mut gpu, &Shading::default());
+    assert!((60..180).all(|x| grey(&off, x) == 200));
+    // The page's strongest (100: 0.7): the fold's foot (the pixel at x 20.5) has the slope's first point
+    // 2 nearer on its west and level ground on its east: half of 2 a pixel, less the noise's half: 0.5.
+    let on = shot(&mut gpu, &Shading { depth: 0.7, ..Shading::default() });
+    let foot = (200.0 * (-0.7f64 * 0.5).exp()).round() as i32;
+    assert!((grey(&on, 120) as i32 - foot).abs() <= 1, "the fold's foot: {} for {foot}", grey(&on, 120));
+    // The slopes either side, the level ground between, and the second fold's far gentler foot (half of 1, the noise's worth): as they were.
+    for x in [70, 100, 110, 118, 122, 135, 149, 150, 151, 160, 175] {
+        assert_eq!(grey(&on, x), 200, "at {x}");
+    }
+    // Weaker (the page's start, 20: 0.14): lighter than the strongest, darker than none.
+    let soft = shot(&mut gpu, &Shading { depth: 0.14, ..Shading::default() });
+    let want = (200.0 * (-0.14f64 * 0.5).exp()).round() as i32;
+    assert!((grey(&soft, 120) as i32 - want).abs() <= 1, "{} for {want}", grey(&soft, 120));
+    // Bigger points look further off for a neighbour (a point's width away, not the point's own square).
+    assert_eq!(cadp_engine_view::shading_reach(1.0), (1.0, 2.0));
+    assert_eq!(cadp_engine_view::shading_reach(2.0), (2.0, 5.0));
+    assert_eq!(cadp_engine_view::shading_reach(40.0), (24.0, 24.0));
+}
+
+#[test]
+fn relief_lights_a_slope_from_the_upper_left_and_face_shading_darkens_a_steep_one() {
+    let Some(mut gpu) = card() else { return };
+    // Four slopes of 0.2 a unit about a level middle: up to the west, east, north and south.
+    let cloud = gpu.upload(&ground(|x, y| {
+        if x.abs() < 20.0 && y.abs() < 20.0 {
+            0.0
+        } else if x.abs() > y.abs() {
+            (x.abs() - 20.0) * 0.2
+        } else {
+            (y.abs() - 20.0) * 0.2
+        }
+    }));
+    let cam = plan(200.0);
+    let look = Look { px: 1.0, ..Look::own() };
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, cam: &Camera, shading: &Shading| gpu.picture([200, 200], Some(cam), &[(cloud, IDENTITY, &look)], &Edl::default(), shading, CLEAR).expect("a picture");
+    // Relief at 50 (the slopes steepened 3 times): the light's from the upper left, 45° up.
+    let p = shot(&mut gpu, &cloud, &cam, &Shading { relief: 3.0, ..Shading::default() });
+    let lit = |gx: f64, gy: f64| {
+        let n = [-gx * 3.0, -gy * 3.0, 1.0];
+        let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
+        ((n[0] * -0.5 + n[1] * 0.5 + std::f64::consts::FRAC_1_SQRT_2) / len / std::f64::consts::FRAC_1_SQRT_2).clamp(0.45, 1.35)
+    };
+    let grey = |p: &[u8], x: u32, y: u32| pixel(p, 200, x, y)[0] as i32;
+    let want = |f: f64| (200.0 * f).min(255.0).round() as i32;
+    // Level: as it was.
+    assert_eq!(grey(&p, 100, 100), 200);
+    // East of the middle the ground rises to the east (nearer to the right): it faces west, toward the light's side.
+    assert!((grey(&p, 160, 100) - want(lit(0.2, 0.0))).abs() <= 2, "east: {} for {}", grey(&p, 160, 100), want(lit(0.2, 0.0)));
+    assert!((grey(&p, 40, 100) - want(lit(-0.2, 0.0))).abs() <= 2, "west: {} for {}", grey(&p, 40, 100), want(lit(-0.2, 0.0)));
+    // North (up the screen) it rises upward: it faces down the screen, away from the light above.
+    assert!((grey(&p, 100, 40) - want(lit(0.0, 0.2))).abs() <= 2, "north: {} for {}", grey(&p, 100, 40), want(lit(0.0, 0.2)));
+    assert!((grey(&p, 100, 160) - want(lit(0.0, -0.2))).abs() <= 2, "south: {} for {}", grey(&p, 100, 160), want(lit(0.0, -0.2)));
+    assert!(grey(&p, 160, 100) > 215 && grey(&p, 100, 160) > 215 && grey(&p, 40, 100) < 120 && grey(&p, 100, 40) < 120);
+    // Face shading at 100 (0.6 of a wall's darkening): a slope of 1 in 1 stands 45° against Z.
+    let steep = gpu.upload(&ground(|x, _| if x > 0.0 { x } else { 0.0 }));
+    let faces = Shading { faces: 0.6, ..Shading::default() };
+    let p = shot(&mut gpu, &steep, &cam, &faces);
+    assert_eq!(grey(&p, 60, 100), 200);
+    let slope = want(1.0 - 0.6 * (1.0 - std::f64::consts::FRAC_1_SQRT_2));
+    assert!((grey(&p, 150, 100) - slope).abs() <= 1, "a 45° slope: {} for {slope}", grey(&p, 150, 100));
+    // The crease stays a crease: the level ground's last point takes the level side's way, not a blend.
+    assert_eq!(grey(&p, 99, 100), 200);
+    // Level ground looked at from the south, 40° down from overhead: still level against Z (its depth
+    // falls away up the screen, which is the view's doing, not the ground's), so as it was.
+    let (s, c) = (40f64.to_radians().sin(), 40f64.to_radians().cos());
+    let tilted = Camera { target: [0.0, 0.0, 0.0], right: [1.0, 0.0, 0.0], up: [0.0, c, s], to_eye: [0.0, -s, c], units_per_pixel: 1.0, rect: [0.0, 0.0, 200.0, 200.0] };
+    let level = gpu.upload(&ground(|_, _| 0.0));
+    let p = shot(&mut gpu, &level, &tilted, &faces);
+    for (x, y) in [(100, 100), (70, 80), (130, 120)] {
+        assert!((grey(&p, x, y) - 200).abs() <= 3, "level ground from the side at {x}, {y}: {}", grey(&p, x, y));
+    }
+    // And a wall there (the slope of 1 in 1 from this side is steeper still against the eye, the same against Z).
+    let p = shot(&mut gpu, &steep, &tilted, &faces);
+    assert!((grey(&p, 150, 100) - slope).abs() <= 8, "the slope from the side: {} for {slope}", grey(&p, 150, 100));
 }

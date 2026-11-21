@@ -6,17 +6,23 @@
 //! own colour, its class's (a table of 256, each with whether its layer
 //! shows, so a class turned off or recoloured sends no points again), its
 //! height, its intensity or one colour, with its intensity mixed in as the
-//! page mixes it. Nearer points cover further ones (a depth buffer).
+//! page mixes it, then brightened or darkened by the shape of the surface
+//! it's on (its lighting, relief, edges and hollows: surface.rs's four
+//! bytes, at the strengths the view asks for). Nearer points cover further
+//! ones (a depth buffer).
 //!
 //! A frame is two passes: the points into a picture of the engine's own
-//! with their depths, then that picture onto the window with eye-dome
-//! lighting from the depths (the page's own form, cloud-gl.ts eyeDome),
-//! and the background wherever there's no point. Drawn onto a window's
-//! surface, or into a picture read back (the tests', and the build's check
-//! where there's no window).
+//! with their depths, then that picture onto the window shaded from the
+//! depths as the page shades its own (cloud-gl.ts): depth shading (folds
+//! darker), relief (lit from the upper left by the slope), face shading
+//! (steep faces darker against Z) and eye-dome lighting, with the
+//! background wherever there's no point. Drawn onto a window's surface, or
+//! into a picture read back (the tests', and the build's check where
+//! there's no window).
 
 use crate::camera::{columns, Affine, Camera};
 use crate::scene::{PointVertex, Points, RAMP};
+use crate::surface;
 
 /// What the page behind shows where nothing's drawn: the drawing's own background is the page's to give.
 pub const CLEAR: [f64; 4] = [0.043, 0.063, 0.125, 1.0];
@@ -47,12 +53,14 @@ pub struct Look {
     pub mix: [f32; 3],
     /// Each class's colour (red, green, blue) and whether it shows (0: its layer is off).
     pub classes: [[u8; 4]; 256],
+    /// The surface shading's strengths, 0 to 1: lighting, detail (relief and edges) and hollows.
+    pub shade: [f32; 3],
 }
 
 impl Look {
     /// Its own colours, every class showing, squares of 2 px.
     pub fn own() -> Look {
-        Look { by: BY_OWN, px: 2.0, round: false, one: [1.0; 3], heights: [0.0, 1.0], intensity: [0.0, 65535.0], mix: [0.0, 1.0, 0.0], classes: [[175, 175, 175, 255]; 256] }
+        Look { by: BY_OWN, px: 2.0, round: false, one: [1.0; 3], heights: [0.0, 1.0], intensity: [0.0, 65535.0], mix: [0.0, 1.0, 0.0], classes: [[175, 175, 175, 255]; 256], shade: [0.0; 3] }
     }
 }
 
@@ -67,6 +75,35 @@ pub struct Edl {
 
 /// The darkest eye-dome lighting makes a pixel (the page's EYE_DOME_DARKEST).
 pub const EDL_DARKEST: f32 = 0.45;
+
+/// The page's shading from the picture's depths, each as the page's own
+/// factor (cloud-shading.ts): depth shading (shadingFactor: a pixel in a
+/// fold darker), relief (reliefFactor: lit from the upper left by the
+/// slope) and face shading (faceFactor: steep faces darker against Z). 0:
+/// none.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Shading {
+    pub depth: f64,
+    pub relief: f64,
+    pub faces: f64,
+}
+
+/// The most one direction's fold counts, pixels of depth (the page's SHADING_CAP), a fold this small is the scanner's noise (SHADING_NOISE), and the share of a slope put down to the points' squares (SHADING_GRAIN).
+pub const SHADING_CAP: f32 = 12.0;
+pub const SHADING_NOISE: f32 = 0.5;
+pub const SHADING_GRAIN: f32 = 1.0;
+/// The farthest the shading looks for a neighbouring point, pixels (SHADING_REACH_MOST).
+pub const SHADING_REACH_MOST: f64 = 24.0;
+/// Relief: a slope steeper than this counts as this, and the darkest and brightest it makes a pixel.
+pub const RELIEF_STEEPEST: f32 = 4.0;
+pub const RELIEF_LOW: f32 = 0.45;
+pub const RELIEF_HIGH: f32 = 1.35;
+
+/// Where (pixels away) a neighbouring point is looked for, for points `px` pixels across: from a point's width to two more (the page's shadingReach).
+pub fn shading_reach(px: f64) -> (f64, f64) {
+    let first = (px + 0.5).floor().clamp(1.0, SHADING_REACH_MOST);
+    (first, (first + (2.0 * first).max(2.0) - 1.0).min(SHADING_REACH_MOST))
+}
 
 fn points_shader() -> String {
     let stops: Vec<String> = RAMP.iter().map(|s| format!("vec3<f32>({:.1}, {:.1}, {:.1})", s[0], s[1], s[2])).collect();
@@ -84,6 +121,8 @@ struct U {{
   one: vec4<f32>,
   // x: the points have colours of their own.
   flags: vec4<f32>,
+  // The surface shading's strengths, 0 to 1: lighting, detail, hollows.
+  lit: vec4<f32>,
   classes: array<vec4<f32>, 256>,
 }};
 @group(0) @binding(0) var<uniform> u: U;
@@ -103,11 +142,8 @@ fn ramp(t: f32) -> vec3<f32> {{
 }}
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<u32>, @location(2) iv: vec2<u32>) -> VOut {{
-  var corners = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
-    vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
-  );
+fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<u32>, @location(2) iv: vec2<u32>, @location(3) sh: vec4<u32>) -> VOut {{
+  var corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0));
   let q = corners[vi];
   let entry = u.classes[c.w];
   var o: VOut;
@@ -143,6 +179,22 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c:
     let t = clamp((inten - u.ints.z) * u.ints.w, 0.0, 1.0);
     col = min(col * (1.0 - m + m * (0.35 + 0.9 * t)), vec3<f32>(1.0));
   }}
+  // Brighter or darker by the shape of its surface, its hue kept (the
+  // page's detailFactor): lit by the way it faces, about level ground's
+  // light; its relief off the broad surface; an edge a little darker; a
+  // hollow darker by twice the sky it doesn't see. In linear light: the
+  // colour's own curve with the factor's put through it (dark colours, on
+  // the curve's straight foot, by the factor itself).
+  if (u.lit.x + u.lit.y + u.lit.z > 0.0) {{
+    let lit = clamp(1.0 + u.lit.x * (f32(sh.x) / 255.0 - {level:.7}), 0.75, 1.25);
+    let relief = (f32(sh.y) - select(0.0, 256.0, sh.y > 127u)) / 127.0;
+    let up = clamp(1.0 + u.lit.y * 0.55 * relief, 0.7, 1.3);
+    let cut = select(1.0, clamp(1.0 - u.lit.y * 0.2 * f32(sh.z) / 255.0, 0.88, 1.0), sh.z > 0u);
+    let hollow = select(1.0, max(0.5, 1.0 - u.lit.z * 2.0 * (1.0 - f32(sh.w) / 255.0)), u.lit.z > 0.0 && sh.w < 255u);
+    let f = lit * up * cut * hollow;
+    let g = pow(f, 0.41666667);
+    col = clamp(select((col + 0.055) * g - 0.055, col * f, col <= vec3<f32>(0.04045)), vec3<f32>(0.0), vec3<f32>(1.0));
+  }}
   o.color = col;
   return o;
 }}
@@ -155,71 +207,203 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {{
   return vec4<f32>(i.color, 1.0);
 }}
 "#,
-        stops = stops.join(", ")
+        stops = stops.join(", "),
+        level = surface::light_level()
     )
 }
 
 /// The picture onto the window: the background where there's no point, the
-/// points' colours darkened by eye-dome lighting where there is (the
-/// page's form: over the eight pixels a radius off, how much nearer the
-/// eye each stands, as log2 of distances from an eye `eye` pixels in front
-/// of this pixel's point, less the scanner's noise; then exp(−strength ×
-/// their sum), never darker than EDL_DARKEST).
-const SHADE_SHADER: &str = r#"
-struct E {
+/// points' colours shaded from their depths where there is, as the page's
+/// own shade pass (cloud-gl.ts SHADE_FRAGMENT), its numbers the page's:
+///
+/// - Depth shading: along the pixel's row and column, the nearest point
+///   either side (from a point's width away to a few), each one's depth
+///   less the pixel's, per pixel across. On a plane the two cancel; where
+///   both stand nearer (a fold) their sum darkens it, less the scanner's
+///   noise and, on a slope, the points' own squares.
+/// - Relief (with no lighting from the surfaces): lit from the screen's
+///   upper left by the slope through the pixel, steepened.
+/// - Face shading: darker the steeper the surface stands against the
+///   drawing's Z; of the two sides, the one rising least, so a crease
+///   stays a crease.
+/// - Eye-dome lighting: over the eight pixels a radius off, how much nearer
+///   the eye each stands, as log2 of distances from an eye `eye` pixels in
+///   front of this pixel's point, less the scanner's noise; then
+///   exp(−strength × their sum), never darker than EDL_DARKEST.
+fn shade_shader() -> String {
+    format!(
+        r#"
+struct E {{
   clear: vec4<f32>,
   // Strength, radius (pixels), the eye's distance (pixels), the noise (pixels of depth).
   edl: vec4<f32>,
-  // x: pixels of nearness to one of depth; y: the darkest; zw: the picture's size.
+  // x: pixels of nearness to one of depth; y: the darkest eye-dome lighting makes; zw: the picture's size.
   more: vec4<f32>,
-};
+  // Depth shading's factor, relief's, face shading's, and the points' size (pixels).
+  shade: vec4<f32>,
+  // The first and last pixels off a neighbour's looked for; Z's share up the screen and toward the eye.
+  reach: vec4<f32>,
+}};
 @group(0) @binding(0) var<uniform> e: E;
 @group(0) @binding(1) var t_color: texture_2d<f32>;
 @group(0) @binding(2) var t_depth: texture_depth_2d;
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {{
   var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
   return vec4<f32>(p[vi], 0.0, 1.0);
-}
+}}
+
+// The nearest point stepping one way: whether there's one, its nearness (pixels of depth) and how far off (pixels).
+struct Hit {{
+  ok: bool,
+  d: f32,
+  at: f32,
+}};
+
+fn look(at: vec2<i32>, dir: vec2<i32>) -> Hit {{
+  var h: Hit;
+  h.ok = false;
+  h.d = 0.0;
+  h.at = 0.0;
+  let size = vec2<i32>(e.more.zw);
+  let last = i32(e.reach.y);
+  for (var t = i32(e.reach.x); t <= last; t++) {{
+    let p = at + dir * t;
+    if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {{
+      return h;
+    }}
+    let w = textureLoad(t_depth, p, 0);
+    if (w < 1.0) {{
+      h.ok = true;
+      h.d = (0.5 - w) * e.more.x;
+      h.at = f32(t);
+      return h;
+    }}
+  }}
+  return h;
+}}
+
+// How far the points either side stand nearer than the surface through this pixel would.
+fn fold(d: f32, a: Hit, b: Hit) -> f32 {{
+  if (!a.ok || !b.ok) {{
+    return 0.0;
+  }}
+  let ga = (a.d - d) / a.at;
+  let gb = (b.d - d) / b.at;
+  let f = (ga + gb) * min(a.at, b.at) * 0.5;
+  var slope = 0.0;
+  if (ga * gb < 0.0) {{
+    slope = min(abs(ga), abs(gb));
+  }}
+  return clamp(f - {noise:.2} - {grain:.2} * e.shade.w * slope, 0.0, {cap:.1});
+}}
+
+// The surface's rise from `a` (behind) to `b` (ahead), depth per pixel.
+fn rise(d: f32, a: Hit, b: Hit) -> f32 {{
+  if (a.ok && b.ok) {{
+    return (b.d - a.d) / (a.at + b.at);
+  }}
+  if (b.ok) {{
+    return (b.d - d) / b.at;
+  }}
+  if (a.ok) {{
+    return (d - a.d) / a.at;
+  }}
+  return 0.0;
+}}
+
+// Face shading's rise: of the two sides, the one rising least, the scanner's noise off each.
+fn face_rise(d: f32, a: Hit, b: Hit) -> f32 {{
+  var ga = 0.0;
+  if (a.ok) {{
+    ga = sign(d - a.d) * max(abs(d - a.d) - e.edl.w, 0.0) / a.at;
+  }}
+  var gb = 0.0;
+  if (b.ok) {{
+    gb = sign(b.d - d) * max(abs(b.d - d) - e.edl.w, 0.0) / b.at;
+  }}
+  if (a.ok && b.ok) {{
+    if (abs(ga) < abs(gb)) {{
+      return ga;
+    }}
+    return gb;
+  }}
+  if (a.ok) {{
+    return ga;
+  }}
+  return gb;
+}}
 
 @fragment
-fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {{
   let at = vec2<i32>(frag.xy);
   let w = textureLoad(t_depth, at, 0);
-  if (w >= 1.0) {
+  if (w >= 1.0) {{
     return vec4<f32>(e.clear.rgb, 1.0);
-  }
+  }}
   let col = textureLoad(t_color, at, 0).rgb;
+  let d = (0.5 - w) * e.more.x;
   var s = 1.0;
-  if (e.edl.x > 0.0) {
-    let d = (0.5 - w) * e.more.x;
+  if (e.shade.x > 0.0 || e.shade.y > 0.0 || e.shade.z > 0.0) {{
+    // The nearest points left and right, and below and above (up the screen is ahead).
+    let left = look(at, vec2<i32>(-1, 0));
+    let right = look(at, vec2<i32>(1, 0));
+    let below = look(at, vec2<i32>(0, 1));
+    let above = look(at, vec2<i32>(0, -1));
+    if (e.shade.x > 0.0) {{
+      s = exp(-e.shade.x * (fold(d, left, right) + fold(d, below, above)));
+    }}
+    if (e.shade.y > 0.0) {{
+      let n = vec3<f32>(
+        -clamp(rise(d, left, right), -{steepest:.1}, {steepest:.1}) * e.shade.y,
+        -clamp(rise(d, below, above), -{steepest:.1}, {steepest:.1}) * e.shade.y,
+        1.0);
+      let lit = dot(n, vec3<f32>(-0.5, 0.5, 0.70710678)) / length(n) / 0.70710678;
+      s *= clamp(lit, {low:.2}, {high:.2});
+    }}
+    if (e.shade.z > 0.0) {{
+      let gx = face_rise(d, left, right);
+      let gy = face_rise(d, below, above);
+      let level = abs(-gy * e.reach.z + e.reach.w) / length(vec3<f32>(gx, gy, 1.0));
+      s *= 1.0 - e.shade.z * (1.0 - min(level, 1.0));
+    }}
+  }}
+  if (e.edl.x > 0.0) {{
     let zc = e.edl.z;
     let least = zc / 256.0;
     let size = vec2<i32>(e.more.zw);
     var sum = 0.0;
-    for (var i = 0; i < 8; i++) {
+    for (var i = 0; i < 8; i++) {{
       let a = f32(i) * 0.78539816;
       let p = at + vec2<i32>(floor(vec2<f32>(cos(a), sin(a)) * e.edl.y + 0.5));
-      if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {
+      if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) {{
         continue;
-      }
+      }}
       let wn = textureLoad(t_depth, p, 0);
-      if (wn >= 1.0) {
+      if (wn >= 1.0) {{
         continue;
-      }
+      }}
       let nearer = (0.5 - wn) * e.more.x - d - e.edl.w;
-      if (nearer <= 0.0) {
+      if (nearer <= 0.0) {{
         continue;
-      }
+      }}
       let zn = max(zc - nearer, least);
       sum += max(0.0, log2(zc) - log2(zn));
-    }
-    s = max(e.more.y, exp(-e.edl.x * sum));
-  }
+    }}
+    s *= max(e.more.y, exp(-e.edl.x * sum));
+  }}
   return vec4<f32>(min(col * s, vec3<f32>(1.0)), 1.0);
+}}
+"#,
+        noise = SHADING_NOISE,
+        grain = SHADING_GRAIN,
+        cap = SHADING_CAP,
+        steepest = RELIEF_STEEPEST,
+        low = RELIEF_LOW,
+        high = RELIEF_HIGH,
+    )
 }
-"#;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -230,6 +414,7 @@ struct Uniforms {
     ints: [f32; 4],
     one: [f32; 4],
     flags: [f32; 4],
+    lit: [f32; 4],
     classes: [[f32; 4]; 256],
 }
 
@@ -239,6 +424,8 @@ struct ShadeUniforms {
     clear: [f32; 4],
     edl: [f32; 4],
     more: [f32; 4],
+    shade: [f32; 4],
+    reach: [f32; 4],
 }
 
 /// The points' own picture's colours (the window's may be another).
@@ -255,6 +442,10 @@ pub struct Cloud {
     pub radius: f64,
     /// The points have colours of their own.
     pub colours: bool,
+    /// Their shading from the shape of their surface is worked out.
+    pub shaded: bool,
+    /// How long that took, ms.
+    pub shade_ms: f64,
 }
 
 /// What sends points to the card: the card's own, or a copy for another thread (a scan read while frames go on).
@@ -279,7 +470,7 @@ impl Sender {
             mapped_at_creation: false,
         });
         // A part at a time, so no one write is past what the card's queue takes (each a whole number of points).
-        const PART: usize = (64 << 20) / 20 * 20;
+        const PART: usize = (64 << 20) / std::mem::size_of::<PointVertex>() * std::mem::size_of::<PointVertex>();
         let mut at = 0;
         while at < bytes.len() {
             let end = (at + PART).min(bytes.len());
@@ -297,7 +488,7 @@ impl Sender {
             layout: &self.layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
-        Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius, colours: points.colours }
+        Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius, colours: points.colours, shaded: points.shaded, shade_ms: points.shade_ms }
     }
 }
 
@@ -397,6 +588,7 @@ impl Gpu {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint8x4, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x2, offset: 16, shader_location: 2 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint8x4, offset: 20, shader_location: 3 },
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cadp points"),
@@ -417,7 +609,8 @@ impl Gpu {
                 targets: &[Some(wgpu::ColorTargetState { format: PICTURE, blend: None, write_mask: wgpu::ColorWrites::ALL })],
                 compilation_options: Default::default(),
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            // A point is a strip of two triangles, each point its own (four corners, not six: a third less for the card to place).
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH,
                 depth_write_enabled: true,
@@ -431,7 +624,7 @@ impl Gpu {
         });
         let shade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("cadp shade"),
-            source: wgpu::ShaderSource::Wgsl(SHADE_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(shade_shader().into()),
         });
         let shade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("cadp shade"),
@@ -535,8 +728,9 @@ impl Gpu {
     }
 
     /// A frame: each scan through the view, as its look has it, into
-    /// `target` (`size` pixels), with eye-dome lighting. With no view, the
-    /// background alone.
+    /// `target` (`size` pixels), shaded from its depths (`shading`) and
+    /// with eye-dome lighting. With no view, the background alone.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
         target: &wgpu::TextureView,
@@ -544,6 +738,7 @@ impl Gpu {
         camera: Option<&Camera>,
         clouds: &[(&Cloud, Affine, &Look)],
         edl: &Edl,
+        shading: &Shading,
         clear: [f64; 4],
     ) {
         self.frame_for(size);
@@ -582,6 +777,8 @@ impl Gpu {
                     ints: [look.intensity[0], inv(look.intensity[0], look.intensity[1]), look.mix[0], inv(look.mix[0], look.mix[1])],
                     one: [look.one[0], look.one[1], look.one[2], if mixing { look.mix[2].clamp(0.0, 1.0) } else { 0.0 }],
                     flags: [if cloud.colours { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    // Points whose shading isn't worked out are drawn as they are.
+                    lit: if cloud.shaded { [look.shade[0].clamp(0.0, 1.0), look.shade[1].clamp(0.0, 1.0), look.shade[2].clamp(0.0, 1.0), 0.0] } else { [0.0; 4] },
                     classes,
                 };
                 self.queue.write_buffer(&cloud.uniforms, 0, bytemuck::bytes_of(&u));
@@ -590,10 +787,17 @@ impl Gpu {
         // Depth's 0 to 1 is `reach × 1.05` drawing units each side of the target: as pixels of nearness.
         let upp = camera.map(|c| c.units_per_pixel).filter(|u| *u > 0.0).unwrap_or(1.0);
         let on = edl.strength > 0.0 && edl.eye > 0.0;
+        // The biggest point: where a neighbouring point is looked for.
+        let px = clouds.iter().map(|(_, _, look)| (look.px + 0.5).floor()).fold(1.0f64, f64::max);
+        let (first, last) = shading_reach(px);
+        let strength = |v: f64| if v.is_finite() && v > 0.0 { v as f32 } else { 0.0 };
         let shade = ShadeUniforms {
             clear: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
             edl: [if on { edl.strength as f32 } else { 0.0 }, edl.radius.max(1.0) as f32, edl.eye as f32, (edl.noise.max(0.0) / upp) as f32],
             more: [(2.0 * reach * 1.05 / upp) as f32, EDL_DARKEST, size[0] as f32, size[1] as f32],
+            shade: [strength(shading.depth), strength(shading.relief), strength(shading.faces), px as f32],
+            // The drawing's Z up the screen and toward the eye (the view's up and line of sight, their z).
+            reach: [first as f32, last as f32, camera.map(|c| c.up[2]).unwrap_or(0.0) as f32, camera.map(|c| c.to_eye[2]).unwrap_or(1.0) as f32],
         };
         self.queue.write_buffer(&self.shade_uniforms, 0, bytemuck::bytes_of(&shade));
         let frame = self.frame.as_ref().expect("the frame's picture");
@@ -624,7 +828,7 @@ impl Gpu {
                         }
                         pass.set_bind_group(0, &cloud.bind, &[]);
                         pass.set_vertex_buffer(0, cloud.buffer.slice(..));
-                        pass.draw(0..6, 0..cloud.count);
+                        pass.draw(0..4, 0..cloud.count);
                     }
                 }
             }
@@ -656,6 +860,7 @@ impl Gpu {
         camera: Option<&Camera>,
         clouds: &[(&Cloud, Affine, &Look)],
         edl: &Edl,
+        shading: &Shading,
         clear: [f64; 4],
     ) -> Result<Vec<u8>, String> {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -669,7 +874,7 @@ impl Gpu {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw(&view, size, camera, clouds, edl, clear);
+        self.draw(&view, size, camera, clouds, edl, shading, clear);
         // Rows are sent padded to 256 bytes.
         let row = (size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

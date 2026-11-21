@@ -2,6 +2,7 @@
 //! from, sampled from a scan's index for the view, or made up for the check.
 
 use crate::camera::{Affine, Camera};
+use crate::surface;
 use bytemuck::{Pod, Zeroable};
 use cadp_engine_core::Index;
 use rayon::prelude::*;
@@ -11,9 +12,11 @@ use std::sync::Arc;
 
 /// A point on the card: its place from its scan's middle (the file's own
 /// units, as f32 near 0 so nothing's lost), its own colour, its class (as
-/// the drawing has it), its intensity and its setup. The card colours it
-/// by whichever the view asks for (gpu.rs), so a change of colouring or of
-/// a class's layer sends no points again.
+/// the drawing has it), its intensity, its setup and its shading from the
+/// shape of the surface it's on (surface.rs: light, relief, edge, sky).
+/// The card colours it by whichever the view asks for (gpu.rs), so a
+/// change of colouring, of a class's layer or of a shading's strength
+/// sends no points again.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct PointVertex {
@@ -22,6 +25,8 @@ pub struct PointVertex {
     pub class: u8,
     pub intensity: u16,
     pub setup: u16,
+    /// Its surface's light (0–255), its relief (−127 to 127, as a byte), its edge (0–255) and the sky it sees (255: all).
+    pub shade: [u8; 4],
 }
 
 /// Points to draw, from `centre` (the file's coordinates).
@@ -32,6 +37,10 @@ pub struct Points {
     pub radius: f64,
     /// They have colours of their own (else by height where their own are asked for).
     pub colours: bool,
+    /// Their shading's worked out (else each is `surface::plain()`, and drawn unshaded).
+    pub shaded: bool,
+    /// How long that took, ms.
+    pub shade_ms: f64,
     pub data: Vec<PointVertex>,
 }
 
@@ -53,7 +62,7 @@ impl Hasher for CellHasher {
     }
 }
 
-type CellMap = HashMap<u64, u32, BuildHasherDefault<CellHasher>>;
+pub(crate) type CellMap = HashMap<u64, u32, BuildHasherDefault<CellHasher>>;
 
 /// Cells either way of the middle a place can be filed in (2^20).
 const HALF: i64 = 1 << 20;
@@ -134,7 +143,7 @@ fn cell_at(at: [f64; 3], cell: f64) -> Option<(i64, i64, i64)> {
     Some((f(at[0])?, f(at[1])?, f(at[2])?))
 }
 
-fn pack(x: i64, y: i64, z: i64) -> u64 {
+pub(crate) fn pack(x: i64, y: i64, z: i64) -> u64 {
     (x as u64) | (y as u64) << 21 | (z as u64) << 42
 }
 
@@ -169,13 +178,16 @@ impl Borrow {
 /// setup alone, or all but those turned off; the file's class codes read
 /// as the scan's class map has them; and, for a scan the page has
 /// classified or edited, the page's own classes and removals (`borrow`).
-/// Withheld points never are. `key` tells one from another.
+/// Withheld points never are. `shade`: their shading from the shape of
+/// their surface is worked out with them (surface.rs). `key` tells one
+/// from another.
 #[derive(Clone, Default)]
 pub struct Keep {
     pub setup: Option<u16>,
     pub off: Vec<u16>,
     pub map: Option<Arc<[u8; 256]>>,
     pub borrow: Option<Arc<Borrow>>,
+    pub shade: bool,
     pub key: String,
 }
 
@@ -188,7 +200,7 @@ impl Keep {
     /// With its key made from what it holds.
     pub fn keyed(mut self) -> Keep {
         let map = self.map.as_ref().map(|m| m.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3)));
-        self.key = format!("{:?}|{:?}|{:?}|{}", self.setup, self.off, map, self.borrow.as_ref().map(|b| b.key.as_str()).unwrap_or(""));
+        self.key = format!("{:?}|{:?}|{:?}|{}|{}", self.setup, self.off, map, self.borrow.as_ref().map(|b| b.key.as_str()).unwrap_or(""), if self.shade { "shaded" } else { "" });
         self
     }
 
@@ -321,7 +333,8 @@ pub const RAMP: [[f64; 3]; 7] =
 /// view), the same first share of each (each cell's points are shuffled in
 /// the index, so a first part of one is an even sample of it), about
 /// `most` points of those `keep` keeps. `affine`: the scan's file into the
-/// drawing, for the page's classes. Read on every core.
+/// drawing, for the page's classes and for the shading (the drawing's
+/// north-west and up). Read on every core.
 pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Option<&Sight>) -> (Points, Taken) {
     let lo = ix.file_xyz(ix.min[0], ix.min[1], ix.min[2]);
     let hi = ix.file_xyz(ix.max[0], ix.max[1], ix.max[2]);
@@ -364,6 +377,7 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
     let share = if taken.of == 0 { 0.0 } else { (most as f64 / (count * kept).max(most as f64 / READ_MOST).max(1.0)).min(1.0).min(most as f64 * READ_MOST / count) };
     taken.share = share;
     let byte = |v: u16| if ix.wide { (v >> 8) as u8 } else { v.min(255) as u8 };
+    let unshaded = surface::plain();
     let parts: Vec<Vec<PointVertex>> = list
         .par_chunks(128)
         .map(|chunk| {
@@ -401,6 +415,7 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
                         class,
                         intensity: p.intensity,
                         setup: p.setup,
+                        shade: unshaded,
                     });
                 }
             }
@@ -408,17 +423,24 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
         })
         .collect();
     let mut data = Vec::with_capacity(parts.iter().map(Vec::len).sum());
-    for p in &parts {
-        data.extend_from_slice(p);
+    for p in parts {
+        data.extend_from_slice(&p);
     }
-    (Points { centre, radius, colours: ix.has_rgb, data }, taken)
+    // Each one's shading from the shape of the surface it's on, as these points make it out.
+    let mut shade_ms = 0.0;
+    if keep.shade {
+        let t = std::time::Instant::now();
+        surface::shade_points(&mut data, surface::turn_of(affine).as_ref());
+        shade_ms = t.elapsed().as_secs_f64() * 1000.0;
+    }
+    (Points { centre, radius, colours: ix.has_rgb, shaded: keep.shade, shade_ms, data }, taken)
 }
 
 /// The check's own picture: a ring of `n` points 100 across, coloured round
 /// it, with a dot of white ones in the middle, about `centre`.
 pub fn test_ring(n: usize, centre: [f64; 3]) -> Points {
     let mut data = Vec::with_capacity(n + n / 8);
-    let point = |x: f64, y: f64, z: f64, rgb: [u8; 3]| PointVertex { pos: [x as f32, y as f32, z as f32], rgb, class: 0, intensity: 0, setup: 0 };
+    let point = |x: f64, y: f64, z: f64, rgb: [u8; 3]| PointVertex { pos: [x as f32, y as f32, z as f32], rgb, class: 0, intensity: 0, setup: 0, shade: surface::plain() };
     for i in 0..n {
         let a = i as f64 / n as f64 * std::f64::consts::TAU;
         // Three rings close together, so it's a band a few points wide.
@@ -430,7 +452,7 @@ pub fn test_ring(n: usize, centre: [f64; 3]) -> Points {
         let r = 6.0 * (i as f64 / (n / 8).max(1) as f64).sqrt();
         data.push(point(r * a.cos(), r * a.sin(), 1.0, [255, 255, 255]));
     }
-    Points { centre, radius: 51.0, colours: true, data }
+    Points { centre, radius: 51.0, colours: true, shaded: false, shade_ms: 0.0, data }
 }
 
 #[cfg(test)]
@@ -438,11 +460,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_vertex_is_20_bytes_as_the_card_reads_it() {
-        assert_eq!(std::mem::size_of::<PointVertex>(), 20);
-        let v = PointVertex { pos: [1.0, 2.0, 3.0], rgb: [4, 5, 6], class: 7, intensity: 0x0908, setup: 0x0b0a };
+    fn a_vertex_is_24_bytes_as_the_card_reads_it() {
+        assert_eq!(std::mem::size_of::<PointVertex>(), 24);
+        let v = PointVertex { pos: [1.0, 2.0, 3.0], rgb: [4, 5, 6], class: 7, intensity: 0x0908, setup: 0x0b0a, shade: [12, 13, 14, 15] };
         let bytes: &[u8] = bytemuck::bytes_of(&v);
-        assert_eq!(&bytes[12..], &[4, 5, 6, 7, 8, 9, 10, 11]);
+        assert_eq!(&bytes[12..], &[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     }
 
     #[test]
