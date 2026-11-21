@@ -407,7 +407,8 @@ const CLASS_FLOOR = [200, 120, 40];
  * it, where the frame's page was magenta), then the check's scan from
  * overhead: by height (its post's top the high colour at the middle, its
  * floor the low one beside it), by class with the post's layer off, with
- * eye-dome lighting, shaded as the page shades (1.37), and kept undrawn;
+ * eye-dome lighting, shaded as the page shades (1.37), by a limit box and
+ * by a slice (1.37), and kept undrawn;
  * and how it went (frames drawn, the card's name).
  */
 async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
@@ -512,8 +513,26 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       const inFold = (p) => p[0] < CLASS_FLOOR[0] - 90 && p[0] > p[2];
       out.shadeDrawn = near(out.shadePixels.away, CLASS_FLOOR, 12) && beside.some(inFold) && out.shadePixels.post[0] < 130 && out.shadePixels.post[0] > 30;
     }
+    // A limit box over the floor's west 4 units (1.37): the floor inside it, the page's background east of it (the post too);
+    // then a slice's slab through the post's top alone: the post, and no floor.
+    const whole = (min, max) => ({ min, max, centre: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2], cos: 1, sin: 0, turned: false, outside: false, slack: [1e-6, 1e-6, 1e-6] });
+    const byClass = { look: { by: 1, px: 5 * k, classes: postOn } };
+    const boxed = await showAndLook(12, byClass, { boxes: [whole([6000000, 2000000, 0], [6000004, 2000010, 500])] }, null);
+    const sliced = await showAndLook(13, byClass, { slice: whole([-1e12, -1e12, 103], [1e12, 1e12, 104.5]) }, null);
+    out.clipped = sliced.stats;
+    if (boxed.picture && sliced.picture) {
+      out.clipPixels = {
+        inside: boxed.picture.at(cx - 100, cy + 30),
+        outside: boxed.picture.at(cx + 100, cy + 30),
+        postBoxed: boxed.picture.at(cx, cy),
+        postSliced: sliced.picture.at(cx, cy),
+        floorSliced: sliced.picture.at(cx - 100, cy + 30),
+      };
+      const c = out.clipPixels;
+      out.clipDrawn = near(c.inside, CLASS_FLOOR, 12) && near(c.outside, SCAN_CLEAR, 12) && near(c.postBoxed, SCAN_CLEAR, 12) && near(c.postSliced, [175, 175, 175], 12) && near(c.floorSliced, SCAN_CLEAR, 12);
+    }
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await showAndLook(12, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    const hidden = await showAndLook(14, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;
     if (hidden.picture) {
       out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };

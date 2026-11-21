@@ -3,7 +3,7 @@
 //! on, drawn into a picture.
 
 use cadp_engine_core::{build_or_open, Progress};
-use cadp_engine_view::{Ask, Camera, Edl, Gpu, Keep, Look, ScanAsk, Shading, Stage, CLEAR, IDENTITY};
+use cadp_engine_view::{Ask, Camera, Clip, Edl, Gpu, Keep, Look, ScanAsk, Shading, Stage, CLEAR, IDENTITY};
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -107,7 +107,7 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     // Drawn 5 px a point (a twelfth of its points is one to three pixels here).
     let big = Look { px: 5.0, ..Look::own() };
     let list: Vec<_> = stage.list(&ask).iter().map(|(c, a, _)| (*c, *a, &big)).collect();
-    let picture = gpu.picture([400, 300], ask.camera.as_ref(), &list, &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let picture = gpu.picture([400, 300], ask.camera.as_ref(), &list, &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     drop(list);
     // Red in the west, blue in the east.
     assert_eq!(pixel(&picture, 400, 100, 150), [220, 20, 20]);
@@ -128,7 +128,7 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     // Every point the view sees is on the card now: 40 × 30 in the drawing area itself, each 10 px from the next.
     let look = Look { px: 3.0, ..Look::own() };
     let list: Vec<_> = list.iter().map(|(c, a, _)| (*c, *a, &look)).collect();
-    let picture = gpu.picture([400, 300], ask.camera.as_ref(), &list, &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let picture = gpu.picture([400, 300], ask.camera.as_ref(), &list, &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     let mut dots = 0;
     for gy in 0..30u32 {
         for gx in 0..40u32 {

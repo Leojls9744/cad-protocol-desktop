@@ -2,7 +2,8 @@
 //! here, indexed, sampled whole and thinned.
 
 use cadp_engine_core::{build_or_open, Progress};
-use cadp_engine_view::{sample, wanted, Borrow, BorrowPoints, Camera, Keep, Sight, IDENTITY};
+use cadp_engine_core::crop::CropBox;
+use cadp_engine_view::{sample, wanted, Borrow, BorrowPoints, Camera, Clip, Keep, Op, ShapeIn, Shapes, Sight, IDENTITY};
 use std::sync::Arc;
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::PathBuf;
@@ -59,7 +60,7 @@ fn every_point_when_there_s_room_and_an_even_share_when_there_isn_t() {
     let n = floor(&src, true);
     let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
     assert_eq!(ix.count as usize, n);
-    let (all, taken) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None);
+    let (all, taken) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None, None);
     assert_eq!(all.data.len(), n);
     assert_eq!(taken.share, 1.0);
     assert_eq!(taken.of as usize, n);
@@ -76,7 +77,7 @@ fn every_point_when_there_s_room_and_an_even_share_when_there_isn_t() {
     // slight to tell from level by its light; nothing on it stands off it or hides the sky.
     let shade = Keep { shade: true, ..Keep::all() }.keyed();
     assert_ne!(shade.key, Keep::all().keyed().key);
-    let (lit, _) = sample(&ix, 10_000_000, &shade, &IDENTITY, None);
+    let (lit, _) = sample(&ix, 10_000_000, &shade, &IDENTITY, None, None);
     assert!(lit.shaded && lit.data.len() == n);
     let level = cadp_engine_view::surface::plain()[0] as i32;
     let range = |k: usize| (lit.data.iter().map(|v| if k == 1 { v.shade[1] as i8 as i32 } else { v.shade[k] as i32 }).min().unwrap(), lit.data.iter().map(|v| if k == 1 { v.shade[1] as i8 as i32 } else { v.shade[k] as i32 }).max().unwrap());
@@ -88,7 +89,7 @@ fn every_point_when_there_s_room_and_an_even_share_when_there_isn_t() {
     assert!(relief.0 >= -8 && relief.1 <= 8, "a plane's relief: {relief:?}");
     assert!(sky.0 >= 240, "a plane's sky: {sky:?}");
     // A tenth: about a tenth, from every part of the floor (each cell's first share).
-    let (some, taken) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None);
+    let (some, taken) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None, None);
     assert!(some.data.len() >= n / 10 && some.data.len() <= n / 10 + ix.cells * 2, "{} of {n}, {} cells", some.data.len(), ix.cells);
     assert!((taken.share - 0.1).abs() < 1e-9);
     for (lo, hi) in [(-20.0, -10.0), (-10.0, 0.0), (0.0, 10.0), (10.0, 20.0)] {
@@ -106,7 +107,7 @@ fn a_scan_with_no_colours_says_so() {
     floor(&src, false);
     let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
     assert!(!ix.has_rgb);
-    let (all, _) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None);
+    let (all, _) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None, None);
     assert!(!all.colours);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -118,7 +119,7 @@ fn classes_are_read_as_the_scans_map_has_them() {
     // The floor, a point in four made class 7.
     let n = floor_with(&src, true, |i, j| if (i + j) % 4 == 0 { 7 } else { 2 });
     let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
-    let (all, _) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None);
+    let (all, _) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None, None);
     assert_eq!(all.data.iter().filter(|v| v.class == 7).count(), n / 4);
     // The file's 7 read as 18 (the scan's class map): every one of them, the rest as they were.
     let mut map = [0u8; 256];
@@ -127,7 +128,7 @@ fn classes_are_read_as_the_scans_map_has_them() {
     }
     map[7] = 18;
     let keep = Keep { map: Some(Arc::new(map)), ..Keep::all() }.keyed();
-    let (mapped, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None);
+    let (mapped, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None, None);
     assert_eq!(mapped.data.iter().filter(|v| v.class == 18).count(), n / 4);
     assert_eq!(mapped.data.iter().filter(|v| v.class == 2).count(), n - n / 4);
     let _ = std::fs::remove_dir_all(&dir);
@@ -157,7 +158,7 @@ fn a_classified_scans_points_take_the_pages_classes_and_its_removed_points_are_l
     let points = Arc::new(BorrowPoints::new("its points".into(), 1.0, origin, xyz));
     let borrow = Arc::new(Borrow::new("its classes".into(), points, class, Some(removed)).unwrap());
     let keep = Keep { borrow: Some(borrow), ..Keep::all() }.keyed();
-    let (got, _) = sample(&ix, 10_000_000, &keep, &moved, None);
+    let (got, _) = sample(&ix, 10_000_000, &keep, &moved, None, None);
     // The strip's points are gone (20 of 300 rows, give or take the cells' edges).
     let gone = n - got.data.len();
     assert!((gone as f64 / n as f64 - 20.0 / 300.0).abs() < 0.01, "{gone} of {n}");
@@ -170,7 +171,7 @@ fn a_classified_scans_points_take_the_pages_classes_and_its_removed_points_are_l
     // Told from the scan with the file's classes, and from other classes of the page's.
     assert_ne!(keep.key, Keep::all().keyed().key);
     // Where the drawing has the scan somewhere else, none of the page's points are near: the file's own classes, nothing left out.
-    let (far, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None);
+    let (far, _) = sample(&ix, 10_000_000, &keep, &IDENTITY, None, None);
     assert_eq!(far.data.len(), n);
     assert!(far.data.iter().all(|v| v.class == 2));
     let _ = std::fs::remove_dir_all(&dir);
@@ -194,10 +195,10 @@ fn a_view_takes_the_cells_it_sees_and_more_of_each() {
     };
     let sight = Sight::new(&cam, &IDENTITY);
     // A budget of a fifth of the scan: of the whole scan, a fifth of each cell.
-    let (whole, all) = sample(&ix, n / 5, &Keep::all(), &IDENTITY, None);
+    let (whole, all) = sample(&ix, n / 5, &Keep::all(), &IDENTITY, None, None);
     assert!((all.share - 0.2).abs() < 1e-9);
     // For the view: only the cells it sees, every point of them (they're under the budget).
-    let (seen, taken) = sample(&ix, n / 5, &Keep::all(), &IDENTITY, Some(&sight));
+    let (seen, taken) = sample(&ix, n / 5, &Keep::all(), &IDENTITY, Some(&sight), None);
     assert_eq!(taken.share, 1.0);
     assert!(taken.of < ix.count / 3, "{} of {}", taken.of, ix.count);
     assert_eq!(seen.data.len() as u64, taken.of);
@@ -207,13 +208,94 @@ fn a_view_takes_the_cells_it_sees_and_more_of_each() {
     // Far more of them there than the whole scan's sample has.
     assert!(whole.data.iter().filter(|v| inside(v)).count() < 80 * 60 / 3);
     // Its sample covers the view, a smaller one inside it and a notch closer; not a pan to the other end, nor the whole scan.
-    assert!(taken.covers(&wanted(&ix, n / 5, Some(&sight))));
+    assert!(taken.covers(&wanted(&ix, n / 5, Some(&sight), None)));
     let closer = Camera { units_per_pixel: 0.005, ..cam };
-    assert!(taken.covers(&wanted(&ix, n / 5, Some(&Sight::new(&closer, &IDENTITY)))));
+    assert!(taken.covers(&wanted(&ix, n / 5, Some(&Sight::new(&closer, &IDENTITY)), None)));
     let away = Camera { target: [6_000_036.0, 2_000_027.0, 100.0], ..cam };
-    assert!(!taken.covers(&wanted(&ix, n / 5, Some(&Sight::new(&away, &IDENTITY)))));
+    assert!(!taken.covers(&wanted(&ix, n / 5, Some(&Sight::new(&away, &IDENTITY)), None)));
     assert!(!taken.covers(&all));
     // The whole scan's sample covers neither view at the share the view wants (a fifth isn't every point).
-    assert!(!all.covers(&wanted(&ix, n / 5, Some(&sight))));
+    assert!(!all.covers(&wanted(&ix, n / 5, Some(&sight), None)));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A limit box as the page gives it: its turn undone, a millionth of slack.
+fn limit(min: [f64; 3], max: [f64; 3], angle: f64, outside: bool) -> CropBox {
+    let a = -angle.to_radians();
+    CropBox { min, max, centre: [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0], cos: a.cos(), sin: a.sin(), turned: a != 0.0, outside, slack: [1e-6; 3] }
+}
+
+#[test]
+fn a_limit_box_and_a_slice_take_only_what_they_show_and_as_much_of_it_as_the_budget_allows() {
+    let dir = scratch("clip");
+    let src = dir.join("floor.las");
+    let n = floor(&src, true);
+    let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
+    let at = |x: f64, y: f64| [6_000_000.0 + x, 2_000_000.0 + y];
+    // A box over the floor's south-west 10 × 10 (of 40 × 30), every height: 101 × 101 of its points (a twelfth).
+    let (lo, hi) = (at(-0.01, -0.01), at(10.01, 10.01));
+    let boxed = Clip { boxes: vec![limit([lo[0], lo[1], 0.0], [hi[0], hi[1], 500.0], 0.0, false)], slice: None, key: String::new() }.keyed();
+    // A budget of a tenth of the floor: unclipped, a tenth of every part of it; by the box, every point in the box.
+    let (thin, _) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None, None);
+    let inside = |v: &cadp_engine_view::PointVertex, c: [f64; 3]| v.pos[0] as f64 + c[0] <= hi[0] && v.pos[1] as f64 + c[1] <= hi[1];
+    let thin_inside = thin.data.iter().filter(|v| inside(v, thin.centre)).count();
+    let (got, taken) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None, Some(&boxed));
+    assert_eq!(got.data.len(), 101 * 101, "every point in the box (unclipped, the budget gave {thin_inside} of them)");
+    assert!(got.data.iter().all(|v| inside(v, got.centre)));
+    assert!(thin_inside < 101 * 101 / 5);
+    assert_eq!(taken.clip, boxed.key);
+    // Only the cells the box reaches were read.
+    let all = wanted(&ix, n / 10, None, None);
+    assert!(taken.of < all.of && taken.of as usize >= 101 * 101, "{} of {}", taken.of, all.of);
+    // What's held for one box isn't what another wants, nor what none wants.
+    let other = Clip { boxes: vec![limit([lo[0], lo[1], 0.0], [hi[0] + 5.0, hi[1], 500.0], 0.0, false)], slice: None, key: String::new() }.keyed();
+    assert!(taken.covers(&wanted(&ix, n / 10, None, Some((&boxed, &IDENTITY)))));
+    assert!(!taken.covers(&wanted(&ix, n / 10, None, Some((&other, &IDENTITY)))));
+    assert!(!taken.covers(&wanted(&ix, n / 10, None, None)));
+    // A slice across the slope (the floor rises 0.0075 a point going east): a level band 0.3 thick at 101.5 holds 41 columns of its 400.
+    let level = Clip { boxes: vec![], slice: Some(limit([-1e12, -1e12, 101.35], [1e12, 1e12, 101.65], 0.0, false)), key: String::new() }.keyed();
+    let (band, _) = sample(&ix, n / 5, &Keep::all(), &IDENTITY, None, Some(&level));
+    assert_eq!(band.data.len(), 41 * 300);
+    // A budget under what the band holds: about the budget, all of them in the band.
+    let (some, _) = sample(&ix, n / 20, &Keep::all(), &IDENTITY, None, Some(&level));
+    assert!(some.data.len() >= n / 20 - 300 && some.data.len() <= n / 20 + 900, "{} for a budget of {}", some.data.len(), n / 20);
+    assert!(some.data.iter().all(|v| (v.pos[2] as f64 + some.centre[2] - 101.5).abs() <= 0.151));
+    assert!(band.data.iter().all(|v| (v.pos[2] as f64 + band.centre[2] - 101.5).abs() <= 0.151));
+    // The slice and the box together: where both show.
+    let both = Clip { boxes: boxed.boxes.clone(), slice: level.slice.clone(), key: String::new() }.keyed();
+    let (none, _) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None, Some(&both));
+    assert!(none.data.is_empty(), "the box is west of the band");
+    // A box that shows what's outside it: the floor less its inside.
+    let hole = Clip { boxes: vec![limit([lo[0], lo[1], 0.0], [hi[0], hi[1], 500.0], 0.0, true)], slice: None, key: String::new() }.keyed();
+    let (rest, _) = sample(&ix, 10_000_000, &Keep::all(), &IDENTITY, None, Some(&hole));
+    assert_eq!(rest.data.len(), n - 101 * 101);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn isolated_points_are_every_point_of_the_scan_inside_the_shapes() {
+    let dir = scratch("isolate");
+    let src = dir.join("floor.las");
+    // The floor's classes: 6 (buildings) in its west 5 units, the ground elsewhere.
+    let n = floor_with(&src, true, |i, _| if i < 50 { 6 } else { 2 });
+    let ix = build_or_open(&src, &dir.join("cache"), &Progress::default()).unwrap();
+    let (e, nn) = (6_000_000.0, 2_000_000.0);
+    // A box drawn in plan over its south-west 10 × 10 (101 × 101 points), the buildings' class off as it was drawn.
+    let square = vec![e - 0.01, nn - 0.01, e + 10.01, nn - 0.01, e + 10.01, nn + 10.01, e - 0.01, nn + 10.01];
+    let shape = |poly: &[f64], op: Op, off: &[u8]| ShapeIn { right: [1.0, 0.0, 0.0], up: [0.0, 1.0, 0.0], poly: poly.to_vec(), op, dabs: Vec::new(), near: None, off: off.to_vec() };
+    let isolated = Keep { isolate: Some(Arc::new(Shapes::new("one".into(), vec![shape(&square, Op::Add, &[6])]))), ..Keep::all() }.keyed();
+    assert_ne!(isolated.key, Keep::all().keyed().key);
+    // A budget of a tenth of the floor: every point isolated all the same (only they take up the budget).
+    let (got, _) = sample(&ix, n / 10, &isolated, &IDENTITY, None, None);
+    assert_eq!(got.data.len(), 51 * 101, "the ground inside the box (the buildings there were off as it was drawn)");
+    assert!(got.data.iter().all(|v| v.class == 2 && v.pos[0] as f64 + got.centre[0] >= e + 4.99 && v.pos[0] as f64 + got.centre[0] <= e + 10.02 && v.pos[1] as f64 + got.centre[1] <= nn + 10.02));
+    // Narrowed to its south half, then a strip hidden: as the page keeps them in turn.
+    let south = vec![e - 1.0, nn - 1.0, e + 50.0, nn - 1.0, e + 50.0, nn + 4.95, e - 1.0, nn + 4.95];
+    let strip = vec![e + 6.95, nn - 1.0, e + 8.05, nn - 1.0, e + 8.05, nn + 50.0, e + 6.95, nn + 50.0];
+    let list = vec![shape(&square, Op::Add, &[]), shape(&south, Op::And, &[]), shape(&strip, Op::Out, &[])];
+    let narrowed = Keep { isolate: Some(Arc::new(Shapes::new("three".into(), list))), ..Keep::all() }.keyed();
+    assert_ne!(narrowed.key, isolated.key);
+    let (got, _) = sample(&ix, 10_000_000, &narrowed, &IDENTITY, None, None);
+    assert_eq!(got.data.len(), (101 - 11) * 50);
     let _ = std::fs::remove_dir_all(&dir);
 }

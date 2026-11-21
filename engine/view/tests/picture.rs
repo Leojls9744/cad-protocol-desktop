@@ -1,7 +1,8 @@
 //! A frame drawn on the card into a picture and read back: the check's ring
 //! where the view puts it, and a scan's sample from its index.
 
-use cadp_engine_view::{test_ring, Camera, Edl, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
+use cadp_engine_core::crop::CropBox;
+use cadp_engine_view::{test_ring, Camera, Clip, Edl, Gpu, Look, PointVertex, Points, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
 
 /// One test draws at a time: the build computer's stand-in for a card (Windows' own, on the processor) has
 /// stopped the whole run when several tests each started and ended a card of their own at once. The app has one.
@@ -80,7 +81,7 @@ fn the_ring_is_drawn_where_the_view_puts_it() {
         rect: [100.0, 0.0, 300.0, 300.0],
     };
     let look = Look { px: 3.0, ..Look::own() };
-    let picture = gpu.picture([400, 300], Some(&cam), &[(&ring, IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let picture = gpu.picture([400, 300], Some(&cam), &[(&ring, IDENTITY, &look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     assert_eq!(picture.len(), 400 * 300 * 4);
     // The drawing area's middle is pixel 250, 150; the ring's is 40 px right of it: its white dot.
     assert!(near(pixel(&picture, 400, 290, 150), [255, 255, 255], 2), "{:?}", pixel(&picture, 400, 290, 150));
@@ -118,13 +119,13 @@ fn nearer_points_cover_further_ones_and_no_view_draws_the_background() {
     let look = Look { px: 4.0, ..Look::own() };
     // Whichever is drawn first, the higher (nearer the eye, from overhead) shows.
     for order in [[&low, &high], [&high, &low]] {
-        let picture = gpu.picture([200, 200], Some(&cam), &[(order[0], IDENTITY, &look), (order[1], IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+        let picture = gpu.picture([200, 200], Some(&cam), &[(order[0], IDENTITY, &look), (order[1], IDENTITY, &look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
         assert!(near(pixel(&picture, 200, 100, 100), [255, 0, 0], 2), "{:?}", pixel(&picture, 200, 100, 100));
     }
-    let empty = gpu.picture([64, 64], None, &[(&low, IDENTITY, &look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let empty = gpu.picture([64, 64], None, &[(&low, IDENTITY, &look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     assert!(near(pixel(&empty, 64, 32, 32), clear_bytes(), 2));
     // A background of the page's own.
-    let own = gpu.picture([64, 64], None, &[], &Edl::default(), &Shading::default(), [0.2, 0.4, 0.6, 1.0]).expect("a picture");
+    let own = gpu.picture([64, 64], None, &[], &Edl::default(), &Shading::default(), &Clip::default(), [0.2, 0.4, 0.6, 1.0]).expect("a picture");
     assert!(near(pixel(&own, 64, 5, 60), [51, 102, 153], 1));
 }
 
@@ -141,7 +142,7 @@ fn points_are_coloured_as_the_page_colours_them() {
     let cloud = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: true, shaded: false, shade_ms: 0.0, data: data.clone() });
     let cam = Camera { target: [1000.0, 2000.0, 50.0], ..plan(200.0) };
     let at = |k: usize| 100 + [-60i32, -20, 20, 60][k];
-    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     let base = Look { px: 9.0, ..Look::own() };
     // Their own colours.
     let p = shot(&mut gpu, &cloud, &base);
@@ -211,7 +212,7 @@ fn eye_dome_lighting_darkens_where_the_ground_steps_as_the_pages_does() {
     let cloud = gpu.upload(&Points { centre: [0.0, 0.0, 0.0], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, data });
     let cam = plan(200.0);
     let look = Look { px: 2.0, ..Look::own() };
-    let shot = |gpu: &mut Gpu, edl: &Edl| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], edl, &Shading::default(), CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, edl: &Edl| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], edl, &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     // Off: every point its own colour.
     let flat = shot(&mut gpu, &Edl::default());
     assert!(near(pixel(&flat, 200, 99, 100), [200, 200, 200], 1));
@@ -236,7 +237,7 @@ fn eye_dome_lighting_darkens_where_the_ground_steps_as_the_pages_does() {
     let v = pixel(&soft, 200, 94 + dark[0] as u32, 100)[0];
     assert!(v > darkest + 20 && v < 190, "{v}");
     // Where there's no point: the background, not darkened.
-    let far = gpu.picture([200, 200], Some(&Camera { target: [500.0, 0.0, 0.0], ..cam }), &[(&cloud, IDENTITY, &look)], &edl, &Shading::default(), CLEAR).expect("a picture");
+    let far = gpu.picture([200, 200], Some(&Camera { target: [500.0, 0.0, 0.0], ..cam }), &[(&cloud, IDENTITY, &look)], &edl, &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     assert!(near(pixel(&far, 200, 100, 100), clear_bytes(), 1));
 }
 
@@ -259,7 +260,7 @@ fn points_are_brightened_and_darkened_by_the_shape_of_their_surface_as_the_page_
     let data: Vec<PointVertex> = shades.iter().enumerate().map(|(k, s)| PointVertex { shade: *s, ..point(k as f32 * 30.0 - 75.0, 0.0, 0.0, colour(k), 2, 0) }).collect();
     let shaded = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: true, shade_ms: 0.0, data: data.clone() });
     let cam = plan(200.0);
-    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     let at = |p: &[u8], k: usize| pixel(p, 200, (100.0 + k as f32 * 30.0 - 75.0) as u32, 100);
     let base = Look { px: 9.0, ..Look::own() };
     // No strengths: each its own colour.
@@ -319,7 +320,7 @@ fn depth_shading_darkens_a_fold_and_leaves_a_slope_as_the_pages_does() {
     let cloud = gpu.upload(&ground(|x, _| if x < 20.0 { (20.0 - x) * 4.0 } else if x > 50.0 { x - 50.0 } else { 0.0 }));
     let cam = plan(200.0);
     let look = Look { px: 1.0, ..Look::own() };
-    let shot = |gpu: &mut Gpu, shading: &Shading| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], &Edl::default(), shading, CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, shading: &Shading| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], &Edl::default(), shading, &Clip::default(), CLEAR).expect("a picture");
     let grey = |p: &[u8], x: u32| pixel(p, 200, x, 100)[0];
     // Off: every point its own colour.
     let off = shot(&mut gpu, &Shading::default());
@@ -358,7 +359,7 @@ fn relief_lights_a_slope_from_the_upper_left_and_face_shading_darkens_a_steep_on
     }));
     let cam = plan(200.0);
     let look = Look { px: 1.0, ..Look::own() };
-    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, cam: &Camera, shading: &Shading| gpu.picture([200, 200], Some(cam), &[(cloud, IDENTITY, &look)], &Edl::default(), shading, CLEAR).expect("a picture");
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, cam: &Camera, shading: &Shading| gpu.picture([200, 200], Some(cam), &[(cloud, IDENTITY, &look)], &Edl::default(), shading, &Clip::default(), CLEAR).expect("a picture");
     // Relief at 50 (the slopes steepened 3 times): the light's from the upper left, 45° up.
     let p = shot(&mut gpu, &cloud, &cam, &Shading { relief: 3.0, ..Shading::default() });
     let lit = |gx: f64, gy: f64| {
@@ -398,4 +399,55 @@ fn relief_lights_a_slope_from_the_upper_left_and_face_shading_darkens_a_steep_on
     // And a wall there (the slope of 1 in 1 from this side is steeper still against the eye, the same against Z).
     let p = shot(&mut gpu, &steep, &tilted, &faces);
     assert!((grey(&p, 150, 100) - slope).abs() <= 8, "the slope from the side: {} for {slope}", grey(&p, 150, 100));
+}
+
+/// A limit box as the page gives it: its turn undone, a millionth of slack.
+fn limit(min: [f64; 3], max: [f64; 3], angle: f64, outside: bool) -> CropBox {
+    let a = -angle.to_radians();
+    CropBox { min, max, centre: [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0], cos: a.cos(), sin: a.sin(), turned: a != 0.0, outside, slack: [1e-6; 3] }
+}
+
+#[test]
+fn the_card_leaves_out_what_the_limit_boxes_and_the_slice_don_t_show() {
+    let Some(mut gpu) = card() else { return };
+    // A floor far from 0 (the boxes are in the drawing), rising to the east: its height the distance east of its middle, a tenth.
+    let far = [6_000_000.0, 2_000_000.0, 100.0];
+    let mut floor = ground(|x, _| x * 0.1);
+    floor.centre = far;
+    let cloud = gpu.upload(&floor);
+    let cam = Camera { target: far, ..plan(200.0) };
+    let look = Look { px: 1.0, ..Look::own() };
+    let shot = |gpu: &mut Gpu, affine: &cadp_engine_view::Affine, clip: &Clip| gpu.picture([200, 200], Some(&cam), &[(&cloud, *affine, &look)], &Edl::default(), &Shading::default(), clip, CLEAR).expect("a picture");
+    let on = |p: &[u8], x: u32, y: u32| pixel(p, 200, x, y) == [200, 200, 200];
+    let off = |p: &[u8], x: u32, y: u32| near(pixel(p, 200, x, y), clear_bytes(), 1);
+    let boxed = |min: [f64; 2], max: [f64; 2], angle: f64, outside: bool| limit([far[0] + min[0], far[1] + min[1], 0.0], [far[0] + max[0], far[1] + max[1], 500.0], angle, outside);
+    let clip = |boxes: Vec<CropBox>, slice: Option<CropBox>| Clip { boxes, slice, key: String::new() }.keyed();
+    // None: the whole floor.
+    let p = shot(&mut gpu, &IDENTITY, &Clip::default());
+    assert!(on(&p, 100, 100) && on(&p, 30, 30) && on(&p, 170, 170));
+    // One box showing its inside: 40 east to 60 east, 10 south to 30 north (up the screen is north).
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![boxed([40.0, -10.0], [60.0, 30.0], 0.0, false)], None));
+    assert!(on(&p, 150, 100) && on(&p, 141, 72) && on(&p, 159, 109), "inside the box");
+    assert!(off(&p, 100, 100) && off(&p, 138, 100) && off(&p, 162, 100) && off(&p, 150, 68) && off(&p, 150, 112), "outside it");
+    // A second box: in either. And one showing what's outside it: a hole in the first.
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![boxed([40.0, -10.0], [60.0, 30.0], 0.0, false), boxed([-60.0, -60.0], [-40.0, -40.0], 0.0, false), boxed([45.0, 0.0], [55.0, 10.0], 0.0, true)], None));
+    assert!(on(&p, 150, 80) && on(&p, 50, 150) && off(&p, 150, 95) && off(&p, 100, 100));
+    // Only a hole: everything but its inside.
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![boxed([45.0, 0.0], [55.0, 10.0], 0.0, true)], None));
+    assert!(on(&p, 100, 100) && on(&p, 30, 30) && off(&p, 150, 95) && on(&p, 143, 95) && on(&p, 157, 95));
+    // Turned 45° about its middle (0, 0), 80 long and 10 wide: along the north-east diagonal.
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![boxed([-40.0, -5.0], [40.0, 5.0], 45.0, false)], None));
+    assert!(on(&p, 100, 100) && on(&p, 125, 75) && on(&p, 75, 125), "along the turned box");
+    assert!(off(&p, 125, 125) && off(&p, 75, 75) && off(&p, 135, 100) && off(&p, 131, 69), "off it and past its end");
+    // A slice: the level band 1 thick at 102 is the floor from 15 to 25 east of its middle.
+    let band = limit([-1e12, -1e12, 101.5], [1e12, 1e12, 102.5], 0.0, false);
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![], Some(band.clone())));
+    assert!(on(&p, 120, 100) && on(&p, 116, 30) && on(&p, 124, 170) && off(&p, 113, 100) && off(&p, 127, 100) && off(&p, 100, 100));
+    // With a box: where both show.
+    let p = shot(&mut gpu, &IDENTITY, &clip(vec![boxed([-100.0, 0.0], [100.0, 20.0], 0.0, false)], Some(band)));
+    assert!(on(&p, 120, 90) && off(&p, 120, 110) && off(&p, 100, 90));
+    // A scan moved in the drawing (turned a quarter turn about its middle and 30 north): the boxes are the drawing's, not the scan's.
+    let quarter = [0.0, -1.0, 0.0, far[0] + far[1], 1.0, 0.0, 0.0, far[1] - far[0] + 30.0, 0.0, 0.0, 1.0, 0.0];
+    let p = shot(&mut gpu, &quarter, &clip(vec![boxed([40.0, -10.0], [60.0, 30.0], 0.0, false)], None));
+    assert!(on(&p, 150, 100) && on(&p, 141, 72) && off(&p, 138, 100) && off(&p, 150, 112) && off(&p, 100, 100), "the same place in the drawing");
 }

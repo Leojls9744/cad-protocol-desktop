@@ -18,7 +18,7 @@
 
 use crate::camera::{Affine, Camera};
 use crate::gpu::{Cloud, Edl, Look, Sender, Shading};
-use crate::scene::{sample, wanted, Keep, Sight, Taken};
+use crate::scene::{sample, wanted, Clip, Keep, Sight, Taken};
 use cadp_engine_core::Index;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -55,6 +55,8 @@ pub struct Ask {
     pub edl: Edl,
     /// Depth shading, relief and face shading, as the page has them.
     pub shading: Shading,
+    /// The limit boxes and the slice that are on: only what they show is drawn.
+    pub clip: Clip,
     /// How long it's held before it's shown, ms: the page's own picture
     /// (its linework, over the scans) reaches the screen a refresh or so
     /// after the page paints it, and the two are to land together.
@@ -122,6 +124,8 @@ struct Job {
     most: usize,
     /// The view its detail is for; none: its base.
     camera: Option<Camera>,
+    /// The limit boxes and slice its detail is read by (its base is of the whole scan, so what a box moved lays bare is there at once, thinly).
+    clip: Clip,
 }
 
 struct Done {
@@ -219,7 +223,7 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
         let t = Instant::now();
         let sight = job.camera.as_ref().map(|c| Sight::new(c, &job.affine));
         let most = if job.camera.is_some() { job.most } else { base_most(job.most) };
-        let read = || sample(&job.index, most, &job.keep, &job.affine, sight.as_ref());
+        let read = || sample(&job.index, most, &job.keep, &job.affine, sight.as_ref(), job.camera.is_some().then_some(&job.clip));
         let (points, taken) = match &pool {
             Some(pool) => pool.install(read),
             None => read(),
@@ -243,10 +247,10 @@ struct Held {
 pub struct Stage {
     loader: Loader,
     held: Vec<Held>,
-    /// The view last looked at for detail.
-    looked: Option<Camera>,
-    /// The view as it last was, and when it last changed; when detail was last looked for.
-    seen: Option<Camera>,
+    /// The view last looked at for detail, with its limit boxes and slice (their key).
+    looked: Option<(Camera, String)>,
+    /// The view as it last was (and its boxes and slice), and when it last changed; when detail was last looked for.
+    seen: Option<(Camera, String)>,
     changed_at: Instant,
     looked_at: Instant,
     /// The last sample's reading and sending, ms, and its shading's share of that.
@@ -300,8 +304,9 @@ impl Stage {
             changed = true;
         }
         // When the view last changed (its detail waits for it to rest, or is looked for now and then while it moves).
-        if ask.camera != self.seen {
-            self.seen = ask.camera;
+        let now = ask.camera.map(|c| (c, ask.clip.key.clone()));
+        if now != self.seen {
+            self.seen = now;
             self.changed_at = Instant::now();
         }
         if self.loader.busy() {
@@ -311,7 +316,7 @@ impl Stage {
         for s in &ask.scans {
             let key = key_of(s);
             if !self.held.iter().any(|h| h.key == key && h.base.is_some()) {
-                self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None });
+                self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, clip: Clip::default() });
                 return Ok(changed);
             }
         }
@@ -319,19 +324,19 @@ impl Stage {
         let Some(cam) = ask.camera.filter(|_| !ask.hide && !ask.test) else {
             return Ok(changed);
         };
-        if self.looked == Some(cam) {
+        if self.looked.as_ref().is_some_and(|(c, k)| *c == cam && *k == ask.clip.key) {
             return Ok(changed);
         }
         let rested = self.changed_at.elapsed() >= Duration::from_millis(DETAIL_REST_MS);
         if !rested && self.looked_at.elapsed() < Duration::from_millis(DETAIL_MOVING_MS) {
             return Ok(changed);
         }
-        self.looked = Some(cam);
+        self.looked = Some((cam, ask.clip.key.clone()));
         self.looked_at = Instant::now();
         for s in &ask.scans {
             let key = key_of(s);
             let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
-            let want = wanted(&s.index, s.most, Some(&Sight::new(&cam, &s.affine)));
+            let want = wanted(&s.index, s.most, Some(&Sight::new(&cam, &s.affine)), Some((&ask.clip, &s.affine)));
             if want.of == 0 {
                 continue;
             }
@@ -339,7 +344,7 @@ impl Stage {
             if h.detail.as_ref().is_some_and(|(_, t)| t.covers(&want)) {
                 continue;
             }
-            self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam) });
+            self.loader.give(Job { key, index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: Some(cam), clip: ask.clip.clone() });
             // Looked at again once this one's in (another scan may want its own).
             self.looked = None;
             break;
@@ -660,14 +665,14 @@ fn run(parent: isize, shared: &Shared) -> Result<(), String> {
                 rect: [0.0, 0.0, size[0] as f64, size[1] as f64],
             };
             points = ring.count as u64;
-            gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY, &ring_look)], &Edl::default(), &Shading::default(), CLEAR);
+            gpu.draw(&target, size, Some(&cam), &[(ring, crate::camera::IDENTITY, &ring_look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR);
         } else {
             let list = stage.list(&ask);
             points = list.iter().map(|(c, _, _)| c.count as u64).sum::<u64>().max(points);
             if ask.camera.is_some() && !ask.hide {
                 drew = stage.held(&ask);
             }
-            gpu.draw(&target, size, ask.camera.as_ref(), &list, &ask.edl, &ask.shading, clear);
+            gpu.draw(&target, size, ask.camera.as_ref(), &list, &ask.edl, &ask.shading, &ask.clip, clear);
         }
         frame.present();
         dirty = false;

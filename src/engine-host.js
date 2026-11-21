@@ -272,6 +272,41 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     };
   }
 
+  /** A limit box as the page tests it (1.28's cut, 1.37's view), or nothing where it isn't whole. */
+  const boxOf = (b) =>
+    b && typeof b === "object" && nums(b.min, 3) && nums(b.max, 3) && nums(b.centre, 2) && nums(b.slack, 3) && Number.isFinite(b.cos) && Number.isFinite(b.sin)
+      ? { min: nums(b.min, 3), max: nums(b.max, 3), centre: nums(b.centre, 2), cos: b.cos, sin: b.sin, turned: b.turned === true, outside: b.outside === true, slack: nums(b.slack, 3) }
+      : undefined;
+
+  /**
+   * 1.37: the shapes isolating scan points (the page's cloudIsolate), kept
+   * by the engine under their key; each view then names the key.
+   */
+  function viewShapes(msg) {
+    if (!canView() || typeof engine.viewShapes !== "function") return { error: "This scan engine can't draw isolated points." };
+    try {
+      const f64 = (v) => (v instanceof Float64Array ? v : Array.isArray(v) && v.every((x) => typeof x === "number") ? Float64Array.from(v) : null);
+      const shapes = [];
+      for (const s of Array.isArray(msg.shapes) ? msg.shapes : []) {
+        const poly = s && f64(s.poly);
+        if (!poly || !nums(s.right, 3) || !nums(s.up, 3)) return { error: "The isolated shapes weren't as the engine reads them." };
+        shapes.push({
+          right: nums(s.right, 3),
+          up: nums(s.up, 3),
+          poly,
+          ...(s.op === "and" || s.op === "out" ? { op: s.op } : {}),
+          ...(f64(s.dabs) && f64(s.dabs).length ? { dabs: f64(s.dabs) } : {}),
+          ...(f64(s.near) && f64(s.near).length ? { near: f64(s.near) } : {}),
+          ...(Array.isArray(s.off) && s.off.length ? { off: s.off.filter((c) => Number.isInteger(c) && c >= 0 && c < 256) } : {}),
+        });
+      }
+      engine.viewShapes(String(msg.key), shapes);
+      return { ok: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
   /**
    * 1.36: the page's own points of a scan it has classified or edited
    * (where they are, their classes, which are taken out), for the engine's
@@ -329,6 +364,9 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           });
         }
         const a = msg.ask && typeof msg.ask === "object" ? msg.ask : {};
+        // A limit box or slice not as the engine reads it: said, not drawn without it (the page draws meanwhile).
+        if ((a.boxes != null && !(Array.isArray(a.boxes) && a.boxes.every(boxOf))) || (a.slice != null && !boxOf(a.slice)))
+          return { error: "The limit boxes weren't as the engine reads them.", stats: engine.viewStats() };
         shown = engine.viewShow({
           target: nums(a.target, 3),
           right: nums(a.right, 3),
@@ -348,6 +386,10 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           holdMs: typeof a.holdMs === "number" && a.holdMs > 0 ? a.holdMs : undefined,
           // 1.37: depth shading, relief and face shading, each as the page's own factor.
           shade: nums(a.shade, 3),
+          // 1.37: the limit boxes on and the slice's slab (only what they show is drawn), and the key of the shapes isolating points.
+          ...(Array.isArray(a.boxes) && a.boxes.length ? { boxes: a.boxes.map(boxOf) } : {}),
+          ...(a.slice != null ? { slice: boxOf(a.slice) } : {}),
+          ...(typeof a.isolate === "string" && a.isolate ? { isolate: a.isolate } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };
@@ -426,6 +468,10 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       return;
     }
     // 1.36: the page's own classes for a scan, for the engine's window.
+    if (msg.kind === "view-shapes") {
+      port.postMessage({ kind: "view-shapes", id, key: msg.key, ...viewShapes(msg) });
+      return;
+    }
     if (msg.kind === "view-classes") {
       port.postMessage({ kind: "view-classes", id, key: msg.key, ...viewClasses(msg) });
       return;

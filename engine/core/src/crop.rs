@@ -52,8 +52,9 @@ pub struct CropBox {
 }
 
 impl CropBox {
+    /// Whether a place in the drawing is in it (its slack either way).
     #[inline]
-    fn holds(&self, p: [f64; 3]) -> bool {
+    pub fn holds(&self, p: [f64; 3]) -> bool {
         let (mut x, mut y) = (p[0], p[1]);
         if self.turned {
             let dx = x - self.centre[0];
@@ -67,6 +68,28 @@ impl CropBox {
             && y <= self.max[1] + self.slack[1]
             && p[2] >= self.min[2] - self.slack[2]
             && p[2] <= self.max[2] + self.slack[2]
+    }
+}
+
+impl CropBox {
+    /// Whether a box of the drawing, `lo` to `hi`, may reach into it (said yes to where it only comes near: its corners aren't looked at one by one).
+    pub fn reaches(&self, lo: [f64; 3], hi: [f64; 3]) -> bool {
+        let (mut cx, mut cy) = ((lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0);
+        let (mut ex, mut ey) = ((hi[0] - lo[0]) / 2.0, (hi[1] - lo[1]) / 2.0);
+        if self.turned {
+            let dx = cx - self.centre[0];
+            let dy = cy - self.centre[1];
+            cx = self.centre[0] + dx * self.cos - dy * self.sin;
+            cy = self.centre[1] + dx * self.sin + dy * self.cos;
+            let (c, s) = (self.cos.abs(), self.sin.abs());
+            (ex, ey) = (c * ex + s * ey, s * ex + c * ey);
+        }
+        cx + ex >= self.min[0] - self.slack[0]
+            && cx - ex <= self.max[0] + self.slack[0]
+            && cy + ey >= self.min[1] - self.slack[1]
+            && cy - ey <= self.max[1] + self.slack[1]
+            && hi[2] >= self.min[2] - self.slack[2]
+            && lo[2] <= self.max[2] + self.slack[2]
     }
 }
 

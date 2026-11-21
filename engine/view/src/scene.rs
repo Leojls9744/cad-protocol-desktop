@@ -2,8 +2,10 @@
 //! from, sampled from a scan's index for the view, or made up for the check.
 
 use crate::camera::{Affine, Camera};
+use crate::shapes::Shapes;
 use crate::surface;
 use bytemuck::{Pod, Zeroable};
+use cadp_engine_core::crop::{keeps as boxes_keep, CropBox};
 use cadp_engine_core::Index;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -178,15 +180,17 @@ impl Borrow {
 /// setup alone, or all but those turned off; the file's class codes read
 /// as the scan's class map has them; and, for a scan the page has
 /// classified or edited, the page's own classes and removals (`borrow`).
-/// Withheld points never are. `shade`: their shading from the shape of
-/// their surface is worked out with them (surface.rs). `key` tells one
-/// from another.
+/// Withheld points never are. `isolate`: only the points the shapes
+/// isolated keep (shapes.rs), by where they are in the drawing and their
+/// class. `shade`: their shading from the shape of their surface is worked
+/// out with them (surface.rs). `key` tells one from another.
 #[derive(Clone, Default)]
 pub struct Keep {
     pub setup: Option<u16>,
     pub off: Vec<u16>,
     pub map: Option<Arc<[u8; 256]>>,
     pub borrow: Option<Arc<Borrow>>,
+    pub isolate: Option<Arc<Shapes>>,
     pub shade: bool,
     pub key: String,
 }
@@ -200,7 +204,15 @@ impl Keep {
     /// With its key made from what it holds.
     pub fn keyed(mut self) -> Keep {
         let map = self.map.as_ref().map(|m| m.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3)));
-        self.key = format!("{:?}|{:?}|{:?}|{}|{}", self.setup, self.off, map, self.borrow.as_ref().map(|b| b.key.as_str()).unwrap_or(""), if self.shade { "shaded" } else { "" });
+        self.key = format!(
+            "{:?}|{:?}|{:?}|{}|{}|{}",
+            self.setup,
+            self.off,
+            map,
+            self.borrow.as_ref().map(|b| b.key.as_str()).unwrap_or(""),
+            if self.shade { "shaded" } else { "" },
+            self.isolate.as_ref().map(|s| s.key.as_str()).unwrap_or("")
+        );
         self
     }
 
@@ -208,6 +220,67 @@ impl Keep {
     pub fn keeps(&self, flags: u8, setup: u16) -> bool {
         flags & 4 == 0 && self.setup.is_none_or(|only| only == setup) && !self.off.contains(&setup)
     }
+}
+
+/// What of the scans a view's limit boxes and its slice leave showing, in
+/// the drawing, as the page tests them (cloud-limits.ts cropsKeeper: out of
+/// every box that shows what's outside it, and in one of those that show
+/// what's inside; and in the slice's slab). A scan's detail for a view is
+/// read by it (only what shows takes up the scan's budget of points, so a
+/// thin slice comes as dense as its file has it); the card tests each
+/// point by it too (gpu.rs), so a box dragged shows at once on the points
+/// held. `key` tells one from another.
+#[derive(Clone, Debug, Default)]
+pub struct Clip {
+    pub boxes: Vec<CropBox>,
+    pub slice: Option<CropBox>,
+    pub key: String,
+}
+
+/// The most limit boxes the card tests (the page's CARD_BOXES).
+pub const CLIP_BOXES: usize = 8;
+
+impl Clip {
+    /// Nothing clipped.
+    pub fn is_none(&self) -> bool {
+        self.boxes.is_empty() && self.slice.is_none()
+    }
+
+    /// With its key made from what it holds.
+    pub fn keyed(mut self) -> Clip {
+        let word = |b: &CropBox| format!("{:?}{:?}{:?}{}{}{}{}{:?}", b.min, b.max, b.centre, b.cos, b.sin, b.turned, b.outside, b.slack);
+        self.key = self.boxes.iter().map(word).chain(self.slice.iter().map(|s| format!("/{}", word(s)))).collect::<Vec<_>>().join(";");
+        self
+    }
+
+    /// Whether a place in the drawing shows.
+    #[inline]
+    pub fn keeps(&self, p: [f64; 3]) -> bool {
+        boxes_keep(&self.boxes, p) && self.slice.as_ref().is_none_or(|s| s.holds(p))
+    }
+
+    /// Whether a box of the drawing may hold a place that shows.
+    pub fn reaches(&self, lo: [f64; 3], hi: [f64; 3]) -> bool {
+        if self.slice.as_ref().is_some_and(|s| !s.reaches(lo, hi)) {
+            return false;
+        }
+        let mut inside = self.boxes.iter().filter(|b| !b.outside).peekable();
+        inside.peek().is_none() || inside.any(|b| b.reaches(lo, hi))
+    }
+}
+
+/// A box of a scan's file (`lo` to `hi`) as the box of the drawing that holds it.
+pub fn drawn_box(affine: &Affine, lo: [f64; 3], hi: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let mid = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let half = [(hi[0] - lo[0]) / 2.0, (hi[1] - lo[1]) / 2.0, (hi[2] - lo[2]) / 2.0];
+    let mut out = ([0.0; 3], [0.0; 3]);
+    for r in 0..3 {
+        let c = affine[r * 4] * mid[0] + affine[r * 4 + 1] * mid[1] + affine[r * 4 + 2] * mid[2] + affine[r * 4 + 3];
+        let e = affine[r * 4].abs() * half[0] + affine[r * 4 + 1].abs() * half[1] + affine[r * 4 + 2].abs() * half[2];
+        out.0[r] = c - e;
+        out.1[r] = c + e;
+    }
+    out
 }
 
 /// What a view sees of a scan: the cells whose boxes reach into the
@@ -262,19 +335,20 @@ impl Sight {
     }
 }
 
-/// What a sample holds of its scan: which cells (a bit each) and what share of each one's points.
+/// What a sample holds of its scan: which cells (a bit each) and what share of each one's points, and the limit boxes and slice it was read by (their key).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Taken {
     pub cells: Vec<u64>,
     pub share: f64,
     /// The points of the cells taken, all told (before the share).
     pub of: u64,
+    pub clip: String,
 }
 
 impl Taken {
     /// Whether this holds what `want` asks: its cells, at about its share (a little less passes: a zoom of a notch isn't sampled again).
     pub fn covers(&self, want: &Taken) -> bool {
-        if self.cells.len() != want.cells.len() {
+        if self.cells.len() != want.cells.len() || self.clip != want.clip {
             return false;
         }
         if want.cells.iter().zip(&self.cells).any(|(w, h)| w & !h != 0) {
@@ -292,8 +366,9 @@ const READ_MOST: f64 = 50.0;
 /// How many points the share kept is judged from.
 const PROBE: f64 = 400_000.0;
 
-/// The cells a view sees (all with no view) and the share of each that makes about `most` points.
-pub fn wanted(ix: &Index, most: usize, sight: Option<&Sight>) -> Taken {
+/// The cells a view sees (all with no view) that its limit boxes and slice may show something of, and the share of each that makes about `most` points.
+pub fn wanted(ix: &Index, most: usize, sight: Option<&Sight>, clip: Option<(&Clip, &Affine)>) -> Taken {
+    let clip = clip.filter(|(c, _)| !c.is_none());
     let mut cells = vec![0u64; ix.cells.div_ceil(64)];
     let mut of = 0u64;
     for k in 0..ix.cells {
@@ -308,11 +383,19 @@ pub fn wanted(ix: &Index, most: usize, sight: Option<&Sight>) -> Taken {
                 continue;
             }
         }
+        if let Some((c, affine)) = clip {
+            let lo = ix.file_xyz(cell.min[0], cell.min[1], cell.min[2]);
+            let hi = ix.file_xyz(cell.max[0], cell.max[1], cell.max[2]);
+            let (lo, hi) = drawn_box(affine, lo, hi);
+            if !c.reaches(lo, hi) {
+                continue;
+            }
+        }
         cells[k / 64] |= 1 << (k % 64);
         of += cell.count as u64;
     }
     let share = if of == 0 { 0.0 } else { (most as f64 / of as f64).min(1.0) };
-    Taken { cells, share, of }
+    Taken { cells, share, of, clip: clip.map(|(c, _)| c.key.clone()).unwrap_or_default() }
 }
 
 /// Blue to yellow-green as `t` goes from 0 to 1: the page's elevation colours (point-cloud.ts ELEVATION_RAMP), for the check's ring.
@@ -332,20 +415,30 @@ pub const RAMP: [[f64; 3]; 7] =
 /// A sample of a scan for a view: the cells it sees (all of them with no
 /// view), the same first share of each (each cell's points are shuffled in
 /// the index, so a first part of one is an even sample of it), about
-/// `most` points of those `keep` keeps. `affine`: the scan's file into the
-/// drawing, for the page's classes and for the shading (the drawing's
-/// north-west and up). Read on every core.
-pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Option<&Sight>) -> (Points, Taken) {
+/// `most` points of those `keep` keeps and `clip` (the view's limit boxes
+/// and slice) shows. `affine`: the scan's file into the drawing, for the
+/// page's classes, the boxes and the shading (the drawing's north-west and
+/// up). Read on every core.
+pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Option<&Sight>, clip: Option<&Clip>) -> (Points, Taken) {
+    let clip = clip.filter(|c| !c.is_none());
+    let drawn = |at: [f64; 3]| {
+        [
+            affine[0] * at[0] + affine[1] * at[1] + affine[2] * at[2] + affine[3],
+            affine[4] * at[0] + affine[5] * at[1] + affine[6] * at[2] + affine[7],
+            affine[8] * at[0] + affine[9] * at[1] + affine[10] * at[2] + affine[11],
+        ]
+    };
     let lo = ix.file_xyz(ix.min[0], ix.min[1], ix.min[2]);
     let hi = ix.file_xyz(ix.max[0], ix.max[1], ix.max[2]);
     let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
     let half = [(hi[0] - lo[0]) / 2.0, (hi[1] - lo[1]) / 2.0, (hi[2] - lo[2]) / 2.0];
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
-    let mut taken = wanted(ix, most, sight);
+    let mut taken = wanted(ix, most, sight, clip.map(|c| (c, affine)));
     let list: Vec<usize> = (0..ix.cells).filter(|k| taken.cells[k / 64] >> (k % 64) & 1 == 1).collect();
     let count = taken.of as f64;
-    // The share of its points kept by setup, judged from a small even sample, so about `most` of the kept are taken.
-    let by_setup = keep.setup.is_some() || !keep.off.is_empty();
+    // The share of its points kept by setup and shown by the boxes and slice, judged from a small even sample, so about `most` of those are taken.
+    let isolate = keep.isolate.as_ref().filter(|s| !s.is_empty());
+    let by_setup = keep.setup.is_some() || !keep.off.is_empty() || clip.is_some() || isolate.is_some();
     let kept = if !by_setup || taken.of == 0 {
         1.0
     } else {
@@ -360,9 +453,18 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
                     for i in cell.start..cell.start + take {
                         let p = ix.point(i);
                         seen += 1;
-                        if keep.keeps(p.flags, p.setup) {
-                            passed += 1;
+                        if !keep.keeps(p.flags, p.setup) {
+                            continue;
                         }
+                        // By where it is: the boxes and slice, and what's isolated (by the file's class as mapped: near enough to judge a share by).
+                        if clip.is_some() || isolate.is_some() {
+                            let d = drawn(ix.file_xyz(p.x, p.y, p.z));
+                            let class = keep.map.as_ref().map_or(p.class, |m| m[p.class as usize]);
+                            if clip.is_some_and(|c| !c.keeps(d)) || isolate.is_some_and(|s| !s.keeps(d, class)) {
+                                continue;
+                            }
+                        }
+                        passed += 1;
                     }
                 }
                 (seen, passed)
@@ -392,22 +494,23 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
                         continue;
                     }
                     let at = ix.file_xyz(p.x, p.y, p.z);
+                    if clip.is_some_and(|c| !c.keeps(drawn(at))) {
+                        continue;
+                    }
                     let mut class = match &keep.map {
                         Some(m) => m[p.class as usize],
                         None => p.class,
                     };
                     if let Some(b) = &keep.borrow {
-                        let d = [
-                            affine[0] * at[0] + affine[1] * at[1] + affine[2] * at[2] + affine[3],
-                            affine[4] * at[0] + affine[5] * at[1] + affine[6] * at[2] + affine[7],
-                            affine[8] * at[0] + affine[9] * at[1] + affine[10] * at[2] + affine[11],
-                        ];
-                        if let Some((c, gone)) = b.at(d) {
+                        if let Some((c, gone)) = b.at(drawn(at)) {
                             if gone {
                                 continue;
                             }
                             class = c;
                         }
+                    }
+                    if isolate.is_some_and(|s| !s.keeps(drawn(at), class)) {
+                        continue;
                     }
                     out.push(PointVertex {
                         pos: [(at[0] - centre[0]) as f32, (at[1] - centre[1]) as f32, (at[2] - centre[2]) as f32],
@@ -458,6 +561,49 @@ pub fn test_ring(n: usize, centre: [f64; 3]) -> Points {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A limit box as the page gives it (point-clouds.ts engineBoxes): its turn undone, a millionth of slack.
+    fn limit(min: [f64; 3], max: [f64; 3], angle: f64, outside: bool) -> CropBox {
+        let a = -angle.to_radians();
+        CropBox { min, max, centre: [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0], cos: a.cos(), sin: a.sin(), turned: a != 0.0, outside, slack: [1e-6; 3] }
+    }
+
+    #[test]
+    fn limit_boxes_and_a_slice_show_what_the_page_s_show() {
+        // None: everything.
+        let none = Clip::default();
+        assert!(none.is_none() && none.keeps([1e9, -1e9, 5.0]) && none.reaches([0.0; 3], [1.0; 3]));
+        // One box showing what's inside it.
+        let inside = Clip { boxes: vec![limit([0.0, 0.0, 0.0], [10.0, 4.0, 3.0], 0.0, false)], slice: None, key: String::new() }.keyed();
+        assert!(inside.keeps([5.0, 2.0, 1.0]) && !inside.keeps([5.0, 5.0, 1.0]) && !inside.keeps([5.0, 2.0, 4.0]));
+        // Two: in either; and out of one that shows what's outside it.
+        let two = Clip { boxes: vec![limit([0.0, 0.0, 0.0], [10.0, 4.0, 3.0], 0.0, false), limit([20.0, 0.0, 0.0], [30.0, 4.0, 3.0], 0.0, false), limit([4.0, 1.0, 0.0], [6.0, 3.0, 3.0], 0.0, true)], slice: None, key: String::new() }.keyed();
+        assert!(two.keeps([1.0, 2.0, 1.0]) && two.keeps([25.0, 2.0, 1.0]) && !two.keeps([15.0, 2.0, 1.0]) && !two.keeps([5.0, 2.0, 1.0]));
+        assert_ne!(inside.key, two.key);
+        // Only boxes that show what's outside them: everything but their insides.
+        let hole = Clip { boxes: vec![limit([4.0, 1.0, 0.0], [6.0, 3.0, 3.0], 0.0, true)], slice: None, key: String::new() }.keyed();
+        assert!(hole.keeps([100.0, 100.0, 100.0]) && !hole.keeps([5.0, 2.0, 1.0]));
+        // Turned 45° about its middle (5, 2): its long way runs north-east.
+        let turned = Clip { boxes: vec![limit([0.0, 0.0, 0.0], [10.0, 4.0, 3.0], 45.0, false)], slice: None, key: String::new() }.keyed();
+        assert!(turned.keeps([8.0, 5.0, 1.0]) && !turned.keeps([9.0, 2.0, 1.0]) && turned.keeps([2.0, -1.0, 1.0]));
+        // A slice with the boxes: in both.
+        let level = limit([-1e12, -1e12, 0.9], [1e12, 1e12, 1.1], 0.0, false);
+        let sliced = Clip { boxes: inside.boxes.clone(), slice: Some(level.clone()), key: String::new() }.keyed();
+        assert!(sliced.keeps([5.0, 2.0, 1.0]) && !sliced.keeps([5.0, 2.0, 2.0]) && !sliced.keeps([50.0, 2.0, 1.0]));
+        assert_ne!(sliced.key, inside.key);
+        // The boxes of the drawing each may show something of: reached, or surely not.
+        assert!(inside.reaches([9.0, 3.0, 2.0], [12.0, 6.0, 5.0]) && !inside.reaches([11.0, 0.0, 0.0], [12.0, 4.0, 3.0]) && !inside.reaches([0.0, 0.0, 3.5], [10.0, 4.0, 5.0]));
+        assert!(two.reaches([22.0, 1.0, 1.0], [23.0, 2.0, 2.0]) && !two.reaches([12.0, 0.0, 0.0], [18.0, 4.0, 3.0]));
+        // One that shows what's outside it turns nothing away (a box inside it isn't looked for).
+        assert!(hole.reaches([4.5, 1.5, 1.0], [5.5, 2.5, 2.0]));
+        assert!(sliced.reaches([4.0, 1.0, 0.5], [6.0, 3.0, 1.0]) && !sliced.reaches([4.0, 1.0, 1.5], [6.0, 3.0, 2.5]));
+        // A turned box: a box off its end but inside its unturned outline isn't reached; one along its turned length is.
+        assert!(!turned.reaches([8.5, 0.0, 0.0], [10.0, 0.8, 3.0]) && turned.reaches([7.0, 4.0, 0.0], [8.0, 5.0, 3.0]));
+        // A box of a scan's file as the box of the drawing that holds it: moved, scaled and turned.
+        let quarter = [0.0, -2.0, 0.0, 100.0, 2.0, 0.0, 0.0, 200.0, 0.0, 0.0, 2.0, 7.0];
+        let (lo, hi) = drawn_box(&quarter, [1.0, 2.0, 3.0], [2.0, 4.0, 4.0]);
+        assert_eq!((lo, hi), ([92.0, 202.0, 13.0], [96.0, 204.0, 15.0]));
+    }
 
     #[test]
     fn a_vertex_is_24_bytes_as_the_card_reads_it() {
@@ -555,16 +701,16 @@ mod tests {
 
     #[test]
     fn a_sample_covers_a_view_inside_it_at_about_its_share() {
-        let held = Taken { cells: vec![0b1111, 0b1], share: 0.5, of: 100 };
-        assert!(held.covers(&Taken { cells: vec![0b0110, 0], share: 0.5, of: 40 }));
+        let held = Taken { cells: vec![0b1111, 0b1], share: 0.5, of: 100, clip: String::new() };
+        assert!(held.covers(&Taken { cells: vec![0b0110, 0], share: 0.5, of: 40, clip: String::new() }));
         // A little more wanted: still it.
-        assert!(held.covers(&Taken { cells: vec![0b0110, 0], share: 0.6, of: 40 }));
+        assert!(held.covers(&Taken { cells: vec![0b0110, 0], share: 0.6, of: 40, clip: String::new() }));
         // Much more (zoomed in), or a cell it hasn't (panned): not.
-        assert!(!held.covers(&Taken { cells: vec![0b0110, 0], share: 1.0, of: 40 }));
-        assert!(!held.covers(&Taken { cells: vec![0b10000, 0], share: 0.1, of: 40 }));
+        assert!(!held.covers(&Taken { cells: vec![0b0110, 0], share: 1.0, of: 40, clip: String::new() }));
+        assert!(!held.covers(&Taken { cells: vec![0b10000, 0], share: 0.1, of: 40, clip: String::new() }));
         // Every point of its cells: whatever share is wanted of them.
-        let whole = Taken { cells: vec![0b11], share: 1.0, of: 10 };
-        assert!(whole.covers(&Taken { cells: vec![0b01], share: 1.0, of: 5 }));
-        assert!(!whole.covers(&Taken { cells: vec![0b01, 0], share: 1.0, of: 5 }));
+        let whole = Taken { cells: vec![0b11], share: 1.0, of: 10, clip: String::new() };
+        assert!(whole.covers(&Taken { cells: vec![0b01], share: 1.0, of: 5, clip: String::new() }));
+        assert!(!whole.covers(&Taken { cells: vec![0b01, 0], share: 1.0, of: 5, clip: String::new() }));
     }
 }

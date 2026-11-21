@@ -9,7 +9,9 @@
 //! page mixes it, then brightened or darkened by the shape of the surface
 //! it's on (its lighting, relief, edges and hollows: surface.rs's four
 //! bytes, at the strengths the view asks for). Nearer points cover further
-//! ones (a depth buffer).
+//! ones (a depth buffer). A point the view's limit boxes or slice don't
+//! show is put nowhere (`Clip`, tested on the card as the page's own card
+//! tests its boxes, so a box dragged shows at once).
 //!
 //! A frame is two passes: the points into a picture of the engine's own
 //! with their depths, then that picture onto the window shaded from the
@@ -21,7 +23,7 @@
 //! there's no window).
 
 use crate::camera::{columns, Affine, Camera};
-use crate::scene::{PointVertex, Points, RAMP};
+use crate::scene::{Clip, PointVertex, Points, CLIP_BOXES, RAMP};
 use crate::surface;
 
 /// What the page behind shows where nothing's drawn: the drawing's own background is the page's to give.
@@ -123,6 +125,14 @@ struct U {{
   flags: vec4<f32>,
   // The surface shading's strengths, 0 to 1: lighting, detail, hollows.
   lit: vec4<f32>,
+  // The scan's own axes in the drawing (a point's place from its scan's middle, turned and scaled into the drawing).
+  turn: array<vec4<f32>, 3>,
+  // x: how many limit boxes are on; y: a slice is on (the last of the boxes' places).
+  clips: vec4<f32>,
+  // Each box: its middle from the scan's middle in the drawing, and its side (1: shows what's inside, -1: what's outside); its half sizes; its turn's cosine and sine.
+  boxc: array<vec4<f32>, {slots}>,
+  boxh: array<vec4<f32>, {slots}>,
+  boxr: array<vec4<f32>, {slots}>,
   classes: array<vec4<f32>, 256>,
 }};
 @group(0) @binding(0) var<uniform> u: U;
@@ -132,6 +142,38 @@ struct VOut {{
   @location(0) color: vec3<f32>,
   @location(1) q: vec2<f32>,
 }};
+
+// Whether a box holds a place (from the scan's middle, in the drawing).
+fn in_box(d: vec3<f32>, k: u32) -> bool {{
+  let o = d - u.boxc[k].xyz;
+  let r = u.boxr[k];
+  let q = vec3<f32>(o.x * r.x - o.y * r.y, o.x * r.y + o.y * r.x, o.z);
+  return all(abs(q) <= u.boxh[k].xyz);
+}}
+
+// Whether the limit boxes and the slice show a place (the page's inBoxes): out of every box that shows what's outside it, in one of those that show what's inside; and in the slice.
+fn shown(d: vec3<f32>) -> bool {{
+  if (u.clips.y > 0.5 && !in_box(d, {boxes}u)) {{
+    return false;
+  }}
+  var any = false;
+  var hit = false;
+  let n = u32(u.clips.x);
+  for (var k = 0u; k < n; k++) {{
+    let inside = in_box(d, k);
+    if (u.boxc[k].w < 0.0) {{
+      if (inside) {{
+        return false;
+      }}
+    }} else {{
+      any = true;
+      if (inside) {{
+        hit = true;
+      }}
+    }}
+  }}
+  return !any || hit;
+}}
 
 fn ramp(t: f32) -> vec3<f32> {{
   var stops = array<vec3<f32>, 7>({stops});
@@ -151,6 +193,11 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c:
   o.color = vec3<f32>(0.0);
   // Its class's layer is off: nowhere.
   if (entry.a < 0.5) {{
+    o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    return o;
+  }}
+  // Not shown by the limit boxes or the slice: nowhere.
+  if (u.clips.x + u.clips.y > 0.5 && !shown(vec3<f32>(dot(u.turn[0].xyz, p), dot(u.turn[1].xyz, p), dot(u.turn[2].xyz, p)))) {{
     o.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
     return o;
   }}
@@ -208,7 +255,9 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {{
 }}
 "#,
         stops = stops.join(", "),
-        level = surface::light_level()
+        level = surface::light_level(),
+        slots = CLIP_BOXES + 1,
+        boxes = CLIP_BOXES
     )
 }
 
@@ -415,6 +464,11 @@ struct Uniforms {
     one: [f32; 4],
     flags: [f32; 4],
     lit: [f32; 4],
+    turn: [[f32; 4]; 3],
+    clips: [f32; 4],
+    boxc: [[f32; 4]; CLIP_BOXES + 1],
+    boxh: [[f32; 4]; CLIP_BOXES + 1],
+    boxr: [[f32; 4]; CLIP_BOXES + 1],
     classes: [[f32; 4]; 256],
 }
 
@@ -729,7 +783,8 @@ impl Gpu {
 
     /// A frame: each scan through the view, as its look has it, into
     /// `target` (`size` pixels), shaded from its depths (`shading`) and
-    /// with eye-dome lighting. With no view, the background alone.
+    /// with eye-dome lighting, only what the limit boxes and slice show
+    /// (`clip`). With no view, the background alone.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -739,6 +794,7 @@ impl Gpu {
         clouds: &[(&Cloud, Affine, &Look)],
         edl: &Edl,
         shading: &Shading,
+        clip: &Clip,
         clear: [f64; 4],
     ) {
         self.frame_for(size);
@@ -770,6 +826,26 @@ impl Gpu {
                     classes[k] = [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0, if c[3] > 0 { 1.0 } else { 0.0 }];
                 }
                 let mixing = look.mix[2] > 0.0 && look.mix[1] > look.mix[0] && look.by != BY_INTENSITY;
+                // The limit boxes and the slice, from the scan's middle in the drawing (worked out in f64: a drawing far from 0 keeps its places).
+                let mid = [
+                    affine[0] * cloud.centre[0] + affine[1] * cloud.centre[1] + affine[2] * cloud.centre[2] + affine[3],
+                    affine[4] * cloud.centre[0] + affine[5] * cloud.centre[1] + affine[6] * cloud.centre[2] + affine[7],
+                    mid_z,
+                ];
+                let mut boxc = [[0.0f32; 4]; CLIP_BOXES + 1];
+                let mut boxh = [[0.0f32; 4]; CLIP_BOXES + 1];
+                let mut boxr = [[1.0f32, 0.0, 0.0, 0.0]; CLIP_BOXES + 1];
+                let boxes = clip.boxes.len().min(CLIP_BOXES);
+                for (k, b) in clip.boxes.iter().take(CLIP_BOXES).map(|b| (None, b)).chain(clip.slice.iter().map(|b| (Some(CLIP_BOXES), b))).enumerate().map(|(k, (at, b))| (at.unwrap_or(k), b)) {
+                    for a in 0..3 {
+                        boxc[k][a] = ((b.min[a] + b.max[a]) / 2.0 - mid[a]) as f32;
+                        boxh[k][a] = ((b.max[a] - b.min[a]) / 2.0 + b.slack[a]) as f32;
+                    }
+                    boxc[k][3] = if b.outside { -1.0 } else { 1.0 };
+                    if b.turned {
+                        boxr[k] = [b.cos as f32, b.sin as f32, 0.0, 0.0];
+                    }
+                }
                 let u = Uniforms {
                     m: columns(&m),
                     size: [(half / size[0].max(1) as f64) as f32, (half / size[1].max(1) as f64) as f32, if look.round { 1.0 } else { 0.0 }, look.by as f32],
@@ -779,6 +855,15 @@ impl Gpu {
                     flags: [if cloud.colours { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                     // Points whose shading isn't worked out are drawn as they are.
                     lit: if cloud.shaded { [look.shade[0].clamp(0.0, 1.0), look.shade[1].clamp(0.0, 1.0), look.shade[2].clamp(0.0, 1.0), 0.0] } else { [0.0; 4] },
+                    turn: [
+                        [affine[0] as f32, affine[1] as f32, affine[2] as f32, 0.0],
+                        [affine[4] as f32, affine[5] as f32, affine[6] as f32, 0.0],
+                        [affine[8] as f32, affine[9] as f32, affine[10] as f32, 0.0],
+                    ],
+                    clips: [boxes as f32, if clip.slice.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0],
+                    boxc,
+                    boxh,
+                    boxr,
                     classes,
                 };
                 self.queue.write_buffer(&cloud.uniforms, 0, bytemuck::bytes_of(&u));
@@ -861,6 +946,7 @@ impl Gpu {
         clouds: &[(&Cloud, Affine, &Look)],
         edl: &Edl,
         shading: &Shading,
+        clip: &Clip,
         clear: [f64; 4],
     ) -> Result<Vec<u8>, String> {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -874,7 +960,7 @@ impl Gpu {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        self.draw(&view, size, camera, clouds, edl, shading, clear);
+        self.draw(&view, size, camera, clouds, edl, shading, clip, clear);
         // Rows are sent padded to 256 bytes.
         let row = (size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {

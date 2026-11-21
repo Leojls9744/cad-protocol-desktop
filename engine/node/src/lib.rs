@@ -744,6 +744,24 @@ impl Task for CropTask {
     }
 }
 
+/// A limit box as the engine tests it, from the page's.
+fn crop_box(b: &CropBoxJs) -> Result<CropBox> {
+    let c = &b.centre;
+    if c.len() != 2 || !b.cos.is_finite() || !b.sin.is_finite() {
+        return Err(Error::from_reason("a box needs its centre and turn"));
+    }
+    Ok(CropBox {
+        min: three_finite(&b.min, "a box's min")?,
+        max: three_finite(&b.max, "a box's max")?,
+        centre: [c[0], c[1]],
+        cos: b.cos,
+        sin: b.sin,
+        turned: b.turned,
+        outside: b.outside,
+        slack: three_finite(&b.slack, "a box's slack")?,
+    })
+}
+
 fn three_finite(v: &[f64], what: &str) -> Result<[f64; 3]> {
     if v.len() != 3 || v.iter().any(|x| x.is_nan()) {
         return Err(Error::from_reason(format!("{what} needs three numbers")));
@@ -770,20 +788,7 @@ pub fn crop_scan(handle: u32, ask: CropAskJs, out: String) -> Result<AsyncTask<C
     affine.copy_from_slice(&ask.affine);
     let mut boxes = Vec::with_capacity(ask.boxes.len());
     for b in &ask.boxes {
-        let c = &b.centre;
-        if c.len() != 2 || !b.cos.is_finite() || !b.sin.is_finite() {
-            return Err(Error::from_reason("a box needs its centre and turn"));
-        }
-        boxes.push(CropBox {
-            min: three_finite(&b.min, "a box's min")?,
-            max: three_finite(&b.max, "a box's max")?,
-            centre: [c[0], c[1]],
-            cos: b.cos,
-            sin: b.sin,
-            turned: b.turned,
-            outside: b.outside,
-            slack: three_finite(&b.slack, "a box's slack")?,
-        });
+        boxes.push(crop_box(b)?);
     }
     Ok(AsyncTask::new(CropTask {
         ix,
@@ -1205,6 +1210,58 @@ fn keep_borrow(handle: u32, borrow: Arc<cadp_engine_view::Borrow>) {
     }
 }
 
+/// The shapes isolating scan points (1.37), by their key: the newest few kept (the page gives them once, then names them with each view).
+static SHAPES: LazyLock<Mutex<Vec<Arc<cadp_engine_view::Shapes>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+const SHAPES_KEPT: usize = 8;
+
+/// A shape isolating scan points (1.37), as the page keeps it: its view's across and up, its corners across and up it, what it does to the points kept before it ("and", "out", or none: adds), a brushed one's dabs and their cuts toward the eye, and the classes off as it was drawn.
+#[napi(object)]
+pub struct ViewShapeJs {
+    pub right: Vec<f64>,
+    pub up: Vec<f64>,
+    pub poly: Float64Array,
+    pub op: Option<String>,
+    pub dabs: Option<Float64Array>,
+    pub near: Option<Float64Array>,
+    pub off: Option<Vec<u32>>,
+}
+
+/// The shapes isolating scan points, kept under `key` for the views that name it.
+#[napi]
+pub fn view_shapes(key: String, shapes: Vec<ViewShapeJs>) -> Result<bool> {
+    let mut list = Vec::with_capacity(shapes.len());
+    for s in shapes {
+        let (Some(right), Some(up)) = (view_three(&Some(s.right)), view_three(&Some(s.up))) else {
+            return Err(Error::from_reason("a shape needs its view's across and up"));
+        };
+        if s.poly.iter().any(|v| !v.is_finite()) || s.dabs.as_ref().is_some_and(|d| d.len() % 3 != 0 || d.iter().any(|v| !v.is_finite())) {
+            return Err(Error::from_reason("a shape's corners and dabs must be numbers"));
+        }
+        let op = match s.op.as_deref() {
+            Some("and") => cadp_engine_view::Op::And,
+            Some("out") => cadp_engine_view::Op::Out,
+            _ => cadp_engine_view::Op::Add,
+        };
+        list.push(cadp_engine_view::ShapeIn {
+            right,
+            up,
+            poly: s.poly.to_vec(),
+            op,
+            dabs: s.dabs.map(|d| d.to_vec()).unwrap_or_default(),
+            near: s.near.map(|n| n.to_vec()),
+            off: s.off.unwrap_or_default().into_iter().filter(|c| *c < 256).map(|c| c as u8).collect(),
+        });
+    }
+    let made = Arc::new(cadp_engine_view::Shapes::new(key, list));
+    let mut held = SHAPES.lock().unwrap();
+    held.retain(|s| s.key != made.key);
+    held.push(made);
+    if held.len() > SHAPES_KEPT {
+        held.remove(0);
+    }
+    Ok(true)
+}
+
 /// How a scan's points look (1.36), as the page has them.
 #[napi(object)]
 pub struct ViewLookJs {
@@ -1273,6 +1330,11 @@ pub struct ViewAskJs {
     pub hold_ms: Option<f64>,
     /// The shading from the picture's depths (1.37), each as the page's own factor: depth shading (shadingFactor), relief (reliefFactor) and face shading (faceFactor).
     pub shade: Option<Vec<f64>>,
+    /// The limit boxes that are on (1.37), as the page tests them, and the slice's slab as one: only what they show is drawn.
+    pub boxes: Option<Vec<CropBoxJs>>,
+    pub slice: Option<CropBoxJs>,
+    /// The points isolated (1.37): the key of the shapes given with view_shapes. Scans are left out till they're in.
+    pub isolate: Option<String>,
 }
 
 #[napi(object)]
@@ -1438,8 +1500,17 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     };
     let indexes = INDEXES.lock().unwrap();
     let borrows = BORROWS.lock().unwrap();
+    // The points isolated: by the shapes the page gave under this key (none in yet: no scan drawn till they are).
+    let isolate = match &ask.isolate {
+        Some(key) => match SHAPES.lock().unwrap().iter().find(|s| &s.key == key) {
+            Some(s) => Some(Some(s.clone())),
+            None => None,
+        },
+        None => Some(None),
+    };
     let mut scans = Vec::new();
     for s in ask.scans.unwrap_or_default() {
+        let Some(isolate) = &isolate else { break };
         let Some(index) = indexes.get(&s.handle) else { continue };
         if s.affine.len() != 12 || s.affine.iter().any(|x| !x.is_finite()) {
             continue;
@@ -1471,6 +1542,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         }
         // Lit by the shape of its surface: that's worked out as its points are read.
         keep.shade = look.shade.iter().any(|v| *v > 0.0);
+        keep.isolate = isolate.clone();
         scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep: keep.keyed(), look });
     }
     let shown = scans.len() as u32;
@@ -1483,6 +1555,14 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         Some(s) => cadp_engine_view::Shading { depth: s[0].max(0.0), relief: s[1].max(0.0), faces: s[2].clamp(0.0, 1.0) },
         None => cadp_engine_view::Shading::default(),
     };
+    // The limit boxes and the slice (one not as the engine reads it: none of them, and the page's own count of scans drawn says so).
+    let mut clip = cadp_engine_view::Clip::default();
+    for b in ask.boxes.iter().flatten().take(cadp_engine_view::CLIP_BOXES) {
+        clip.boxes.push(crop_box(b)?);
+    }
+    if let Some(b) = &ask.slice {
+        clip.slice = Some(crop_box(b)?);
+    }
     view.show(cadp_engine_view::Ask {
         camera,
         scans,
@@ -1492,6 +1572,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         serial,
         edl,
         shading,
+        clip: clip.keyed(),
         hold_ms: ask.hold_ms.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0),
     });
     Ok(shown)

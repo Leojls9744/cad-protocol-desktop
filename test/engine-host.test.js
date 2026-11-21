@@ -486,6 +486,10 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
     },
     viewStats: () => ({ started: true, running: true, frames: 12, points: 10, adapter: "A card" }),
     viewStop: () => calls.push(["stop"]),
+    viewShapes: (...args) => {
+      calls.push(["shapes", args]);
+      return true;
+    },
     viewBorrow: (...args) => {
       calls.push(["borrow", args]);
       // Told only their classes the first time: their places are needed too.
@@ -587,6 +591,47 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   page.emit("message", { data: { kind: "view-classes", id: 22, token: "t1", key: "k1", pointsKey: "p1", cell: 0.4, origin: [100, 200, 3], xyz, classification: cls, removed: null } });
   assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 22, key: "k1", ok: true });
   assert.deepEqual(calls.at(-1), ["borrow", [7, "k1", "p1", 0.4, [100, 200, 3], xyz, cls, null]]);
+  // 1.37: the limit boxes on, the slice's slab and the isolated shapes' key go with a view, as the engine reads them.
+  const box = { min: [0, 0, 0], max: [10, 4, 3], centre: [5, 2], cos: 1, sin: 0, turned: false, outside: false, slack: [1e-6, 1e-6, 1e-6], junk: 1 };
+  const slab = { min: [-1e12, -1e12, 1], max: [1e12, 1e12, 1.1], centre: [0, 0], cos: 0.5, sin: 0.5, turned: true, outside: false, slack: [1e-6, 1e-6, 1e-6] };
+  const boxed = { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [0, 0, 300, 200] };
+  page.emit("message", { data: { kind: "view", id: 30, scans: [{ token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }], ask: { ...boxed, boxes: [box], slice: slab, isolate: "its shapes" } } });
+  const clipped = calls.at(-1)[1];
+  assert.deepEqual(clipped.boxes, [{ min: [0, 0, 0], max: [10, 4, 3], centre: [5, 2], cos: 1, sin: 0, turned: false, outside: false, slack: [1e-6, 1e-6, 1e-6] }]);
+  assert.deepEqual(clipped.slice, slab);
+  assert.equal(clipped.isolate, "its shapes");
+  // None: none said.
+  page.emit("message", { data: { kind: "view", id: 31, scans: [], ask: { ...boxed, boxes: [] } } });
+  assert.equal("boxes" in calls.at(-1)[1] || "slice" in calls.at(-1)[1] || "isolate" in calls.at(-1)[1], false);
+  // A box not as the engine reads it: said, and nothing shown without it.
+  const shows = calls.filter((c) => c[0] === "show").length;
+  page.emit("message", { data: { kind: "view", id: 32, scans: [], ask: { ...boxed, boxes: [box, { min: [0, 0], max: [1, 1, 1] }] } } });
+  assert.match(page.out.at(-1).error, /limit boxes weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view", id: 33, scans: [], ask: { ...boxed, slice: { min: [0, 0, 0] } } } });
+  assert.match(page.out.at(-1).error, /limit boxes weren't as the engine reads them/);
+  assert.equal(calls.filter((c) => c[0] === "show").length, shows);
+  // The isolated shapes, given once under their key.
+  const poly = new Float64Array([0, 0, 10, 0, 10, 10]);
+  page.emit("message", {
+    data: {
+      kind: "view-shapes",
+      id: 34,
+      key: "its shapes",
+      shapes: [
+        { right: [1, 0, 0], up: [0, 1, 0], poly },
+        { right: [1, 0, 0], up: [0, 0, 1], poly: [0, 0, 1, 0, 1, 1], op: "out", dabs: [1, 1, 0.5], near: [3], off: [7, 18, 999, -1], junk: true },
+      ],
+    },
+  });
+  assert.deepEqual(page.out.at(-1), { kind: "view-shapes", id: 34, key: "its shapes", ok: true });
+  assert.equal(calls.at(-1)[0], "shapes");
+  assert.equal(calls.at(-1)[1][0], "its shapes");
+  assert.deepEqual(calls.at(-1)[1][1], [
+    { right: [1, 0, 0], up: [0, 1, 0], poly },
+    { right: [1, 0, 0], up: [0, 0, 1], poly: new Float64Array([0, 0, 1, 0, 1, 1]), op: "out", dabs: new Float64Array([1, 1, 0.5]), near: new Float64Array([3]), off: [7, 18] },
+  ]);
+  page.emit("message", { data: { kind: "view-shapes", id: 35, key: "k", shapes: [{ right: [1, 0], up: [0, 1, 0], poly }] } });
+  assert.match(page.out.at(-1).error, /isolated shapes weren't as the engine reads them/);
   // A scan that isn't open, and classes not as the engine reads them.
   page.emit("message", { data: { kind: "view-classes", id: 23, token: "nope", key: "k", pointsKey: "p", cell: 1, origin: [0, 0, 0], classification: cls } });
   assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 23, key: "k", missing: ["nope"] });
@@ -595,7 +640,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 2);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 4);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });

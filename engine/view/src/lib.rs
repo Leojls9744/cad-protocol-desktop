@@ -25,15 +25,20 @@
 //! faces"). `surface`: each point's lighting, relief, edge and hollow from
 //! the shape of the surface it's on, worked out as the points are read;
 //! `gpu`: those at the strengths the view asks for, and depth shading,
-//! relief and face shading from the picture's depths.
+//! relief and face shading from the picture's depths. And the rest of
+//! what kept a scan the page's to draw: `scene::Clip`, the limit boxes and
+//! the slice (a view's detail is read by them, and the card tests each
+//! point by them); `shapes`, the points isolated.
 
 pub mod camera;
 pub mod gpu;
 pub mod scene;
+pub mod shapes;
 pub mod surface;
 pub mod view;
 
 pub use camera::{Affine, Camera, IDENTITY};
 pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST};
-pub use scene::{ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Keep, PointVertex, Points, Sight, Taken, RAMP};
+pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, CLIP_BOXES, RAMP};
+pub use shapes::{Op, ShapeIn, Shapes};
 pub use view::{Ask, ScanAsk, Stage, Stats, View};
