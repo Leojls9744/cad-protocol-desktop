@@ -569,7 +569,8 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       const rx = Math.round((half + 4 + (wide - half - 4) / 2) / k);
       out.splitPixels = {
         leftPost: two.picture.at(lx, cy),
-        leftFloor: two.picture.at(lx - 60, cy + 30),
+        // (East of the post: the check page's own green bar is over the window's left edge.)
+        leftFloor: two.picture.at(lx + 60, cy + 30),
         between: two.picture.at(Math.round(half / k), cy + 30),
         rightPost: two.picture.at(rx, cy),
         rightFloor: two.picture.at(rx - 60, cy + 30),
