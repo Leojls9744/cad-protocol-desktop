@@ -406,6 +406,27 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
   }
 
   /**
+   * 1.47 (stage 3): the lines of a list near a place in a view, from the
+   * strips the engine draws them from: what's under the cursor. `hits`:
+   * six numbers a line (the list's item, the page's number for its strips,
+   * the segment, how far in CSS pixels, how far along, 1 inside a filled
+   * shape), nearest first. `gone`: the engine hasn't that list (the page
+   * looks for itself).
+   */
+  function viewPick(msg) {
+    if (typeof engine.viewPick !== "function") return { error: "This scan engine can't say what's under the cursor." };
+    try {
+      const world = nums(msg.world, 8);
+      const place = nums(msg.place, 3);
+      if (!place || typeof msg.x !== "number" || typeof msg.y !== "number" || !(typeof msg.reach === "number" && msg.reach >= 0)) return { error: "The place wasn't as the engine reads it." };
+      const hits = engine.viewPick(String(msg.key), place, world || undefined, msg.x, msg.y, msg.reach, Number.isInteger(msg.most) && msg.most > 0 ? msg.most : undefined);
+      return Array.isArray(hits) || ArrayBuffer.isView(hits) ? { hits: Array.from(hits) } : { gone: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
+  /**
    * 1.41: a list of those batches (which, each one's colour, whether its
    * ends are places in the drawing), kept by the engine under its key;
    * each view then names the key. `missing`: batches it names that the
@@ -623,6 +644,10 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     }
     if (msg.kind === "view-lines") {
       port.postMessage({ kind: "view-lines", id, key: msg.key, ...viewLines(msg) });
+      return;
+    }
+    if (msg.kind === "view-pick") {
+      port.postMessage({ kind: "view-pick", id, key: msg.key, ...viewPick(msg) });
       return;
     }
     // 1.29: the rules classifier's middle, on the engine's threads (the

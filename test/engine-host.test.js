@@ -508,6 +508,11 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
       calls.push(["line strips", args]);
       return true;
     },
+    viewPick: (...args) => {
+      calls.push(["pick", args]);
+      // A list it hasn't: none.
+      return args[0] === "lines 1" ? [0, 7, 2, 1.5, 0.25, 0] : null;
+    },
     viewLines: (...args) => {
       calls.push(["lines", args]);
       // A batch it wasn't given: said, the list not taken.
@@ -782,6 +787,19 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(calls.at(-1), ["lines", ["lines 1.0:1", [{ id: 7, rgba: [1, 0, 0, 1] }], 1]]);
   page.emit("message", { data: { kind: "view-lines", id: 77, key: "lines 0:9", owner: 5, items: [{ id: 7, rgba: [1, 0, 0, 1] }] } });
   assert.deepEqual(calls.at(-1), ["lines", ["lines 0:9", [{ id: 7, rgba: [1, 0, 0, 1] }]]]);
+  // 1.47 (stage 3): what's under a place in a view, from the lines the engine draws.
+  page.emit("message", { data: { kind: "view-pick", id: 80, key: "lines 1", place: [2, 10, 20], x: 100, y: 50, reach: 5, junk: 1 } });
+  assert.deepEqual(calls.at(-1), ["pick", ["lines 1", [2, 10, 20], undefined, 100, 50, 5, undefined]]);
+  assert.deepEqual(page.out.at(-1), { kind: "view-pick", id: 80, key: "lines 1", hits: [0, 7, 2, 1.5, 0.25, 0] });
+  page.emit("message", { data: { kind: "view-pick", id: 81, key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 0, 1, 30, 40], x: 100, y: 50, reach: 5, most: 4 } });
+  assert.deepEqual(calls.at(-1), ["pick", ["lines 1", [2, 10, 20], [1, 0, 0, 0, 0, 1, 30, 40], 100, 50, 5, 4]]);
+  // A list the engine hasn't: said (the page looks for itself). A place not whole: not asked.
+  page.emit("message", { data: { kind: "view-pick", id: 82, key: "lines 99", place: [2, 10, 20], x: 100, y: 50, reach: 5 } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-pick", id: 82, key: "lines 99", gone: true });
+  const picks = calls.filter((c) => c[0] === "pick").length;
+  page.emit("message", { data: { kind: "view-pick", id: 83, key: "lines 1", place: [2, 10], x: 100, y: 50, reach: 5 } });
+  assert.equal(page.out.at(-1).error, "The place wasn't as the engine reads it.");
+  assert.equal(calls.filter((c) => c[0] === "pick").length, picks);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });

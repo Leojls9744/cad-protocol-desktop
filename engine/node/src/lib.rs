@@ -1435,6 +1435,34 @@ pub fn view_lines(key: String, items: Vec<ViewLineJs>, owner: Option<u32>) -> Re
     Ok(ViewLinesTakenJs { ok: true, missing })
 }
 
+/// The lines of a list near a place in a view (1.47; stage 3, what's under the cursor): the list's key, where the
+/// view puts it (`place`: its scale, and the plane's origin across and down the view, CSS pixels; `world`: the view's
+/// right and up and the drawing's origin across and down, eight numbers, for the batches in the drawing's own places),
+/// the place (CSS pixels from the view's corner), how near counts (CSS pixels) and how many at most. Six numbers a
+/// line found, nearest first, then the filled shapes the place is inside: which item of the list, the page's number
+/// for its strips, which segment (a filled batch's triangle), how far (CSS pixels), how far along the segment (0 to
+/// 1), and 1 when the place is inside a filled shape or batch. None: the engine hasn't that list (the page looks for
+/// itself), or the numbers aren't as it reads them.
+#[napi]
+pub fn view_pick(key: String, place: Vec<f64>, world: Option<Vec<f64>>, x: f64, y: f64, reach: f64, most: Option<u32>) -> Option<Vec<f64>> {
+    if place.len() != 3 || place.iter().any(|v| !v.is_finite()) || !(place[0] > 0.0) || !x.is_finite() || !y.is_finite() || !(reach >= 0.0 && reach <= 4096.0) {
+        return None;
+    }
+    let world = match &world {
+        Some(w) if w.len() == 8 && w.iter().all(|v| v.is_finite()) => Some(cadp_engine_view::LineWorld { right: [w[0], w[1], w[2]], up: [w[3], w[4], w[5]], e: w[6], f: w[7] }),
+        _ => None,
+    };
+    // (The list is held, not the lock, while it's looked through.)
+    let list = LINE_LISTS.lock().unwrap().iter().find(|(_, l)| l.key == key).map(|(_, l)| l.clone())?;
+    let most = most.unwrap_or(16).clamp(1, 256) as usize;
+    let hits = cadp_engine_view::pick(&list, place[0], place[1], place[2], world.as_ref(), x, y, reach, most);
+    let mut out = Vec::with_capacity(hits.len() * 6);
+    for h in hits {
+        out.extend_from_slice(&[h.item as f64, h.id as f64, h.segment as f64, h.dist, h.along, if h.inside { 1.0 } else { 0.0 }]);
+    }
+    Some(out)
+}
+
 /// A view's lines this frame (1.41): the key of the list given with view_lines, where the page puts the plane's
 /// batches (its scale, and their origin across and down the view, CSS pixels), where it puts the drawing's own (the
 /// view's right and up, their origin across and down: eight numbers; none: they aren't drawn), half a line's width

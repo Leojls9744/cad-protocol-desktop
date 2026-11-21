@@ -876,6 +876,120 @@ impl LineCard {
     }
 }
 
+/// One of a list's lines near a place in its view (1.47; stage 3): which
+/// of the list's items, the page's number for its strips, which of its
+/// segments (a filled batch's triangle; 0 for a filled shape), how far from
+/// the place (CSS pixels; 0 inside a filled one), how far along the segment
+/// (0 its start, 1 its end), and whether the place is INSIDE a filled shape
+/// or batch, not near a line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineHit {
+    pub item: usize,
+    pub id: u64,
+    pub segment: u32,
+    pub dist: f64,
+    pub along: f64,
+    pub inside: bool,
+}
+
+/// The lines of a list within `reach` CSS pixels of a place in a view (x
+/// across and y down from the view's corner, CSS pixels), nearest first,
+/// then the filled shapes and batches the place is inside, in the list's
+/// order: `most` at most of each. The view puts the list as a frame's
+/// `Lines` does (`scale`, `e`, `f`; `world` for the batches in the
+/// drawing's own places, which without it aren't drawn and aren't found).
+/// What's found is what's drawn: a dashed line through its gaps too (it's
+/// one line to pick), text's letters at rest as their segments; a turning
+/// view's letters aren't looked at. Worked out here on the processor, from
+/// the strips as the page gave them: no card.
+#[allow(clippy::too_many_arguments)]
+pub fn pick(list: &LineList, scale: f64, e: f64, f: f64, world: Option<&LineWorld>, x: f64, y: f64, reach: f64, most: usize) -> Vec<LineHit> {
+    let mut near: Vec<LineHit> = Vec::new();
+    let mut inside: Vec<LineHit> = Vec::new();
+    if most == 0 || !(reach >= 0.0) {
+        return near;
+    }
+    let reach2 = reach * reach;
+    // The worst kept so far once `most` are: a segment farther isn't looked at closer.
+    let mut bar = reach2;
+    for (k, item) in list.items.iter().enumerate() {
+        let v = &item.strips.floats;
+        if item.area || item.fill {
+            // Its triangles, across and up the plane: how many the place is in (and which way round each runs).
+            let n = item.strips.corners() as usize;
+            let mut count = 0i32;
+            let mut wound = 0i32;
+            let mut first = None;
+            for t in 0..n / 3 {
+                let c = |i: usize| (e + v[(t * 3 + i) * 3] as f64 * scale, f - v[(t * 3 + i) * 3 + 1] as f64 * scale);
+                let (a, b, cc) = (c(0), c(1), c(2));
+                let d1 = (x - b.0) * (a.1 - b.1) - (a.0 - b.0) * (y - b.1);
+                let d2 = (x - cc.0) * (b.1 - cc.1) - (b.0 - cc.0) * (y - cc.1);
+                let d3 = (x - a.0) * (cc.1 - a.1) - (cc.0 - a.0) * (y - a.1);
+                let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+                let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+                if neg && pos {
+                    continue;
+                }
+                // (A triangle with no area holds nothing.)
+                let twice = (b.0 - a.0) * (cc.1 - a.1) - (cc.0 - a.0) * (b.1 - a.1);
+                if twice == 0.0 {
+                    continue;
+                }
+                count += 1;
+                wound += if twice > 0.0 { 1 } else { -1 };
+                if first.is_none() {
+                    first = Some(t as u32);
+                }
+            }
+            let within = if !item.area { count > 0 } else if item.nonzero { wound != 0 } else { count % 2 == 1 };
+            if within && inside.len() < most {
+                inside.push(LineHit { item: k, id: item.strips.id, segment: if item.area { 0 } else { first.unwrap_or(0) }, dist: 0.0, along: 0.0, inside: true });
+            }
+            continue;
+        }
+        if item.lettered || (item.world && world.is_none()) {
+            continue;
+        }
+        let place = |p: &[f32]| -> (f64, f64) {
+            match (item.world, world) {
+                (true, Some(w)) => {
+                    let (px, py, pz) = (p[0] as f64, p[1] as f64, p[2] as f64);
+                    let r = px * w.right[0] + py * w.right[1] + pz * w.right[2];
+                    let u = px * w.up[0] + py * w.up[1] + pz * w.up[2];
+                    (w.e + r * scale, w.f - u * scale)
+                }
+                _ => (e + p[0] as f64 * scale, f - p[1] as f64 * scale),
+            }
+        };
+        for (n, strip) in v.chunks_exact(STRIP_FLOATS).enumerate() {
+            let a = place(&strip[0..3]);
+            let b = place(&strip[3..6]);
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 > 0.0 { (((x - a.0) * dx + (y - a.1) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            let (qx, qy) = (a.0 + dx * t - x, a.1 + dy * t - y);
+            let d2 = qx * qx + qy * qy;
+            if !(d2 <= bar) {
+                continue;
+            }
+            near.push(LineHit { item: k, id: item.strips.id, segment: n as u32, dist: d2.sqrt(), along: t, inside: false });
+            // Kept few: the nearest `most`, the rest let go as they pile up.
+            if near.len() >= most.saturating_mul(4).max(64) {
+                near.sort_by(|p, q| p.dist.total_cmp(&q.dist));
+                near.truncate(most);
+                if near.len() == most {
+                    bar = near[most - 1].dist * near[most - 1].dist;
+                }
+            }
+        }
+    }
+    near.sort_by(|p, q| p.dist.total_cmp(&q.dist));
+    near.truncate(most);
+    near.extend(inside);
+    near
+}
+
 /// How much of a pixel a solid line covers, as the shader works it out
 /// (tests check the card's pixels against it): `across` from the line's
 /// middle and `past` its end (0 beside it), the screen's pixels, for a line
@@ -887,6 +1001,104 @@ pub fn covers(half: f64, across: f64, past: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip_of(a: [f32; 3], b: [f32; 3]) -> [f32; 9] {
+        [a[0], a[1], a[2], b[0], b[1], b[2], 1.0, 1.0, 0.0]
+    }
+
+    fn lines_of(id: u64, strips: &[[f32; 9]], world: bool) -> LineItem {
+        LineItem::solid(Arc::new(Strips { id, floats: strips.iter().flatten().copied().collect() }), [1.0; 4], world)
+    }
+
+    fn shape_of(id: u64, loops: &[&[[f32; 2]]], nonzero: bool) -> LineItem {
+        let mut floats = Vec::new();
+        for l in loops {
+            for k in 1..l.len().saturating_sub(1) {
+                for p in [l[0], l[k], l[k + 1]] {
+                    floats.extend_from_slice(&[p[0], p[1], 0.0]);
+                }
+            }
+        }
+        LineItem { area: true, nonzero, ..LineItem::solid(Arc::new(Strips { id, floats }), [1.0; 4], false) }
+    }
+
+    #[test]
+    fn the_line_under_a_place_is_found_as_the_view_puts_it() {
+        // Two batches: a level line 0 to 100 at height 10 and one at height 30 (two segments); the view at 2 pixels a
+        // unit, its origin 50 across and 200 down: a place across r, up u is at (50 + 2r, 200 − 2u).
+        let list = LineList {
+            key: "a".into(),
+            items: vec![lines_of(7, &[strip_of([0.0, 10.0, 0.0], [100.0, 10.0, 0.0])], false), lines_of(9, &[strip_of([0.0, 30.0, 0.0], [40.0, 30.0, 0.0]), strip_of([40.0, 30.0, 0.0], [100.0, 30.0, 0.0])], false)],
+        };
+        // Three pixels under the first line, a quarter of the way along it.
+        let hits = pick(&list, 2.0, 50.0, 200.0, None, 100.0, 183.0, 5.0, 8);
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].item, hits[0].id, hits[0].segment, hits[0].inside), (0, 7, 0, false));
+        assert!((hits[0].dist - 3.0).abs() < 1e-9 && (hits[0].along - 0.25).abs() < 1e-9, "{:?}", hits[0]);
+        // Between the two (20 pixels from each): none within 5; both within 25, the nearer first.
+        assert!(pick(&list, 2.0, 50.0, 200.0, None, 100.0, 160.0, 5.0, 8).is_empty());
+        let hits = pick(&list, 2.0, 50.0, 200.0, None, 100.0, 159.0, 25.0, 8);
+        assert_eq!(hits.iter().map(|h| (h.id, h.segment)).collect::<Vec<_>>(), vec![(9, 0), (7, 0)]);
+        // The second batch's second segment (past 40 along: 130 across).
+        let hits = pick(&list, 2.0, 50.0, 200.0, None, 200.0, 141.0, 5.0, 8);
+        assert_eq!((hits[0].id, hits[0].segment), (9, 1));
+        // Past a line's end: measured to the end (its `along` 1).
+        let hits = pick(&list, 2.0, 50.0, 200.0, None, 253.0, 184.0, 5.0, 8);
+        assert_eq!((hits[0].id, hits[0].along), (7, 1.0));
+        assert!((hits[0].dist - 5.0).abs() < 1e-9);
+        // `most`: the nearest only, of many.
+        let many: Vec<[f32; 9]> = (0..500).map(|k| strip_of([0.0, k as f32 * 0.01, 0.0], [100.0, k as f32 * 0.01, 0.0])).collect();
+        let list = LineList { key: "b".into(), items: vec![lines_of(1, &many, false)] };
+        let hits = pick(&list, 1.0, 0.0, 0.0, None, 50.0, 0.0, 10.0, 3);
+        assert_eq!(hits.iter().map(|h| h.segment).collect::<Vec<_>>(), vec![0, 1, 2]);
+        assert!(pick(&list, 1.0, 0.0, 0.0, None, 50.0, 0.0, 10.0, 0).is_empty());
+    }
+
+    #[test]
+    fn lines_in_the_drawing_s_own_places_are_found_through_the_view_s_right_and_up() {
+        // A line up the drawing's Z at x 10: seen from the south (right = +X, up = +Z) it's upright on screen.
+        let list = LineList { key: "w".into(), items: vec![lines_of(3, &[strip_of([10.0, 0.0, 0.0], [10.0, 0.0, 50.0])], true)] };
+        let south = LineWorld { right: [1.0, 0.0, 0.0], up: [0.0, 0.0, 1.0], e: 100.0, f: 300.0 };
+        // At 110 across, 300 − 25 down: on it, half way up.
+        let hits = pick(&list, 1.0, 0.0, 0.0, Some(&south), 112.0, 275.0, 4.0, 4);
+        assert_eq!(hits.len(), 1);
+        assert!((hits[0].dist - 2.0).abs() < 1e-9 && (hits[0].along - 0.5).abs() < 1e-9);
+        // With no right and up (a view at rest draws none of them): not found.
+        assert!(pick(&list, 1.0, 0.0, 0.0, None, 112.0, 275.0, 4.0, 4).is_empty());
+        // A turning view's letters aren't looked at.
+        let letters = LineList { key: "l".into(), items: vec![LineItem { lettered: true, ..lines_of(4, &[strip_of([10.0, 0.0, 0.0], [10.0, 0.0, 50.0])], true) }] };
+        assert!(pick(&letters, 1.0, 0.0, 0.0, Some(&south), 110.0, 275.0, 4.0, 4).is_empty());
+    }
+
+    #[test]
+    fn a_place_inside_a_filled_shape_is_told_after_the_lines_near_it() {
+        let outer: &[[f32; 2]] = &[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
+        let hole: &[[f32; 2]] = &[[40.0, 40.0], [60.0, 40.0], [60.0, 60.0], [40.0, 60.0]];
+        let back: Vec<[f32; 2]> = hole.iter().rev().copied().collect();
+        let band: Vec<f32> = vec![0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 10.0, 10.0, 0.0, 200.0, 0.0, 0.0, 210.0, 0.0, 0.0, 210.0, 10.0, 0.0];
+        let list = LineList {
+            key: "s".into(),
+            items: vec![
+                shape_of(1, &[outer, hole], false),
+                shape_of(2, &[outer, hole], true),
+                shape_of(3, &[outer, &back], true),
+                LineItem { fill: true, ..LineItem::solid(Arc::new(Strips { id: 4, floats: band }), [1.0; 4], false) },
+                lines_of(5, &[strip_of([0.0, 20.0, 0.0], [100.0, 20.0, 0.0])], false),
+            ],
+        };
+        // (Up 20 is 20 pixels up from the origin's height: y = −20.)
+        let ids = |x: f64, y: f64| pick(&list, 1.0, 0.0, 0.0, None, x, y, 3.0, 8).iter().map(|h| (h.id, h.inside)).collect::<Vec<_>>();
+        // In the square, off the hole and the line: every shape; none of the lines.
+        assert_eq!(ids(20.0, -80.0), vec![(1, true), (2, true), (3, true)]);
+        // In the hole: even-odd, a hole; nonzero, filled when it's wound as the outside is, a hole wound the other way.
+        assert_eq!(ids(50.0, -50.0), vec![(2, true)]);
+        // On the line, in the square: the line first, then the shapes.
+        assert_eq!(ids(20.0, -21.0), vec![(5, false), (1, true), (2, true), (3, true)]);
+        // Outside all: none. In the filled batch's second triangle: it, by the triangle.
+        assert!(ids(150.0, -50.0).is_empty());
+        let hits = pick(&list, 1.0, 0.0, 0.0, None, 208.0, -3.0, 3.0, 8);
+        assert_eq!(hits.iter().map(|h| (h.id, h.segment, h.inside)).collect::<Vec<_>>(), vec![(4, 1, true)]);
+    }
 
     #[test]
     fn a_strip_is_nine_floats_and_a_line_covers_its_middle() {

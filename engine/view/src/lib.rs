@@ -64,6 +64,6 @@ pub use brush::{Preview, Stroke, StrokeOp, Strokes, PREVIEW_DABS, STROKES, STROK
 pub use camera::{Affine, Camera, IDENTITY};
 pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST, NO_STROKES};
 pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, Tint, CLIP_BOXES, RAMP, TINT_NONE};
-pub use lines::{covers, dash_here, period_of, LineItem, LineList, LineWorld, Lines, Strips, MAX_DASH, STRIP_FLOATS};
+pub use lines::{covers, dash_here, period_of, pick, LineHit, LineItem, LineList, LineWorld, Lines, Strips, MAX_DASH, STRIP_FLOATS};
 pub use shapes::{Op, ShapeIn, Shapes};
 pub use view::{Ask, Older, ScanAsk, Stage, Stats, View};
