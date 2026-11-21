@@ -1,7 +1,7 @@
 {
   "name": "cad-protocol-desktop",
   "productName": "CAD Protocol",
-  "version": "1.37.0",
+  "version": "1.38.0",
   "description": "CAD Protocol for Windows: the live CAD Protocol app in its own window, with a faster pointer while you draft and a scan engine of its own.",
   "main": "src/main.js",
   "private": true,
