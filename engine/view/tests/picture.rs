@@ -3,13 +3,37 @@
 
 use cadp_engine_view::{test_ring, Camera, Edl, Gpu, Look, PointVertex, Points, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, CLEAR, IDENTITY};
 
+/// One test draws at a time: the build computer's stand-in for a card (Windows' own, on the processor) has
+/// stopped the whole run when several tests each started and ended a card of their own at once. The app has one.
+static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A card and the turn to draw on it.
+struct Card {
+    gpu: Gpu,
+    _turn: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for Card {
+    type Target = Gpu;
+    fn deref(&self) -> &Gpu {
+        &self.gpu
+    }
+}
+
+impl std::ops::DerefMut for Card {
+    fn deref_mut(&mut self) -> &mut Gpu {
+        &mut self.gpu
+    }
+}
+
 /// The card, or none on a computer with no way to draw (the test then says so and passes).
-fn card() -> Option<Gpu> {
+fn card() -> Option<Card> {
+    let turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     match Gpu::new(&instance, None, Some(wgpu::TextureFormat::Rgba8Unorm)) {
         Ok(gpu) => {
             eprintln!("drawing on {}", gpu.adapter);
-            Some(gpu)
+            Some(Card { gpu, _turn: turn })
         }
         Err(e) => {
             eprintln!("no card to draw on here: {e}");
