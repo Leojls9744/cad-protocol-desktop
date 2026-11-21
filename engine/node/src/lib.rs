@@ -1352,6 +1352,7 @@ static LINE_LISTS: LazyLock<Mutex<Vec<Arc<cadp_engine_view::LineList>>>> = LazyL
 const LINE_LISTS_KEPT: usize = 4;
 
 /// A batch of the page's lines: its segments as strips, nine floats each (its two ends, whether each end is soft, its span).
+/// Or (1.42) a batch that's filled: its triangles, three corners of three floats each (across and up the plane, and 0).
 #[napi]
 pub fn view_line_strips(id: u32, strips: Float32Array) -> Result<bool> {
     if strips.len() % cadp_engine_view::STRIP_FLOATS != 0 || strips.iter().any(|v| !v.is_finite()) {
@@ -1362,11 +1363,14 @@ pub fn view_line_strips(id: u32, strips: Float32Array) -> Result<bool> {
 }
 
 /// One batch of a list: which strips, its colour (red, green, blue 0 to 1 and how solid), and whether its ends are places in the drawing (else in the view's plane).
+/// 1.42: its dashes (dash and gap lengths in CSS pixels as the page's card takes them, a dot −1, twelve at most; none: solid), or `fill`: its floats are triangles, filled beneath the lines.
 #[napi(object)]
 pub struct ViewLineJs {
     pub id: u32,
     pub rgba: Vec<f64>,
     pub world: Option<bool>,
+    pub dash: Option<Vec<f64>>,
+    pub fill: Option<bool>,
 }
 
 /// Whether a list was taken; the batches it names that the engine hasn't (given again, then the list again).
@@ -1386,11 +1390,16 @@ pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJ
         if item.rgba.len() != 4 || item.rgba.iter().any(|v| !v.is_finite()) {
             return Err(Error::from_reason("a batch's colour is red, green, blue and how solid"));
         }
+        if item.dash.as_ref().is_some_and(|d| d.len() > cadp_engine_view::MAX_DASH || d.iter().any(|v| !v.is_finite())) {
+            return Err(Error::from_reason("a batch's dashes are numbers, twelve at most"));
+        }
         match strips.get(&item.id) {
             Some(s) => list.push(cadp_engine_view::LineItem {
                 strips: s.clone(),
                 rgba: [item.rgba[0].clamp(0.0, 1.0) as f32, item.rgba[1].clamp(0.0, 1.0) as f32, item.rgba[2].clamp(0.0, 1.0) as f32, item.rgba[3].clamp(0.0, 1.0) as f32],
                 world: item.world.unwrap_or(false),
+                dash: item.dash.as_ref().map(|d| d.iter().map(|v| *v as f32).collect()).unwrap_or_default(),
+                fill: item.fill.unwrap_or(false),
             }),
             None => missing.push(item.id),
         }
@@ -1421,6 +1430,8 @@ pub struct ViewLinesJs {
     pub world: Option<Vec<f64>>,
     pub half: f64,
     pub ratio: f64,
+    /// A dot's radius, the screen's pixels (1.42).
+    pub dot: Option<f64>,
 }
 
 /// The lines a view names, as the engine draws them; none where it hasn't the list, or the numbers aren't as it reads them.
@@ -1435,7 +1446,9 @@ fn view_lines_of(ask: &Option<ViewLinesJs>) -> Option<cadp_engine_view::Lines> {
         _ => None,
     };
     let list = LINE_LISTS.lock().unwrap().iter().find(|l| l.key == a.key).cloned()?;
-    Some(cadp_engine_view::Lines { list, scale: a.place[0], e: a.place[1], f: a.place[2], world, half: a.half, ratio: a.ratio })
+    // A dot's radius (1.42): the page's, or with none the line's half-width.
+    let dot = a.dot.filter(|d| ok(*d, 64.0)).unwrap_or(a.half);
+    Some(cadp_engine_view::Lines { list, scale: a.place[0], e: a.place[1], f: a.place[2], world, half: a.half, ratio: a.ratio, dot })
 }
 
 /// The brush's preview in a view (1.39), as the page's own card draws it: its middle in the window and its radius (the

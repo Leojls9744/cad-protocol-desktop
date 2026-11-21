@@ -714,6 +714,18 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
         const c = out.linePixels;
         out.linesDrawn = near(c.on, [255, 0, 255], 12) && near(c.beside, CLASS_FLOOR, 12) && near(c.past, CLASS_FLOOR, 12) && Array.isArray(lined.stats && lined.stats.lines) && lined.stats.lines[0] === "check lines";
       }
+      // 1.42: the same line dashed (30 px on, 30 off, running on along it; its ends' third floats say how far along
+      // each is): a dash where it was, the floor in a gap.
+      const gaveDashed = await engine.ask({ kind: "view-line-strips", batch: 2, strips: Float32Array.from([cx - 120, -(cy + 60), 0, cx + 120, -(cy + 60), 240, 1, 1, 0]) });
+      const listedDashed = gaveDashed.ok ? await engine.ask({ kind: "view-lines", key: "check dashes", items: [{ id: 2, rgba: [1, 0, 1, 1], dash: [30, 30] }] }) : gaveDashed;
+      if (listedDashed.ok) {
+        const dashedShot = await showAndLook(66, byClass, { lines: { key: "check dashes", place: [1, 0, 0], half: 2 * k, ratio: k, dot: 2 * k } }, null);
+        if (dashedShot.picture) {
+          // 70 px along: ten into the second dash. 40 px along: ten into the first gap.
+          out.dashPixels = { dash: dashedShot.picture.at(cx - 50, cy + 60), gap: dashedShot.picture.at(cx - 80, cy + 60) };
+          out.dashesDrawn = near(out.dashPixels.dash, [255, 0, 255], 12) && near(out.dashPixels.gap, CLASS_FLOOR, 12);
+        }
+      } else out.dashesError = listedDashed.error || "not taken";
       // A view that names no lines: none drawn (the page's own again).
       const unlined = await showAndLook(65, byClass, {}, null);
       if (unlined.picture) {

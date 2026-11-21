@@ -752,6 +752,13 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(page.out.at(-1), { kind: "view-lines", id: 64, key: "lines 2", missing: [200] });
   page.emit("message", { data: { kind: "view-lines", id: 65, key: "lines 3", items: [{ id: 7, rgba: [1, 0, 0] }] } });
   assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
+  // 1.42: a batch's dashes (a dot −1) and a batch that's filled; no dashes: left out.
+  page.emit("message", { data: { kind: "view-lines", id: 70, key: "lines 4", items: [{ id: 7, rgba: [1, 0, 0, 1], dash: [10, 3, -1, 3] }, { id: 9, rgba: [0, 1, 0, 1], fill: true, dash: [] }] } });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 4", [{ id: 7, rgba: [1, 0, 0, 1], dash: [10, 3, -1, 3] }, { id: 9, rgba: [0, 1, 0, 1], fill: true }]]]);
+  page.emit("message", { data: { kind: "view-lines", id: 71, key: "lines 5", items: [{ id: 7, rgba: [1, 0, 0, 1], dash: new Array(13).fill(1) }] } });
+  assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
+  page.emit("message", { data: { kind: "view", id: 72, scans: [], ask: { ...boxed, lines: { key: "lines 4", place: [2, 10, 20], half: 0.625, ratio: 1, dot: 1.5 } } } });
+  assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 4", place: [2, 10, 20], half: 0.625, ratio: 1, dot: 1.5 });
   page.emit("message", { data: { kind: "view", id: 66, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5, junk: 1 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5 });
   // No right and up for the drawing's own: only the plane's are placed. Not whole, or the split view's other side: none.
@@ -764,7 +771,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 14);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 15);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });
