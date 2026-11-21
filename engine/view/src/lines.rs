@@ -26,7 +26,11 @@
 //! beneath the lines. `dash_here` is the shader's pattern worked on the
 //! processor, as the page's own `dashHereOnCpu` is.
 //!
-//! Text's letters stay the page's for now.
+//! 1.43 (build 3): text. A batch may be `thin` (text's letters: a
+//! hairline, the view's `thin` half-width) and `lettered` (a turning
+//! view's letters: each strip a run's anchor in the drawing, its two ends
+//! along and above the baseline, and the baseline's angle; the card turns
+//! each letter to face the screen along its baseline, as the page's does).
 
 use crate::gpu::VIEWS;
 use std::collections::HashMap;
@@ -66,6 +70,8 @@ impl Strips {
 /// dashes (dash and gap lengths in CSS pixels as the page's card takes
 /// them, a dot −1, MAX_DASH at most; none: solid); or `fill`: its floats
 /// are triangles, filled beneath the lines.
+/// `thin`: drawn a hairline wide (text's letters). `lettered`: a world
+/// batch whose strips are letters' (the page's letterStrip).
 #[derive(Clone)]
 pub struct LineItem {
     pub strips: Arc<Strips>,
@@ -73,12 +79,14 @@ pub struct LineItem {
     pub world: bool,
     pub dash: Vec<f32>,
     pub fill: bool,
+    pub thin: bool,
+    pub lettered: bool,
 }
 
 impl LineItem {
     /// A solid batch of lines.
     pub fn solid(strips: Arc<Strips>, rgba: [f32; 4], world: bool) -> LineItem {
-        LineItem { strips, rgba, world, dash: Vec::new(), fill: false }
+        LineItem { strips, rgba, world, dash: Vec::new(), fill: false, thin: false, lettered: false }
     }
 }
 
@@ -182,6 +190,8 @@ pub struct Lines {
     pub ratio: f64,
     /// A dot's radius, the screen's pixels (the page's: the line's half-width, and at least its SCREEN_DOT_PX across).
     pub dot: f64,
+    /// Half a thin batch's width (text's letters: a hairline), the screen's pixels; 0: as the others.
+    pub thin: f64,
 }
 
 /// The lines' shader: the page's full lines' (FULL_VERTEX, FULL_FRAGMENT with its DASHES), and its fills'.
@@ -201,7 +211,7 @@ struct V {
 };
 struct B {
     color: vec4<f32>,
-    // x: its ends are places in the drawing. y: how many dash lengths. z: the pattern's period.
+    // x: its ends are places in the drawing (1), or it's letters there (2). y: how many dash lengths. z: the pattern's period. w: half its width, where it isn't the view's (0).
     kind: vec4<f32>,
     // The dash and gap lengths, CSS pixels (a dot: −1).
     dash: array<vec4<f32>, 3>,
@@ -227,10 +237,28 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) bb
     var ra = a.xy;
     var rb = bb.xy;
     var at = v.place.yz;
-    if (world) {
+    var cap = caps;
+    if (b.kind.x > 1.5) {
+        // A letter's segment: its run's anchor placed by the view, its ends along and above the baseline as the view
+        // looks at it (the letter facing the screen, sized by how long the baseline looks).
+        let base = vec2<f32>(dot(a, v.right.xyz), dot(a, v.up.xyz));
+        let ct = cos(span);
+        let st = sin(span);
+        let along = vec2<f32>(ct * v.right.x + st * v.right.y, ct * v.up.x + st * v.up.y);
+        let above = vec2<f32>(-along.y, along.x);
+        ra = base + bb.x * along + bb.y * above;
+        rb = base + bb.z * along + caps.x * above;
+        let second = floor(caps.y / 2.0 + 0.25);
+        cap = vec2<f32>(caps.y - 2.0 * second, second);
+        at = v.wplace.xy;
+    } else if (world) {
         ra = vec2<f32>(dot(a, v.right.xyz), dot(a, v.up.xyz));
         rb = vec2<f32>(dot(bb, v.right.xyz), dot(bb, v.up.xyz));
         at = v.wplace.xy;
+    }
+    var half = v.right.w;
+    if (b.kind.w > 0.0) {
+        half = b.kind.w;
     }
     let pa = vec2<f32>(at.x + ra.x * v.place.x, at.y - ra.y * v.place.x) * v.place.w;
     let pb = vec2<f32>(at.x + rb.x * v.place.x, at.y - rb.y * v.place.x) * v.place.w;
@@ -241,10 +269,10 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) bb
         dir = d / len;
     }
     let nrm = vec2<f32>(-dir.y, dir.x);
-    let reach = v.right.w + 1.0;
-    var ext = caps.y * reach;
+    let reach = half + 1.0;
+    var ext = cap.y * reach;
     if (corner.x < 0.5) {
-        ext = caps.x * reach;
+        ext = cap.x * reach;
     }
     let t = corner.x * len + (corner.x * 2.0 - 1.0) * ext;
     let s = corner.y * reach;
@@ -252,7 +280,7 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec3<f32>, @location(1) bb
     var out: VOut;
     out.pos = vec4<f32>(p.x / v.size.x * 2.0 - 1.0, 1.0 - p.y / v.size.y * 2.0, 0.0, 1.0);
     out.rel = vec3<f32>(s, t, len);
-    out.caps = caps;
+    out.caps = cap;
     var frac = 0.0;
     if (len > 1e-6) {
         frac = t / len;
@@ -366,7 +394,11 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
         ce = 1.0;
     }
     let past = max(max(before, after), 0.0);
-    var line = clamp(v.right.w + 0.5 - length(vec2<f32>(i.rel.x, past)), 0.0, 1.0);
+    var half = v.right.w;
+    if (b.kind.w > 0.0) {
+        half = b.kind.w;
+    }
+    var line = clamp(half + 0.5 - length(vec2<f32>(i.rel.x, past)), 0.0, 1.0);
     if (here.x > 0.5) {
         line = 0.0;
     }
@@ -422,6 +454,8 @@ struct Listed {
     buffer: wgpu::Buffer,
     bind: wgpu::BindGroup,
     room: usize,
+    /// The thin batches' half-width they were written with.
+    thin: f32,
 }
 
 /// The lines on the card: their strips (kept while the page keeps them), and what draws them.
@@ -542,7 +576,8 @@ impl LineCard {
             self.strips.insert(s.id, (s.clone(), buffer));
         }
         let n = lines.list.items.len();
-        let same = self.listed[slot].as_ref().is_some_and(|l| l.key == lines.list.key && l.of == at(&lines.list));
+        let thin = if lines.thin > 0.0 { lines.thin as f32 } else { 0.0 };
+        let same = self.listed[slot].as_ref().is_some_and(|l| l.key == lines.list.key && l.of == at(&lines.list) && l.thin == thin);
         if !same && n > 0 {
             let room = self.listed[slot].as_ref().map_or(0, |l| l.room);
             let (buffer, bind, room) = match self.listed[slot].take() {
@@ -565,12 +600,14 @@ impl LineCard {
                 for (i, d) in item.dash.iter().take(n).enumerate() {
                     dash[i / 4][i % 4] = *d;
                 }
-                let u = BatchUniforms { color: item.rgba, kind: [if item.world { 1.0 } else { 0.0 }, n as f32, period_of(&item.dash), 0.0], dash };
+                let kind = if item.lettered { 2.0 } else if item.world { 1.0 } else { 0.0 };
+                // (A thin batch's half-width is the view's own number: the same for every view that draws the list.)
+                let u = BatchUniforms { color: item.rgba, kind: [kind, n as f32, period_of(&item.dash), if item.thin { thin } else { 0.0 }], dash };
                 let at = k * self.step as usize;
                 bytes[at..at + std::mem::size_of::<BatchUniforms>()].copy_from_slice(bytemuck::bytes_of(&u));
             }
             queue.write_buffer(&buffer, 0, &bytes);
-            self.listed[slot] = Some(Listed { key: lines.list.key.clone(), of: at(&lines.list), buffer, bind, room });
+            self.listed[slot] = Some(Listed { key: lines.list.key.clone(), of: at(&lines.list), buffer, bind, room, thin });
         }
         let w = lines.world.unwrap_or(LineWorld { right: [1.0, 0.0, 0.0], up: [0.0, 1.0, 0.0], e: 0.0, f: 0.0 });
         let u = ViewUniforms {
@@ -627,7 +664,7 @@ impl LineCard {
         pass.set_bind_group(0, &self.view_binds[slot], &[]);
         for (k, item) in lines.list.items.iter().enumerate() {
             // In the drawing's own places: none without the view's right and up.
-            if item.fill || (item.world && lines.world.is_none()) {
+            if item.fill || ((item.world || item.lettered) && lines.world.is_none()) {
                 continue;
             }
             let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };

@@ -1371,6 +1371,9 @@ pub struct ViewLineJs {
     pub world: Option<bool>,
     pub dash: Option<Vec<f64>>,
     pub fill: Option<bool>,
+    /// 1.43: drawn a hairline wide (text's letters), and a world batch whose strips are letters' (the page's letterStrip).
+    pub thin: Option<bool>,
+    pub lettered: Option<bool>,
 }
 
 /// Whether a list was taken; the batches it names that the engine hasn't (given again, then the list again).
@@ -1400,6 +1403,8 @@ pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJ
                 world: item.world.unwrap_or(false),
                 dash: item.dash.as_ref().map(|d| d.iter().map(|v| *v as f32).collect()).unwrap_or_default(),
                 fill: item.fill.unwrap_or(false),
+                thin: item.thin.unwrap_or(false),
+                lettered: item.lettered.unwrap_or(false),
             }),
             None => missing.push(item.id),
         }
@@ -1432,6 +1437,8 @@ pub struct ViewLinesJs {
     pub ratio: f64,
     /// A dot's radius, the screen's pixels (1.42).
     pub dot: Option<f64>,
+    /// Half a thin batch's width, the screen's pixels (1.43).
+    pub thin: Option<f64>,
 }
 
 /// The lines a view names, as the engine draws them; none where it hasn't the list, or the numbers aren't as it reads them.
@@ -1448,7 +1455,8 @@ fn view_lines_of(ask: &Option<ViewLinesJs>) -> Option<cadp_engine_view::Lines> {
     let list = LINE_LISTS.lock().unwrap().iter().find(|l| l.key == a.key).cloned()?;
     // A dot's radius (1.42): the page's, or with none the line's half-width.
     let dot = a.dot.filter(|d| ok(*d, 64.0)).unwrap_or(a.half);
-    Some(cadp_engine_view::Lines { list, scale: a.place[0], e: a.place[1], f: a.place[2], world, half: a.half, ratio: a.ratio, dot })
+    let thin = a.thin.filter(|t| ok(*t, 64.0)).unwrap_or(0.0);
+    Some(cadp_engine_view::Lines { list, scale: a.place[0], e: a.place[1], f: a.place[2], world, half: a.half, ratio: a.ratio, dot, thin })
 }
 
 /// The brush's preview in a view (1.39), as the page's own card draws it: its middle in the window and its radius (the

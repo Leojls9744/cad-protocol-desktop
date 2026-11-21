@@ -420,7 +420,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         // 1.42: its dashes (lengths in CSS pixels, a dot −1, twelve at most), or its floats are triangles to fill.
         const dash = Array.isArray(it.dash) && it.dash.length > 0 ? it.dash : null;
         if (dash && !(dash.length <= 12 && dash.every((d) => typeof d === "number" && Number.isFinite(d)))) return { error: "The lines weren't as the engine reads them." };
-        items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}), ...(dash ? { dash: dash.map(Number) } : {}), ...(it.fill === true ? { fill: true } : {}) });
+        // 1.43: drawn a hairline wide (text's letters), and a world batch whose strips are letters'.
+        items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}), ...(dash ? { dash: dash.map(Number) } : {}), ...(it.fill === true ? { fill: true } : {}), ...(it.thin === true ? { thin: true } : {}), ...(it.lettered === true ? { lettered: true } : {}) });
       }
       const took = engine.viewLines(String(msg.key), items);
       return took && took.ok ? { ok: true } : { missing: took && Array.isArray(took.missing) ? took.missing : [] };
@@ -432,7 +433,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
   /** A view's lines as the page gave them (1.41), only what the engine reads; nothing where they aren't whole. */
   const linesOf = (l) =>
     l && typeof l === "object" && typeof l.key === "string" && l.key && nums(l.place, 3) && l.half > 0 && Number.isFinite(l.half) && l.ratio > 0 && Number.isFinite(l.ratio)
-      ? { key: l.key, place: nums(l.place, 3), ...(nums(l.world, 8) ? { world: nums(l.world, 8) } : {}), half: l.half, ratio: l.ratio, ...(l.dot > 0 && Number.isFinite(l.dot) ? { dot: l.dot } : {}) }
+      ? { key: l.key, place: nums(l.place, 3), ...(nums(l.world, 8) ? { world: nums(l.world, 8) } : {}), half: l.half, ratio: l.ratio, ...(l.dot > 0 && Number.isFinite(l.dot) ? { dot: l.dot } : {}), ...(l.thin > 0 && Number.isFinite(l.thin) ? { thin: l.thin } : {}) }
       : undefined;
 
   /** The brush's preview as the page gave it (1.39), only what the engine reads; nothing where it isn't whole. */

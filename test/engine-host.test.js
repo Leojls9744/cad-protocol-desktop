@@ -759,6 +759,11 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.match(page.out.at(-1).error, /lines weren't as the engine reads them/);
   page.emit("message", { data: { kind: "view", id: 72, scans: [], ask: { ...boxed, lines: { key: "lines 4", place: [2, 10, 20], half: 0.625, ratio: 1, dot: 1.5 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 4", place: [2, 10, 20], half: 0.625, ratio: 1, dot: 1.5 });
+  // 1.43: text's letters: a thin batch, a turning view's letters, and the hairline's half-width with the view.
+  page.emit("message", { data: { kind: "view-lines", id: 73, key: "lines 6", items: [{ id: 7, rgba: [1, 1, 1, 1], thin: true }, { id: 9, rgba: [1, 1, 1, 0.6], thin: true, lettered: true, world: true }] } });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 6", [{ id: 7, rgba: [1, 1, 1, 1], thin: true }, { id: 9, rgba: [1, 1, 1, 0.6], world: true, thin: true, lettered: true }]]]);
+  page.emit("message", { data: { kind: "view", id: 74, scans: [], ask: { ...boxed, lines: { key: "lines 6", place: [2, 10, 20], half: 0.625, ratio: 1, thin: 0.5 } } } });
+  assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 6", place: [2, 10, 20], half: 0.625, ratio: 1, thin: 0.5 });
   page.emit("message", { data: { kind: "view", id: 66, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5, junk: 1 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5 });
   // No right and up for the drawing's own: only the plane's are placed. Not whole, or the split view's other side: none.
@@ -771,7 +776,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 15);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 16);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });

@@ -78,7 +78,7 @@ fn a_line_is_drawn_where_the_page_puts_it_and_covers_each_pixel_as_the_pages_doe
     let cam = plan(200.0, 120.0);
     let red = [1.0f32, 0.0, 0.0];
     // Across the plane from 10 to 90 at its origin's height; the origin 50.5 px down the view, so along the middles of row 50.
-    let l = Lines { list: list("a", vec![batch(1, &[strip([10.0, 0.0, 0.0], [90.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false)]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("a", vec![batch(1, &[strip([10.0, 0.0, 0.0], [90.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false)]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
     let at = |x: u32, y: u32| pixel(&p, 200, x, y);
     let clear = clear_bytes();
@@ -96,7 +96,7 @@ fn a_line_is_drawn_where_the_page_puts_it_and_covers_each_pixel_as_the_pages_doe
     assert_eq!(at(10, 50), [255, 0, 0]);
     assert_eq!(at(89, 50), [255, 0, 0]);
     // Scaled and on a screen of 1.5 pixels a CSS pixel: x = (e + r·scale)·ratio, y = (f − u·scale)·ratio; as wide in the screen's pixels.
-    let up = Lines { list: list("b", vec![batch(2, &[strip([20.0, 10.0, 0.0], [20.0, 30.0, 0.0], [1.0, 1.0])], [0.0, 1.0, 0.0, 1.0], false)]), scale: 2.0, e: 3.0, f: 70.0, world: None, half: HALF, ratio: 1.5, dot: 0.0 };
+    let up = Lines { list: list("b", vec![batch(2, &[strip([20.0, 10.0, 0.0], [20.0, 30.0, 0.0], [1.0, 1.0])], [0.0, 1.0, 0.0, 1.0], false)]), scale: 2.0, e: 3.0, f: 70.0, world: None, half: HALF, ratio: 1.5, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&up));
     let at = |x: u32, y: u32| pixel(&p, 200, x, y);
     // (3 + 40) × 1.5 = 64.5 across; from (70 − 20) × 1.5 = 75 up to (70 − 60) × 1.5 = 15.
@@ -124,7 +124,7 @@ fn a_run_s_joints_are_drawn_once_and_batches_in_their_turn() {
     let run = batch(3, &[strip([10.0, 0.0, 0.0], [50.0, 0.0, 0.0], [1.0, 0.0]), strip([50.0, 0.0, 0.0], [90.0, 0.0, 0.0], [0.0, 1.0])], [0.0, 1.0, 0.0, 0.5], false);
     // Then a line down across it, in another batch: drawn after, so over it.
     let down = batch(4, &[strip([70.5, 20.0, 0.0], [70.5, -20.0, 0.0], [1.0, 1.0])], [0.0, 0.0, 1.0, 1.0], false);
-    let l = Lines { list: list("a", vec![run.clone(), down.clone()]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("a", vec![run.clone(), down.clone()]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
     let at = |x: u32, y: u32| pixel(&p, 200, x, y);
     let once = over(green, clear, 0.5);
@@ -134,7 +134,7 @@ fn a_run_s_joints_are_drawn_once_and_batches_in_their_turn() {
     assert_eq!(at(70, 50), [0, 0, 255], "the later batch over the earlier");
     assert_eq!(at(70, 40), [0, 0, 255]);
     // The other way round: the run over the line.
-    let l = Lines { list: list("b", vec![down, run]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("b", vec![down, run]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
     assert!(near(pixel(&p, 200, 70, 50), over(green, [0, 0, 255], 0.5), 2));
     // The same strips in another list, another colour: the list's.
@@ -154,7 +154,7 @@ fn lines_in_the_drawing_s_own_places_follow_the_view_s_right_and_up() {
     let b = batch(5, &[strip([5.0, 10.0, 20.0], [300.0, 60.0, 20.0], [1.0, 1.0])], [1.0, 0.0, 1.0, 1.0], true);
     // Looking east: north is right, up is up. The world's origin 100 px across the view and 60.5 down.
     let front = LineWorld { right: [0.0, 1.0, 0.0], up: [0.0, 0.0, 1.0], e: 100.0, f: 60.5 };
-    let l = Lines { list: list("a", vec![b.clone()]), scale: 1.0, e: -999.0, f: -999.0, world: Some(front), half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("a", vec![b.clone()]), scale: 1.0, e: -999.0, f: -999.0, world: Some(front), half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
     let at = |x: u32, y: u32| pixel(&p, 200, x, y);
     assert_eq!(at(130, 40), [255, 0, 255], "110 to 160 across, 40.5 down");
@@ -199,7 +199,7 @@ fn lines_are_over_the_scans_in_their_view_s_part_of_the_window_and_strips_go_whe
     // Across the view from 50 px left of its corner (outside it) to 190 in, along row 100's middles.
     let across = batch(6, &[strip([-50.0, 0.0, 0.0], [190.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false);
     let kept = across.strips.clone();
-    let l = Lines { list: list("a", vec![across]), scale: 1.0, e: 0.0, f: 100.5, world: None, half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("a", vec![across]), scale: 1.0, e: 0.0, f: 100.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [300, 200], &cam, &clouds, Some(&l));
     let at = |x: u32, y: u32| pixel(&p, 300, x, y);
     assert_eq!(at(200, 100), [255, 0, 0], "over the floor");
@@ -282,7 +282,7 @@ fn dashes_run_on_along_a_run_or_sit_centred_on_a_segment_and_dots_are_round() {
     // A run of two segments from 10 to 250, the pattern running on along it (their third floats: how far along the run each end is).
     let run = [strip([10.0, 0.0, 0.0], [130.0, 0.0, 120.0], [1.0, 0.0]), strip([130.0, 0.0, 120.0], [250.0, 0.0, 240.0], [0.0, 1.0])];
     let pattern = [10.0f32, 5.0];
-    let l = Lines { list: list("a", vec![dashed(1, &run, [1.0, 1.0, 0.0, 1.0], &pattern)]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 1.5 };
+    let l = Lines { list: list("a", vec![dashed(1, &run, [1.0, 1.0, 0.0, 1.0], &pattern)]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 1.5, thin: 0.0 };
     let p = shot(gpu, [300, 120], &cam, &[], Some(&l));
     assert!(row_matches(&p, 300, 50, 12..248, 10.0, 0.0, &pattern, 1.0, 1.5, yellow) > 200);
     // (A dash and a gap, plainly.)
@@ -305,7 +305,7 @@ fn dashes_run_on_along_a_run_or_sit_centred_on_a_segment_and_dots_are_round() {
     // as big across on the screen whatever the scale, the dashes twice as long.
     let dotted = [10.0f32, 3.0, -1.0, 3.0];
     let long = [[5.0f32, 0.0, 0.0, 65.0, 0.0, 60.0, 1.0, 1.0, 0.0]];
-    let l = Lines { list: list("d", vec![dashed(4, &long, [1.0, 1.0, 0.0, 1.0], &dotted)]), scale: 2.0, e: 0.0, f: 25.25, world: None, half: HALF, ratio: 2.0, dot: 1.5 };
+    let l = Lines { list: list("d", vec![dashed(4, &long, [1.0, 1.0, 0.0, 1.0], &dotted)]), scale: 2.0, e: 0.0, f: 25.25, world: None, half: HALF, ratio: 2.0, dot: 1.5, thin: 0.0 };
     let p = shot(gpu, [300, 120], &cam, &[], Some(&l));
     // Its `along` is the plane's 0 to 60 times the scale: 0 to 120 CSS pixels, from 10 CSS pixels in.
     assert!(row_matches(&p, 300, 50, 24..256, 10.0, 0.0, &dotted, 2.0, 1.5, yellow) > 150);
@@ -327,10 +327,10 @@ fn a_filled_batch_is_under_the_lines() {
     let clear = clear_bytes();
     // Two triangles (a wide dashed polyline's dash: a band from 20 to 80 across, 10 either side of the origin's height), half solid blue.
     let band: Vec<f32> = vec![20.0, -10.0, 0.0, 80.0, -10.0, 0.0, 80.0, 10.0, 0.0, 20.0, -10.0, 0.0, 80.0, 10.0, 0.0, 20.0, 10.0, 0.0];
-    let fill = LineItem { strips: Arc::new(Strips { id: 9, floats: band }), rgba: [0.0, 0.0, 1.0, 0.5], world: false, dash: Vec::new(), fill: true };
+    let fill = LineItem { strips: Arc::new(Strips { id: 9, floats: band }), rgba: [0.0, 0.0, 1.0, 0.5], world: false, dash: Vec::new(), fill: true, thin: false, lettered: false };
     let line = batch(1, &[strip([10.0, 0.0, 0.0], [90.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false);
     // The line listed FIRST: the fill's still beneath it.
-    let l = Lines { list: list("a", vec![line, fill]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0 };
+    let l = Lines { list: list("a", vec![line, fill]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
     let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
     let at = |x: u32, y: u32| pixel(&p, 200, x, y);
     let blue = over([0.0, 0.0, 1.0], clear, 0.5);
@@ -341,4 +341,64 @@ fn a_filled_batch_is_under_the_lines() {
     assert_eq!(at(15, 45), clear);
     assert_eq!(at(85, 45), clear);
     assert_eq!(at(15, 50), [255, 0, 0]);
+}
+
+#[test]
+fn text_s_letters_are_a_hairline_and_a_turning_view_s_face_the_screen_along_their_baseline() {
+    let Some(mut card) = card() else { return };
+    let gpu = &mut card.gpu;
+    let cam = plan(200.0, 120.0);
+    let clear = clear_bytes();
+    let white = [1.0f32, 1.0, 1.0, 1.0];
+    // A thin batch (letters in the view's plane): a hairline, one pixel wide, where a full line is a pixel and a quarter.
+    let stroke = LineItem { thin: true, ..batch(1, &[strip([10.0, 0.0, 0.0], [90.0, 0.0, 0.0], [1.0, 1.0])], white, false) };
+    let l = Lines { list: list("a", vec![stroke]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.5 };
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert_eq!(pixel(&p, 200, 50, 50), [255, 255, 255]);
+    assert_eq!(pixel(&p, 200, 50, 49), clear, "nothing of it a row away");
+    assert_eq!(pixel(&p, 200, 50, 51), clear);
+    // The same list with no thin width given: as wide as the others.
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&Lines { thin: 0.0, ..l.clone() }));
+    assert!(near(pixel(&p, 200, 50, 49), over([1.0, 1.0, 1.0], clear, covers(HALF, 1.0, 0.0)), 2));
+    // A turning view's letters (the page's letterStrip): the run's anchor in the drawing, each segment's two ends along
+    // and above the baseline, both ends' kinds in one float (1 the first soft, 2 the second), and the baseline's angle.
+    let letter = |anchor: [f32; 3], a: [f32; 2], b: [f32; 2], soft: f32, angle: f32| [anchor[0], anchor[1], anchor[2], a[0], a[1], b[0], b[1], soft, angle];
+    // An L at 10, 20: its foot 30 along the baseline, its stem 12 above it at 5 along. The baseline runs east.
+    let east = [letter([10.0, 20.0, 0.0], [0.0, 0.0], [30.0, 0.0], 3.0, 0.0), letter([10.0, 20.0, 0.0], [5.0, 0.0], [5.0, 12.0], 3.0, 0.0)];
+    let letters = |id: u64, strips: &[[f32; 9]]| LineItem { thin: true, lettered: true, world: true, ..batch(id, strips, white, true) };
+    // A plan view: the world's origin 100.5 px across the view and 60.5 down.
+    let plan_view = LineWorld { right: [1.0, 0.0, 0.0], up: [0.0, 1.0, 0.0], e: 100.5, f: 60.5 };
+    let l = Lines { list: list("b", vec![letters(2, &east)]), scale: 1.0, e: -999.0, f: -999.0, world: Some(plan_view), half: HALF, ratio: 1.0, dot: 0.0, thin: 0.5 };
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    // The foot: from 110.5 to 140.5 across, 40.5 down. The stem: 115.5 across, from 40.5 up to 28.5.
+    assert_eq!(at(125, 40), [255, 255, 255], "its foot along the baseline");
+    assert_eq!(at(139, 40), [255, 255, 255]);
+    assert_eq!(at(125, 39), clear);
+    assert_eq!(at(115, 34), [255, 255, 255], "its stem above it");
+    assert_eq!(at(115, 29), [255, 255, 255]);
+    assert_eq!(at(115, 26), clear);
+    assert_eq!(at(117, 34), clear);
+    // The same letter with its baseline running north: its foot runs up the screen, its stem to the left of it.
+    let north: Vec<[f32; 9]> = east.iter().map(|s| { let mut t = *s; t[8] = std::f32::consts::FRAC_PI_2; t }).collect();
+    let l = Lines { list: list("c", vec![letters(3, &north)]), ..l };
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    assert_eq!(at(110, 25), [255, 255, 255], "its foot up the screen");
+    assert_eq!(at(110, 11), [255, 255, 255]);
+    assert_eq!(at(104, 35), [255, 255, 255], "its stem to the left, 5 up the foot");
+    assert_eq!(at(99, 35), [255, 255, 255]);
+    assert_eq!(at(125, 40), clear);
+    // The view turned a quarter (right is north, up is west): the east-running letter's foot runs down the screen.
+    let turned = LineWorld { right: [0.0, 1.0, 0.0], up: [-1.0, 0.0, 0.0], e: 100.5, f: 60.5 };
+    let l = Lines { list: list("d", vec![letters(4, &east)]), world: Some(turned), ..l };
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    // Its anchor: 20 across the view's right (north), −10 up: 120.5 across, 70.5 down. The foot 30 down from there.
+    assert_eq!(at(120, 85), [255, 255, 255]);
+    assert_eq!(at(120, 99), [255, 255, 255]);
+    assert_eq!(at(120, 104), clear);
+    // No right and up: letters aren't drawn.
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&Lines { world: None, ..l }));
+    assert!((0..120).all(|y| (0..200).all(|x| pixel(&p, 200, x, y) == clear)));
 }
