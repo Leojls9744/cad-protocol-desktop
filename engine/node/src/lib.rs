@@ -1176,9 +1176,34 @@ pub fn classify_stage(ask: ClassifyAskJs) -> Result<AsyncTask<StageTask>> {
 // ---------------------------------------------------------------------------
 
 static VIEW: LazyLock<Mutex<Option<cadp_engine_view::View>>> = LazyLock::new(|| Mutex::new(None));
-/// The page's own points of a scan it has classified or edited (1.36), by the scan's handle: where they are, then their classes and what's taken out as they are now.
-static BORROW_POINTS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::BorrowPoints>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-static BORROWS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::Borrow>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The page's own points of the scans it has classified or edited (1.36), by the scan's handle: where they are, then their
+/// classes and what's taken out as they are now. A file's setups attached each as its own scan share a handle and have
+/// each their own points, so a handle keeps several (the newest BORROWS_KEPT of them).
+static BORROW_POINTS: LazyLock<Mutex<HashMap<u32, Vec<Arc<cadp_engine_view::BorrowPoints>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static BORROWS: LazyLock<Mutex<HashMap<u32, Vec<Arc<cadp_engine_view::Borrow>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+const BORROWS_KEPT: usize = 16;
+
+/// A scan's points kept for its handle, in place of any with the same key.
+fn keep_borrow_points(handle: u32, points: Arc<cadp_engine_view::BorrowPoints>) {
+    let mut held = BORROW_POINTS.lock().unwrap();
+    let list = held.entry(handle).or_default();
+    list.retain(|p| p.key != points.key);
+    list.push(points);
+    if list.len() > BORROWS_KEPT {
+        list.remove(0);
+    }
+}
+
+/// A scan's classes kept for its handle, in place of the classes its points had before.
+fn keep_borrow(handle: u32, borrow: Arc<cadp_engine_view::Borrow>) {
+    let mut held = BORROWS.lock().unwrap();
+    let list = held.entry(handle).or_default();
+    list.retain(|b| b.points.key != borrow.points.key);
+    list.push(borrow);
+    if list.len() > BORROWS_KEPT {
+        list.remove(0);
+    }
+}
 
 /// How a scan's points look (1.36), as the page has them.
 #[napi(object)]
@@ -1359,13 +1384,13 @@ pub fn view_borrow(
     }
     let class = classification.to_vec();
     let removed = removed.map(|r| r.to_vec());
-    let have = BORROW_POINTS.lock().unwrap().get(&handle).filter(|p| p.key == points_key).cloned();
+    let have = BORROW_POINTS.lock().unwrap().get(&handle).and_then(|list| list.iter().find(|p| p.key == points_key).cloned());
     match (have, xyz) {
         (Some(points), _) => {
             let Some(borrow) = cadp_engine_view::Borrow::new(key, points, class, removed) else {
                 return Err(Error::from_reason("the classes aren't as many as the points"));
             };
-            BORROWS.lock().unwrap().insert(handle, Arc::new(borrow));
+            keep_borrow(handle, Arc::new(borrow));
             Ok(true)
         }
         (None, None) => Ok(false),
@@ -1378,8 +1403,8 @@ pub fn view_borrow(
             std::thread::spawn(move || {
                 let points = Arc::new(cadp_engine_view::BorrowPoints::new(points_key, cell, origin, xyz));
                 if let Some(borrow) = cadp_engine_view::Borrow::new(key, points.clone(), class, removed) {
-                    BORROW_POINTS.lock().unwrap().insert(handle, points);
-                    BORROWS.lock().unwrap().insert(handle, Arc::new(borrow));
+                    keep_borrow_points(handle, points);
+                    keep_borrow(handle, Arc::new(borrow));
                 }
             });
             Ok(true)
@@ -1425,7 +1450,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         }
         if let Some(key) = &s.borrow {
             // Its own classes aren't in yet (still being filed, or never sent): not drawn till they are.
-            let Some(b) = borrows.get(&s.handle).filter(|b| &b.key == key) else { continue };
+            let Some(b) = borrows.get(&s.handle).and_then(|list| list.iter().find(|b| &b.key == key)) else { continue };
             keep.borrow = Some(b.clone());
         }
         let mut look = view_look(&s.look, &s.allow, ask.px);
