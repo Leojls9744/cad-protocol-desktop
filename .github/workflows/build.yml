@@ -280,11 +280,24 @@ jobs:
             cat dist/SHA256SUMS.txt
             echo '```'
           } > notes.md
+          # A draft of this version from an earlier build of it (a draft has no tag yet, so it isn't found by its tag).
+          draft="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.draft and .tag_name == \"$tag\")][0].id // empty")"
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id >/dev/null 2>&1; then
             # Already published (for instance by hand on GitHub): attach the
             # files to it, replacing any old ones, and refresh its notes.
             gh release upload "$tag" dist/CAD-Protocol-Setup.exe dist/CAD-Protocol-Setup.exe.blockmap dist/latest.yml dist/SHA256SUMS.txt --clobber
             gh release edit "$tag" --notes-file notes.md
+          elif [[ -n "$draft" ]]; then
+            # The draft's files replaced with this build's, its notes and the commit it's of brought up to date.
+            for old in $(gh api "repos/$GITHUB_REPOSITORY/releases/$draft/assets" --jq '.[].id'); do
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$old"
+            done
+            for f in dist/CAD-Protocol-Setup.exe dist/CAD-Protocol-Setup.exe.blockmap dist/latest.yml dist/SHA256SUMS.txt; do
+              curl -sS --fail -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/octet-stream" \
+                --data-binary @"$f" "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$draft/assets?name=$(basename "$f")" -o /dev/null
+              echo "replaced $(basename "$f") in the draft of $tag"
+            done
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$draft" -f target_commitish="$GITHUB_SHA" -F body=@notes.md --jq .html_url
           else
             gh release create "$tag" dist/CAD-Protocol-Setup.exe dist/CAD-Protocol-Setup.exe.blockmap dist/latest.yml dist/SHA256SUMS.txt \
               --draft --target "$GITHUB_SHA" --title "CAD Protocol for Windows $tag" --notes-file notes.md
