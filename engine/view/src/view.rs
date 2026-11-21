@@ -96,15 +96,21 @@ pub struct Stats {
 
 /// What tells one scan's points on the card from another's: the scan, how
 /// many, and which of them; with their shading worked out, which way round
-/// the scan is in the drawing too (the light is the drawing's north-west).
+/// the scan is in the drawing too (the light is the drawing's north-west);
+/// with their spacing measured, how big the scan is there (the spacing is
+/// kept in the drawing's units).
 type ScanKey = (u32, usize, String);
 
 fn key_of(s: &ScanAsk) -> ScanKey {
-    let key = match crate::surface::turn_of(&s.affine).filter(|_| s.keep.shade) {
-        Some(turn) => format!("{}|{:?}", s.keep.key, turn.map(|v| (v * 1e9).round() as i64)),
-        None => s.keep.key.clone(),
-    };
-    (s.handle, s.most, key)
+    scan_key(s.handle, s.most, &s.keep, &s.affine)
+}
+
+fn scan_key(handle: u32, most: usize, keep: &Keep, a: &Affine) -> ScanKey {
+    let whole = |v: f64| (v * 1e9).round() as i64;
+    let turn = crate::surface::turn_of(a).filter(|_| keep.shade).map(|t| t.map(whole));
+    let scale = keep.gaps.then(|| whole((a[0] * a[0] + a[4] * a[4] + a[8] * a[8]).sqrt()));
+    let key = if turn.is_some() || scale.is_some() { format!("{}|{:?}|{:?}", keep.key, turn, scale) } else { keep.key.clone() };
+    (handle, most, key)
 }
 
 /// A scan's base is this share of its points' budget (the rest is for the view's detail), and never under BASE_LEAST where the budget's that much.
@@ -903,6 +909,25 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_scan_is_read_again_when_its_shading_or_spacing_would_come_out_another_way() {
+        let plain = crate::camera::IDENTITY;
+        let feet = [0.3048, 0.0, 0.0, 5.0, 0.0, 0.3048, 0.0, 6.0, 0.0, 0.0, 0.3048, 7.0];
+        let turned = [0.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        // As it is: moved, scaled or turned, the same points serve.
+        let k = |a: Affine, keep: Keep| scan_key(1, 100, &keep.keyed(), &a);
+        assert_eq!(k(plain, Keep::all()), k(feet, Keep::all()));
+        assert_eq!(k(plain, Keep::all()), k(turned, Keep::all()));
+        // Shaded: turned in the drawing, the light falls another way (a size alone changes nothing of it).
+        let shade = || Keep { shade: true, ..Keep::all() };
+        assert_eq!(k(plain, shade()), k(feet, shade()));
+        assert_ne!(k(plain, shade()), k(turned, shade()));
+        // Its spacing measured: another size in the drawing, another spacing (a turn alone changes nothing of it).
+        let gaps = || Keep { gaps: true, ..Keep::all() };
+        assert_ne!(k(plain, gaps()), k(feet, gaps()));
+        assert_eq!(k(plain, gaps()), k(turned, gaps()));
+    }
 
     #[test]
     fn an_ask_is_shown_once_its_been_held_and_the_newest_due_wins() {
