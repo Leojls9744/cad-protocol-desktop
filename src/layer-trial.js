@@ -395,14 +395,20 @@ async function checkLayerTrial({ BrowserWindow, screen, desktopCapturer, writeFi
 const ENGINE_CLEAR = [11, 16, 32];
 /** The background the check asks for behind its scan (a page's own). */
 const SCAN_CLEAR = [51, 26, 77];
+/** The page's elevation colours' ends (the engine's RAMP), and the colour the check gives the floor's class. */
+const RAMP_LOW = [59, 82, 139];
+const RAMP_HIGH = [189, 223, 38];
+const CLASS_FLOOR = [200, 120, 40];
 
 /**
  * The build's check of the engine's own window (1.35, Trial B) on real
  * Windows, inside checkLayerTrial's two windows: started in the frame, its
  * ring of points drawn (white at its middle, the engine's background round
  * it, where the frame's page was magenta), then the check's scan from
- * overhead (its post red at the middle, its floor blue beside it), and how
- * it went (frames drawn, the card's name).
+ * overhead: by height (its post's top the high colour at the middle, its
+ * floor the low one beside it), by class with the post's layer off, with
+ * eye-dome lighting, and kept undrawn; and how it went (frames drawn, the
+ * card's name).
  */
 async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
   const out = {};
@@ -439,69 +445,65 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       out.pageOver = near(out.ringPixels.bar, [0, 255, 0]) && near(out.ringPixels.line, [255, 255, 255]);
     }
     // The check's scan from overhead: 10 × 10 units of floor at 0.03 a pixel, its post at the middle.
-    const shown = await engine.ask({
-      kind: "view",
-      scans: [{ token: engine.token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
-      ask: {
-        target: [6000005, 2000005, 100],
-        right: [1, 0, 0],
-        up: [0, 1, 0],
-        toEye: [0, 0, 1],
-        unitsPerPixel: 0.03 / k,
-        rect: [0, 0, inside.width * k, inside.height * k],
-        px: 5 * k,
-        // A background of the page's own choosing, and the page's number for this ask.
-        clear: SCAN_CLEAR.map((v) => v / 255),
-        serial: 7,
-      },
-    });
-    out.shown = shown.shown;
-    if (shown.error) {
-      out.error = shown.error;
-      return out;
-    }
-    let scan = null;
-    for (let i = 0; i < 40; i += 1) {
-      await wait(250);
-      scan = (await engine.ask({ kind: "view-stats" })).stats || null;
-      if (scan && scan.points >= 10000 && scan.drawn === 7) break;
-    }
-    out.scan = scan;
-    await wait(600);
-    const second = await look(png ? png.replace(/\.png$/, ".scan.png") : null);
-    if (second) {
+    const affine = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0];
+    const view = {
+      target: [6000005, 2000005, 100],
+      right: [1, 0, 0],
+      up: [0, 1, 0],
+      toEye: [0, 0, 1],
+      unitsPerPixel: 0.03 / k,
+      rect: [0, 0, inside.width * k, inside.height * k],
+      // A background of the page's own choosing.
+      clear: SCAN_CLEAR.map((v) => v / 255),
+    };
+    /** Shown, and looked at once a frame has shown it (the page's number for the ask said back). */
+    const showAndLook = async (serial, scan, ask, file) => {
+      const said = await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, ...scan }], ask: { ...view, ...ask, serial } });
+      if (said.error) throw new Error(said.error);
+      let stats = said.stats || null;
+      for (let i = 0; i < 60 && !(stats && stats.drawn === serial && (ask.hide || stats.scans >= 1)); i += 1) {
+        await wait(250);
+        stats = (await engine.ask({ kind: "view-stats" })).stats || null;
+      }
+      await wait(600);
+      return { shown: said.shown, stats, picture: await look(file) };
+    };
+    // By height, over its own 100 to 104 (1.36: the page says the colours' span): the floor the page's low colour, the post's top its high one.
+    const heights = await showAndLook(7, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, {}, png ? png.replace(/\.png$/, ".scan.png") : null);
+    out.shown = heights.shown;
+    out.scan = heights.stats;
+    if (heights.picture) {
+      const second = heights.picture;
       out.scanPixels = { post: second.at(cx, cy), floor: second.at(cx - 100, cy + 30), off: second.at(cx + 230, cy), line: second.at(520, 203) };
-      out.postDrawn = near(out.scanPixels.post, [225, 70, 50], 60);
-      out.floorDrawn = near(out.scanPixels.floor, [40, 80, 220], 40);
+      out.postDrawn = near(out.scanPixels.post, RAMP_HIGH, 30);
+      out.floorDrawn = near(out.scanPixels.floor, RAMP_LOW, 30);
       out.offClear = near(out.scanPixels.off, SCAN_CLEAR, 12);
     }
-    // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await engine.ask({
-      kind: "view",
-      scans: [{ token: engine.token, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }],
-      ask: {
-        target: [6000005, 2000005, 100],
-        right: [1, 0, 0],
-        up: [0, 1, 0],
-        toEye: [0, 0, 1],
-        unitsPerPixel: 0.03 / k,
-        rect: [0, 0, inside.width * k, inside.height * k],
-        px: 5 * k,
-        clear: SCAN_CLEAR.map((v) => v / 255),
-        hide: true,
-        serial: 8,
-      },
-    });
-    let kept = hidden.stats || null;
-    for (let i = 0; i < 40 && !(kept && kept.drawn === 8); i += 1) {
-      await wait(250);
-      kept = (await engine.ask({ kind: "view-stats" })).stats || null;
+    // By class (1.36): the floor (class 2) the colour its layer has; the post (class 5) with its layer off isn't there, so the floor shows where it stood.
+    const table = new Array(256).fill((175 | (175 << 8) | (175 << 16) | (255 << 24)) >>> 0);
+    table[2] = (CLASS_FLOOR[0] | (CLASS_FLOOR[1] << 8) | (CLASS_FLOOR[2] << 16) | (255 << 24)) >>> 0;
+    table[5] = 255;
+    const classes = await showAndLook(8, { look: { by: 1, px: 5 * k, classes: table } }, {}, null);
+    out.classes = classes.stats;
+    if (classes.picture) {
+      out.classPixels = { post: classes.picture.at(cx, cy), floor: classes.picture.at(cx - 100, cy + 30) };
+      out.classDrawn = near(out.classPixels.floor, CLASS_FLOOR, 12) && near(out.classPixels.post, CLASS_FLOOR, 12);
     }
-    out.hidden = kept;
-    await wait(400);
-    const third = await look(null);
-    if (third) {
-      out.hiddenPixels = { post: third.at(cx, cy), floor: third.at(cx - 100, cy + 30) };
+    // Eye-dome lighting on (1.36): the floor beside the post darkens, the floor away from it doesn't.
+    const lit = await showAndLook(9, { look: { by: 1, px: 5 * k, classes: table.map((v, c) => (c === 5 ? (255 | (255 << 24)) >>> 0 : v)) } }, { edl: [1, 1.4 * k, inside.width * k * 0.055, 0] }, null);
+    if (lit.picture) {
+      // The floor's pixels just left of the post (whichever of them the card gives the post's own edge to).
+      const beside = [];
+      for (let dx = -9; dx <= -2; dx += 1) beside.push(lit.picture.at(cx + dx, cy));
+      out.litPixels = { beside, away: lit.picture.at(cx - 100, cy + 30) };
+      const floorDarkened = (p) => p[0] < CLASS_FLOOR[0] - 40 && p[1] > 30 && p[1] < CLASS_FLOOR[1] - 20;
+      out.litDrawn = near(out.litPixels.away, CLASS_FLOOR, 12) && beside.some(floorDarkened);
+    }
+    // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
+    const hidden = await showAndLook(10, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    out.hidden = hidden.stats;
+    if (hidden.picture) {
+      out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };
       out.hiddenClear = near(out.hiddenPixels.post, SCAN_CLEAR, 12) && near(out.hiddenPixels.floor, SCAN_CLEAR, 12);
     }
     return out;

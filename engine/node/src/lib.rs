@@ -1176,23 +1176,52 @@ pub fn classify_stage(ask: ClassifyAskJs) -> Result<AsyncTask<StageTask>> {
 // ---------------------------------------------------------------------------
 
 static VIEW: LazyLock<Mutex<Option<cadp_engine_view::View>>> = LazyLock::new(|| Mutex::new(None));
+/// The page's own points of a scan it has classified or edited (1.36), by the scan's handle: where they are, then their classes and what's taken out as they are now.
+static BORROW_POINTS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::BorrowPoints>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static BORROWS: LazyLock<Mutex<HashMap<u32, Arc<cadp_engine_view::Borrow>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// A scan to draw: its handle, its file's coordinates into the drawing (12 numbers), and about how many points at most.
+/// How a scan's points look (1.36), as the page has them.
+#[napi(object)]
+pub struct ViewLookJs {
+    /// 0 their own colours, 1 by class, 2 by height, 3 by intensity, 4 one colour.
+    pub by: Option<u32>,
+    /// A point's size, pixels.
+    pub px: Option<f64>,
+    /// Discs, not squares.
+    pub round: Option<bool>,
+    /// The one colour: red, green, blue, 0 to 1.
+    pub one: Option<Vec<f64>>,
+    /// The drawing's heights the height colours run over: low, high.
+    pub heights: Option<Vec<f64>>,
+    /// The intensities the greys run over: low, high.
+    pub intensity: Option<Vec<f64>>,
+    /// Intensity mixed into the colours: read on low to high, and its share 0 to 1.
+    pub mix: Option<Vec<f64>>,
+    /// Each class's colour and whether its layer shows: 256 numbers, red | green << 8 | blue << 16 | shown << 24.
+    pub classes: Option<Vec<u32>>,
+}
+
+/// A scan to draw: its handle, its file's coordinates into the drawing (12 numbers), about how many points at most, which of them and how they look.
 #[napi(object)]
 pub struct ViewScanJs {
     pub handle: u32,
     pub affine: Vec<f64>,
     pub most: Option<f64>,
-    /// The classes shown: eight 32-bit numbers, bit c for class c (as a snap's); all with none.
+    /// 1.35's way of leaving classes out (eight 32-bit numbers, bit c for class c): read as those classes' layers off, where no look is given.
     pub allow: Option<Vec<u32>>,
     /// An E57's one setup alone.
     pub setup: Option<u32>,
     /// An E57's setups turned off.
     pub off: Option<Vec<u32>>,
+    /// The class each of the file's 256 codes is read as (the scan's class map).
+    pub map: Option<Vec<u32>>,
+    /// The page's own classes and removed points for it (view_borrow's key): drawn once they're in.
+    pub borrow: Option<String>,
+    pub look: Option<ViewLookJs>,
 }
 
 /// What to draw: the page's view (where its drawing area's middle looks, right, up and toward the eye, drawing units a
-/// pixel, and the drawing area in the window: left, top, width, height), the scans, a point's size; or the check's ring.
+/// pixel, and the drawing area in the window: left, top, width, height), the scans; or the check's ring.
 #[napi(object)]
 pub struct ViewAskJs {
     pub target: Option<Vec<f64>>,
@@ -1201,6 +1230,7 @@ pub struct ViewAskJs {
     pub to_eye: Option<Vec<f64>>,
     pub units_per_pixel: Option<f64>,
     pub rect: Option<Vec<f64>>,
+    /// 1.35's point size for every scan (a scan's look has its own since).
     pub px: Option<f64>,
     pub test: Option<bool>,
     pub scans: Option<Vec<ViewScanJs>>,
@@ -1210,6 +1240,10 @@ pub struct ViewAskJs {
     pub hide: Option<bool>,
     /// The page's own number for this ask (said back as `drawn` once a frame has shown it).
     pub serial: Option<f64>,
+    /// Eye-dome lighting (1.36): its strength, its radius and the eye's distance (pixels), the depth noise ignored (drawing units).
+    pub edl: Option<Vec<f64>>,
+    /// How long the ask is held before it's shown, ms (1.36): the page's own picture lands that much later.
+    pub hold_ms: Option<f64>,
 }
 
 #[napi(object)]
@@ -1229,6 +1263,8 @@ pub struct ViewStatsJs {
     pub error: Option<String>,
     /// How many of the asked scans the last frame drew.
     pub scans: u32,
+    /// How many of them with the detail for its view (1.36).
+    pub detail: u32,
     /// The serial of the ask the last frame showed.
     pub drawn: f64,
 }
@@ -1236,6 +1272,53 @@ pub struct ViewStatsJs {
 fn view_three(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
     let v = v.as_ref()?;
     (v.len() == 3 && v.iter().all(|x| x.is_finite())).then(|| [v[0], v[1], v[2]])
+}
+
+fn view_two(v: &Option<Vec<f64>>) -> Option<[f64; 2]> {
+    let v = v.as_ref()?;
+    (v.len() == 2 && v.iter().all(|x| x.is_finite())).then(|| [v[0], v[1]])
+}
+
+/// A scan's look as the page gave it; what it didn't say is as 1.35 drew (its own colours, squares, every class).
+fn view_look(look: &Option<ViewLookJs>, allow: &Option<Vec<u32>>, px: Option<f64>) -> cadp_engine_view::Look {
+    let mut out = cadp_engine_view::Look::own();
+    if let Some(p) = px.filter(|p| p.is_finite() && *p > 0.0) {
+        out.px = p;
+    }
+    // 1.35's classes left out: their layers off.
+    if let Some(bits) = allow.as_ref().filter(|b| b.len() == 8) {
+        for (c, entry) in out.classes.iter_mut().enumerate() {
+            if bits[c >> 5] >> (c & 31) & 1 == 0 {
+                entry[3] = 0;
+            }
+        }
+    }
+    let Some(l) = look else { return out };
+    if let Some(by) = l.by.filter(|b| *b <= cadp_engine_view::BY_ONE) {
+        out.by = by;
+    }
+    if let Some(p) = l.px.filter(|p| p.is_finite() && *p > 0.0) {
+        out.px = p.min(64.0);
+    }
+    out.round = l.round.unwrap_or(false);
+    if let Some(c) = view_three(&l.one) {
+        out.one = [c[0] as f32, c[1] as f32, c[2] as f32];
+    }
+    if let Some(h) = view_two(&l.heights) {
+        out.heights = h;
+    }
+    if let Some(i) = view_two(&l.intensity) {
+        out.intensity = [i[0] as f32, i[1] as f32];
+    }
+    if let Some(m) = view_three(&l.mix) {
+        out.mix = [m[0] as f32, m[1] as f32, m[2] as f32];
+    }
+    if let Some(classes) = l.classes.as_ref().filter(|c| c.len() == 256) {
+        for (entry, v) in out.classes.iter_mut().zip(classes) {
+            *entry = [(*v & 255) as u8, (*v >> 8 & 255) as u8, (*v >> 16 & 255) as u8, (*v >> 24 & 255) as u8];
+        }
+    }
+    out
 }
 
 /// The engine's window started in the frame whose handle is `parent` (a whole number, as text).
@@ -1252,7 +1335,59 @@ pub fn view_start(parent: String) -> Result<()> {
     Ok(())
 }
 
-/// What the engine's window shows from now on. Scans whose handles aren't open are left out.
+/// The page's own points of a scan it has classified or edited (1.36): where
+/// they are in the drawing (`xyz` from `origin`; `cell` the size it files
+/// them by), their classes and which are taken out. The scan's points on
+/// the card take the class of the nearest, and are left out where it's
+/// taken out. `xyz` needn't come again while `points_key` is the same
+/// (their classes change far more often than where they are): false says
+/// it's needed. They're filed on a thread of their own; a view that names
+/// `key` draws that scan once they're in.
+#[napi]
+pub fn view_borrow(
+    handle: u32,
+    key: String,
+    points_key: String,
+    cell: f64,
+    origin: Vec<f64>,
+    xyz: Option<Float32Array>,
+    classification: Uint8Array,
+    removed: Option<Uint8Array>,
+) -> Result<bool> {
+    if origin.len() != 3 || origin.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason("the points' origin needs three numbers"));
+    }
+    let class = classification.to_vec();
+    let removed = removed.map(|r| r.to_vec());
+    let have = BORROW_POINTS.lock().unwrap().get(&handle).filter(|p| p.key == points_key).cloned();
+    match (have, xyz) {
+        (Some(points), _) => {
+            let Some(borrow) = cadp_engine_view::Borrow::new(key, points, class, removed) else {
+                return Err(Error::from_reason("the classes aren't as many as the points"));
+            };
+            BORROWS.lock().unwrap().insert(handle, Arc::new(borrow));
+            Ok(true)
+        }
+        (None, None) => Ok(false),
+        (None, Some(xyz)) => {
+            if xyz.len() % 3 != 0 || xyz.len() / 3 != class.len() || removed.as_ref().is_some_and(|r| r.len() != class.len()) {
+                return Err(Error::from_reason("the classes aren't as many as the points"));
+            }
+            let xyz = xyz.to_vec();
+            let origin = [origin[0], origin[1], origin[2]];
+            std::thread::spawn(move || {
+                let points = Arc::new(cadp_engine_view::BorrowPoints::new(points_key, cell, origin, xyz));
+                if let Some(borrow) = cadp_engine_view::Borrow::new(key, points.clone(), class, removed) {
+                    BORROW_POINTS.lock().unwrap().insert(handle, points);
+                    BORROWS.lock().unwrap().insert(handle, Arc::new(borrow));
+                }
+            });
+            Ok(true)
+        }
+    }
+}
+
+/// What the engine's window shows from now on. Scans whose handles aren't open, or whose own classes (`borrow`) aren't in yet, are left out.
 #[napi]
 pub fn view_show(ask: ViewAskJs) -> Result<u32> {
     let held = VIEW.lock().unwrap();
@@ -1268,6 +1403,7 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         _ => None,
     };
     let indexes = INDEXES.lock().unwrap();
+    let borrows = BORROWS.lock().unwrap();
     let mut scans = Vec::new();
     for s in ask.scans.unwrap_or_default() {
         let Some(index) = indexes.get(&s.handle) else { continue };
@@ -1278,28 +1414,44 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         affine.copy_from_slice(&s.affine);
         let most = s.most.filter(|m| m.is_finite() && *m >= 1.0).unwrap_or(16_000_000.0).min(64_000_000.0) as usize;
         let mut keep = cadp_engine_view::Keep::all();
-        if let Some(bits) = &s.allow {
-            if bits.len() != 8 {
-                return Err(Error::from_reason("allow needs eight numbers"));
-            }
-            for (k, w) in keep.allow.iter_mut().enumerate() {
-                *w = bits[k * 2] as u64 | (bits[k * 2 + 1] as u64) << 32;
-            }
-        }
         keep.setup = s.setup.map(|k| k.min(u16::MAX as u32) as u16);
         keep.off = s.off.as_ref().map(|v| v.iter().map(|k| (*k).min(u16::MAX as u32) as u16).collect()).unwrap_or_default();
-        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep });
+        if let Some(map) = s.map.as_ref().filter(|m| m.len() == 256) {
+            let mut table = [0u8; 256];
+            for (t, v) in table.iter_mut().zip(map) {
+                *t = (*v).min(255) as u8;
+            }
+            keep.map = Some(Arc::new(table));
+        }
+        if let Some(key) = &s.borrow {
+            // Its own classes aren't in yet (still being filed, or never sent): not drawn till they are.
+            let Some(b) = borrows.get(&s.handle).filter(|b| &b.key == key) else { continue };
+            keep.borrow = Some(b.clone());
+        }
+        let mut look = view_look(&s.look, &s.allow, ask.px);
+        // No look given (1.35's page): a scan with no colours of its own by its own heights, as 1.35 drew it.
+        if s.look.is_none() {
+            let lo = index.file_xyz(index.min[0], index.min[1], index.min[2]);
+            let hi = index.file_xyz(index.max[0], index.max[1], index.max[2]);
+            look.heights = [affine[10] * lo[2] + affine[11], affine[10] * hi[2] + affine[11]];
+        }
+        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep: keep.keyed(), look });
     }
     let shown = scans.len() as u32;
     let serial = ask.serial.filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0) as u64;
+    let edl = match ask.edl.as_ref().filter(|e| e.len() == 4 && e.iter().all(|v| v.is_finite())) {
+        Some(e) => cadp_engine_view::Edl { strength: e[0], radius: e[1], eye: e[2], noise: e[3] },
+        None => cadp_engine_view::Edl::default(),
+    };
     view.show(cadp_engine_view::Ask {
         camera,
         scans,
-        px: ask.px.unwrap_or(2.0),
         test: ask.test.unwrap_or(false),
         clear: view_three(&ask.clear),
         hide: ask.hide.unwrap_or(false),
         serial,
+        edl,
+        hold_ms: ask.hold_ms.filter(|h| h.is_finite() && *h > 0.0).unwrap_or(0.0),
     });
     Ok(shown)
 }
@@ -1322,6 +1474,7 @@ pub fn view_stats() -> ViewStatsJs {
         adapter: s.adapter,
         error: s.error,
         scans: s.scans,
+        detail: s.detail,
         drawn: s.drawn as f64,
     }
 }

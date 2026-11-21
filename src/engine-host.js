@@ -249,6 +249,57 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     viewIn = null;
   }
 
+  const nums = (v, n) => (Array.isArray(v) && v.length === n && v.every((x) => typeof x === "number") ? v.map(Number) : undefined);
+  /** 256 whole numbers (a class table), as a list; else nothing. */
+  const table = (v) => {
+    if (!v || v.length !== 256) return undefined;
+    const out = Array.from(v, (x) => x >>> 0);
+    return out.every(Number.isFinite) ? out : undefined;
+  };
+  /** A scan's look as the page gave it (1.36), only what the engine reads. */
+  function lookOf(l) {
+    if (!l || typeof l !== "object") return undefined;
+    return {
+      ...(Number.isInteger(l.by) && l.by >= 0 ? { by: l.by } : {}),
+      ...(typeof l.px === "number" && l.px > 0 ? { px: l.px } : {}),
+      round: l.round === true,
+      ...(nums(l.one, 3) ? { one: nums(l.one, 3) } : {}),
+      ...(nums(l.heights, 2) ? { heights: nums(l.heights, 2) } : {}),
+      ...(nums(l.intensity, 2) ? { intensity: nums(l.intensity, 2) } : {}),
+      ...(nums(l.mix, 3) ? { mix: nums(l.mix, 3) } : {}),
+      ...(table(l.classes) ? { classes: table(l.classes) } : {}),
+    };
+  }
+
+  /**
+   * 1.36: the page's own points of a scan it has classified or edited
+   * (where they are, their classes, which are taken out), for the engine's
+   * window to draw the scan by. `needPoints`: where they are must come too
+   * (it had only been told their classes).
+   */
+  function viewClasses(msg) {
+    if (!canView() || typeof engine.viewBorrow !== "function") return { error: "This scan engine can't draw a scan with the page's own classes." };
+    const held = scans.get(msg.token);
+    if (!held || held.handle == null) return { missing: [msg.token] };
+    const u8 = (v) => (v instanceof Uint8Array ? v : null);
+    try {
+      if (!u8(msg.classification) || !nums(msg.origin, 3) || !(msg.cell > 0)) return { error: "The page's classes weren't as the engine reads them." };
+      const took = engine.viewBorrow(
+        held.handle,
+        String(msg.key),
+        String(msg.pointsKey),
+        Number(msg.cell),
+        nums(msg.origin, 3),
+        msg.xyz instanceof Float32Array ? msg.xyz : null,
+        msg.classification,
+        u8(msg.removed),
+      );
+      return took ? { ok: true } : { needPoints: true };
+    } catch (err) {
+      return { error: String((err && err.message) || err) };
+    }
+  }
+
   /** What the window's told to show (a "view"), or just how it's going ("view-stats"). */
   function viewAnswer(msg) {
     if (!canView()) return { error: "This scan engine can't draw in a window of its own." };
@@ -262,6 +313,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           const held = s && scans.get(s.token);
           if (!held || held.handle == null || !Array.isArray(s.affine)) continue;
           // 1.35: which of its points: the classes shown (eight numbers, as a snap's), an E57's one setup, its setups turned off.
+          // 1.36: the class each of the file's codes is read as, the page's own classes for it (by their key), and how it looks.
           const whole = (v) => Number.isInteger(v) && v >= 0;
           list.push({
             handle: held.handle,
@@ -270,10 +322,12 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
             ...(Array.isArray(s.allow) && s.allow.length === 8 ? { allow: s.allow.map((v) => v >>> 0) } : {}),
             ...(whole(s.setup) ? { setup: s.setup } : {}),
             ...(Array.isArray(s.off) && s.off.every(whole) && s.off.length ? { off: s.off } : {}),
+            ...(table(s.map) ? { map: table(s.map) } : {}),
+            ...(typeof s.borrow === "string" && s.borrow ? { borrow: s.borrow } : {}),
+            ...(lookOf(s.look) ? { look: lookOf(s.look) } : {}),
           });
         }
         const a = msg.ask && typeof msg.ask === "object" ? msg.ask : {};
-        const nums = (v, n) => (Array.isArray(v) && v.length === n ? v.map(Number) : undefined);
         shown = engine.viewShow({
           target: nums(a.target, 3),
           right: nums(a.right, 3),
@@ -288,6 +342,9 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           clear: nums(a.clear, 3),
           hide: a.hide === true,
           serial: typeof a.serial === "number" ? a.serial : undefined,
+          // 1.36: eye-dome lighting as the page has it, and how long the ask is held so the page's own picture lands with it.
+          edl: nums(a.edl, 4),
+          holdMs: typeof a.holdMs === "number" && a.holdMs > 0 ? a.holdMs : undefined,
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };
@@ -363,6 +420,11 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
     // page's view and scans, or the check's ring), and how it's going.
     if (msg.kind === "view" || msg.kind === "view-stats") {
       port.postMessage({ kind: msg.kind, id, ...viewAnswer(msg) });
+      return;
+    }
+    // 1.36: the page's own classes for a scan, for the engine's window.
+    if (msg.kind === "view-classes") {
+      port.postMessage({ kind: "view-classes", id, key: msg.key, ...viewClasses(msg) });
       return;
     }
     // 1.29: the rules classifier's middle, on the engine's threads (the

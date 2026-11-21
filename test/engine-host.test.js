@@ -486,6 +486,11 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
     },
     viewStats: () => ({ started: true, running: true, frames: 12, points: 10, adapter: "A card" }),
     viewStop: () => calls.push(["stop"]),
+    viewBorrow: (...args) => {
+      calls.push(["borrow", args]);
+      // Told only their classes the first time: their places are needed too.
+      return args[5] !== null || calls.filter((c) => c[0] === "borrow").length > 1;
+    },
   };
   createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
   const page = port();
@@ -536,10 +541,58 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(shown.rect, [10, 20, 300, 200]);
   assert.equal(shown.test, false);
   assert.deepEqual(page.out.at(-1), { kind: "view", id: 2, shown: 1, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
+  // 1.36: a scan's look, its class map and the page's own classes for it go through as the engine reads them; eye-dome lighting and the hold with the view.
+  const classes = Array.from({ length: 256 }, (_, c) => (c | (255 << 24)) >>> 0);
+  page.emit("message", {
+    data: {
+      kind: "view",
+      id: 20,
+      scans: [
+        {
+          token: "t1",
+          affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+          most: 7,
+          map: new Uint8Array(256).fill(3),
+          borrow: "its classes",
+          look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, junk: "left out" },
+        },
+        { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { by: -1, px: 0, classes: [1, 2] }, map: [1, 2] },
+      ],
+      ask: { target: [1, 2, 3], right: [1, 0, 0], up: [0, 1, 0], toEye: [0, 0, 1], unitsPerPixel: 0.5, rect: [0, 0, 300, 200], edl: [1, 1.4, 16.5, 0.0066], holdMs: 16.6 },
+    },
+  });
+  const looked = calls.at(-1)[1];
+  assert.deepEqual(looked.scans[0], {
+    handle: 7,
+    affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+    most: 7,
+    map: new Array(256).fill(3),
+    borrow: "its classes",
+    look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes },
+  });
+  // What isn't as the engine reads it is left out (it draws by what it's given, or as 1.35 did).
+  assert.deepEqual(looked.scans[1], { handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { round: false } });
+  assert.deepEqual(looked.edl, [1, 1.4, 16.5, 0.0066]);
+  assert.equal(looked.holdMs, 16.6);
+  // The page's own classes for a scan: their classes alone first (the engine says their places are needed), then with their places.
+  const cls = new Uint8Array([2, 6]);
+  const gone = new Uint8Array([0, 1]);
+  page.emit("message", { data: { kind: "view-classes", id: 21, token: "t1", key: "k1", pointsKey: "p1", cell: 0.4, origin: [100, 200, 3], classification: cls, removed: gone } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 21, key: "k1", needPoints: true });
+  assert.deepEqual(calls.at(-1), ["borrow", [7, "k1", "p1", 0.4, [100, 200, 3], null, cls, gone]]);
+  const xyz = new Float32Array([0, 0, 0, 1, 1, 1]);
+  page.emit("message", { data: { kind: "view-classes", id: 22, token: "t1", key: "k1", pointsKey: "p1", cell: 0.4, origin: [100, 200, 3], xyz, classification: cls, removed: null } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 22, key: "k1", ok: true });
+  assert.deepEqual(calls.at(-1), ["borrow", [7, "k1", "p1", 0.4, [100, 200, 3], xyz, cls, null]]);
+  // A scan that isn't open, and classes not as the engine reads them.
+  page.emit("message", { data: { kind: "view-classes", id: 23, token: "nope", key: "k", pointsKey: "p", cell: 1, origin: [0, 0, 0], classification: cls } });
+  assert.deepEqual(page.out.at(-1), { kind: "view-classes", id: 23, key: "k", missing: ["nope"] });
+  page.emit("message", { data: { kind: "view-classes", id: 24, token: "t1", key: "k", pointsKey: "p", cell: 0, origin: [0, 0, 0], classification: cls } });
+  assert.match(page.out.at(-1).error, /weren't as the engine reads them/);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 1);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 2);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });
@@ -557,4 +610,6 @@ test("1.35: an engine from before can't draw in a window of its own, and says so
   assert.match(parent.sent.at(-1).error, /can't draw in a window of its own/);
   page.emit("message", { data: { kind: "view", id: 1, ask: {} } });
   assert.match(page.out.at(-1).error, /can't draw in a window of its own/);
+  page.emit("message", { data: { kind: "view-classes", id: 2, token: "t", key: "k" } });
+  assert.match(page.out.at(-1).error, /can't draw a scan with the page's own classes/);
 });

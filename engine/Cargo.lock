@@ -102,7 +102,7 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cadp-engine"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "cadp-engine-core",
  "cadp-engine-view",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "cadp-engine-core"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "chrono",
  "las",
@@ -124,13 +124,14 @@ dependencies = [
 
 [[package]]
 name = "cadp-engine-view"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "cadp-engine-core",
  "las",
  "pollster",
  "raw-window-handle",
+ "rayon",
  "wgpu",
  "windows-sys 0.59.0",
 ]
