@@ -57,12 +57,14 @@ pub struct Look {
     pub classes: [[u8; 4]; 256],
     /// The surface shading's strengths, 0 to 1: lighting, detail (relief and edges) and hollows.
     pub shade: [f32; 3],
+    /// Fill gaps: each point as big as its spacing where it is (never under `px`), up to this many pixels; 0: off.
+    pub fill: f64,
 }
 
 impl Look {
     /// Its own colours, every class showing, squares of 2 px.
     pub fn own() -> Look {
-        Look { by: BY_OWN, px: 2.0, round: false, one: [1.0; 3], heights: [0.0, 1.0], intensity: [0.0, 65535.0], mix: [0.0, 1.0, 0.0], classes: [[175, 175, 175, 255]; 256], shade: [0.0; 3] }
+        Look { by: BY_OWN, px: 2.0, round: false, one: [1.0; 3], heights: [0.0, 1.0], intensity: [0.0, 65535.0], mix: [0.0, 1.0, 0.0], classes: [[175, 175, 175, 255]; 256], shade: [0.0; 3], fill: 0.0 }
     }
 }
 
@@ -88,6 +90,8 @@ pub struct Shading {
     pub depth: f64,
     pub relief: f64,
     pub faces: f64,
+    /// How much of the background shows through the scans (the page's Show switches' faint: 0.7; 0: none).
+    pub fade: f64,
 }
 
 /// The most one direction's fold counts, pixels of depth (the page's SHADING_CAP), a fold this small is the scanner's noise (SHADING_NOISE), and the share of a slope put down to the points' squares (SHADING_GRAIN).
@@ -113,8 +117,10 @@ fn points_shader() -> String {
         r#"
 struct U {{
   m: mat4x4<f32>,
-  // xy: half a point, across and up the window; z: discs; w: what it's coloured by.
+  // xy: a pixel across and up the window (a point that many pixels wide reaches that far either side of its middle); z: discs; w: what it's coloured by.
   size: vec4<f32>,
+  // x: a point's size, pixels; y: the points' average spacing, pixels (0: gaps not filled); z: the most a point grows to fill a gap, pixels.
+  px: vec4<f32>,
   // A point's height over the low end of the colours, as a share of their span.
   zrow: vec4<f32>,
   // Intensity's low and one over its span, for greys; then for the mix.
@@ -184,7 +190,7 @@ fn ramp(t: f32) -> vec3<f32> {{
 }}
 
 @vertex
-fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<u32>, @location(2) iv: vec2<u32>, @location(3) sh: vec4<u32>) -> VOut {{
+fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c: vec4<u32>, @location(2) iv: vec2<u32>, @location(3) sh: vec4<u32>, @location(4) mo: vec4<u32>) -> VOut {{
   var corners = array<vec2<f32>, 4>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, 1.0));
   let q = corners[vi];
   let entry = u.classes[c.w];
@@ -202,7 +208,12 @@ fn vs(@builtin(vertex_index) vi: u32, @location(0) p: vec3<f32>, @location(1) c:
     return o;
   }}
   let centre = u.m * vec4<f32>(p, 1.0);
-  o.pos = vec4<f32>(centre.xy + q * u.size.xy, centre.z, 1.0);
+  // Its size: the size set, or (Fill gaps) as big as its spacing where it is, a whole pixel up, never under the size set nor over the most.
+  var wide = u.px.x;
+  if (u.px.y > 0.0 && mo.x > 0u) {{
+    wide = clamp(max(wide, ceil(u.px.y * exp2((f32(mo.x) - 128.0) / 16.0))), 1.0, max(u.px.z, wide));
+  }}
+  o.pos = vec4<f32>(centre.xy + q * wide * u.size.xy, centre.z, 1.0);
   let by = u.size.w;
   let inten = f32(iv.x);
   var col = u.one.rgb;
@@ -283,6 +294,7 @@ fn shade_shader() -> String {
     format!(
         r#"
 struct E {{
+  // The background; a: how much of their strength the scans are drawn at (1: all; under: faint, the background showing through).
   clear: vec4<f32>,
   // Strength, radius (pixels), the eye's distance (pixels), the noise (pixels of depth).
   edl: vec4<f32>,
@@ -442,7 +454,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {{
     }}
     s *= max(e.more.y, exp(-e.edl.x * sum));
   }}
-  return vec4<f32>(min(col * s, vec3<f32>(1.0)), 1.0);
+  return vec4<f32>(mix(e.clear.rgb, min(col * s, vec3<f32>(1.0)), e.clear.a), 1.0);
 }}
 "#,
         noise = SHADING_NOISE,
@@ -459,6 +471,7 @@ fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {{
 struct Uniforms {
     m: [[f32; 4]; 4],
     size: [f32; 4],
+    px: [f32; 4],
     zrow: [f32; 4],
     ints: [f32; 4],
     one: [f32; 4],
@@ -500,6 +513,8 @@ pub struct Cloud {
     pub shaded: bool,
     /// How long that took, ms.
     pub shade_ms: f64,
+    /// Their average spacing in the drawing (0: not measured).
+    pub gap: f64,
 }
 
 /// What sends points to the card: the card's own, or a copy for another thread (a scan read while frames go on).
@@ -542,7 +557,7 @@ impl Sender {
             layout: &self.layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
-        Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius, colours: points.colours, shaded: points.shaded, shade_ms: points.shade_ms }
+        Cloud { buffer, uniforms, bind, count: data.len() as u32, centre: points.centre, radius: points.radius, colours: points.colours, shaded: points.shaded, shade_ms: points.shade_ms, gap: points.gap }
     }
 }
 
@@ -643,6 +658,7 @@ impl Gpu {
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint8x4, offset: 12, shader_location: 1 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint16x2, offset: 16, shader_location: 2 },
             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint8x4, offset: 20, shader_location: 3 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint8x4, offset: 24, shader_location: 4 },
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("cadp points"),
@@ -848,7 +864,9 @@ impl Gpu {
                 }
                 let u = Uniforms {
                     m: columns(&m),
-                    size: [(half / size[0].max(1) as f64) as f32, (half / size[1].max(1) as f64) as f32, if look.round { 1.0 } else { 0.0 }, look.by as f32],
+                    size: [(1.0 / size[0].max(1) as f64) as f32, (1.0 / size[1].max(1) as f64) as f32, if look.round { 1.0 } else { 0.0 }, look.by as f32],
+                    // Fill gaps: the points' average spacing in pixels (each one's own is told by it), where it was measured.
+                    px: [half as f32, if look.fill > 0.0 && cloud.gap > 0.0 { (cloud.gap / cam.units_per_pixel.max(1e-12)) as f32 } else { 0.0 }, look.fill.max(0.0) as f32, 0.0],
                     zrow: [(affine[8] / span) as f32, (affine[9] / span) as f32, (affine[10] / span) as f32, ((mid_z - look.heights[0]) / span) as f32],
                     ints: [look.intensity[0], inv(look.intensity[0], look.intensity[1]), look.mix[0], inv(look.mix[0], look.mix[1])],
                     one: [look.one[0], look.one[1], look.one[2], if mixing { look.mix[2].clamp(0.0, 1.0) } else { 0.0 }],
@@ -877,7 +895,7 @@ impl Gpu {
         let (first, last) = shading_reach(px);
         let strength = |v: f64| if v.is_finite() && v > 0.0 { v as f32 } else { 0.0 };
         let shade = ShadeUniforms {
-            clear: [clear[0] as f32, clear[1] as f32, clear[2] as f32, 1.0],
+            clear: [clear[0] as f32, clear[1] as f32, clear[2] as f32, (1.0 - if shading.fade.is_finite() { shading.fade.clamp(0.0, 1.0) } else { 0.0 }) as f32],
             edl: [if on { edl.strength as f32 } else { 0.0 }, edl.radius.max(1.0) as f32, edl.eye as f32, (edl.noise.max(0.0) / upp) as f32],
             more: [(2.0 * reach * 1.05 / upp) as f32, EDL_DARKEST, size[0] as f32, size[1] as f32],
             shade: [strength(shading.depth), strength(shading.relief), strength(shading.faces), px as f32],

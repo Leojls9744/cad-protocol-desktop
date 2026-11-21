@@ -1283,6 +1283,8 @@ pub struct ViewLookJs {
     pub classes: Option<Vec<u32>>,
     /// The shading from the shape of the points' surface (1.37), each 0 to 100 as the page's settings: lighting, detail and hollows. Any over 0: worked out as the points are read.
     pub shade: Option<Vec<f64>>,
+    /// Fill gaps (1.37): each point as big as its spacing where it is, up to this many pixels. None or 0: off.
+    pub fill: Option<f64>,
 }
 
 /// A scan to draw: its handle, its file's coordinates into the drawing (12 numbers), about how many points at most, which of them and how they look.
@@ -1330,6 +1332,8 @@ pub struct ViewAskJs {
     pub hold_ms: Option<f64>,
     /// The shading from the picture's depths (1.37), each as the page's own factor: depth shading (shadingFactor), relief (reliefFactor) and face shading (faceFactor).
     pub shade: Option<Vec<f64>>,
+    /// How much of their strength the scans are drawn at (1.37; the page's Show switches' faint: 0.3), the background through the rest. None: all.
+    pub strength: Option<f64>,
     /// The limit boxes that are on (1.37), as the page tests them, and the slice's slab as one: only what they show is drawn.
     pub boxes: Option<Vec<CropBoxJs>>,
     pub slice: Option<CropBoxJs>,
@@ -1410,6 +1414,9 @@ fn view_look(look: &Option<ViewLookJs>, allow: &Option<Vec<u32>>, px: Option<f64
         for (entry, v) in out.classes.iter_mut().zip(classes) {
             *entry = [(*v & 255) as u8, (*v >> 8 & 255) as u8, (*v >> 16 & 255) as u8, (*v >> 24 & 255) as u8];
         }
+    }
+    if let Some(f) = l.fill.filter(|f| f.is_finite() && *f > 0.0) {
+        out.fill = f.min(64.0);
     }
     if let Some(sh) = view_three(&l.shade) {
         out.shade = [(sh[0] / 100.0).clamp(0.0, 1.0) as f32, (sh[1] / 100.0).clamp(0.0, 1.0) as f32, (sh[2] / 100.0).clamp(0.0, 1.0) as f32];
@@ -1542,6 +1549,8 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         }
         // Lit by the shape of its surface: that's worked out as its points are read.
         keep.shade = look.shade.iter().any(|v| *v > 0.0);
+        // Gaps filled: each point's spacing is measured as they're read.
+        keep.gaps = look.fill > 0.0;
         keep.isolate = isolate.clone();
         scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep: keep.keyed(), look });
     }
@@ -1552,9 +1561,10 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         None => cadp_engine_view::Edl::default(),
     };
     let shading = match view_three(&ask.shade) {
-        Some(s) => cadp_engine_view::Shading { depth: s[0].max(0.0), relief: s[1].max(0.0), faces: s[2].clamp(0.0, 1.0) },
+        Some(s) => cadp_engine_view::Shading { depth: s[0].max(0.0), relief: s[1].max(0.0), faces: s[2].clamp(0.0, 1.0), fade: 0.0 },
         None => cadp_engine_view::Shading::default(),
     };
+    let shading = cadp_engine_view::Shading { fade: ask.strength.filter(|v| v.is_finite()).map_or(0.0, |v| 1.0 - v.clamp(0.0, 1.0)), ..shading };
     // The limit boxes and the slice (one not as the engine reads it: none of them, and the page's own count of scans drawn says so).
     let mut clip = cadp_engine_view::Clip::default();
     for b in ask.boxes.iter().flatten().take(cadp_engine_view::CLIP_BOXES) {

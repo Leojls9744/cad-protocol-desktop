@@ -29,6 +29,8 @@ pub struct PointVertex {
     pub setup: u16,
     /// Its surface's light (0–255), its relief (−127 to 127, as a byte), its edge (0–255) and the sky it sees (255: all).
     pub shade: [u8; 4],
+    /// Its spacing where it is, for Fill gaps (surface.rs gap_byte: 0 none known), and three bytes to spare.
+    pub more: [u8; 4],
 }
 
 /// Points to draw, from `centre` (the file's coordinates).
@@ -43,6 +45,8 @@ pub struct Points {
     pub shaded: bool,
     /// How long that took, ms.
     pub shade_ms: f64,
+    /// Their average spacing in the drawing, which each one's own is told by (`more[0]`); 0: not measured.
+    pub gap: f64,
     pub data: Vec<PointVertex>,
 }
 
@@ -192,6 +196,8 @@ pub struct Keep {
     pub borrow: Option<Arc<Borrow>>,
     pub isolate: Option<Arc<Shapes>>,
     pub shade: bool,
+    /// Each point's spacing is measured with them (the page's Fill gaps).
+    pub gaps: bool,
     pub key: String,
 }
 
@@ -205,12 +211,13 @@ impl Keep {
     pub fn keyed(mut self) -> Keep {
         let map = self.map.as_ref().map(|m| m.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x0000_0100_0000_01B3)));
         self.key = format!(
-            "{:?}|{:?}|{:?}|{}|{}|{}",
+            "{:?}|{:?}|{:?}|{}|{}{}|{}",
             self.setup,
             self.off,
             map,
             self.borrow.as_ref().map(|b| b.key.as_str()).unwrap_or(""),
             if self.shade { "shaded" } else { "" },
+            if self.gaps { "gaps" } else { "" },
             self.isolate.as_ref().map(|s| s.key.as_str()).unwrap_or("")
         );
         self
@@ -519,6 +526,7 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
                         intensity: p.intensity,
                         setup: p.setup,
                         shade: unshaded,
+                        more: [0; 4],
                     });
                 }
             }
@@ -536,14 +544,22 @@ pub fn sample(ix: &Index, most: usize, keep: &Keep, affine: &Affine, sight: Opti
         surface::shade_points(&mut data, surface::turn_of(affine).as_ref());
         shade_ms = t.elapsed().as_secs_f64() * 1000.0;
     }
-    (Points { centre, radius, colours: ix.has_rgb, shaded: keep.shade, shade_ms, data }, taken)
+    // Each one's spacing where it is (Fill gaps), in the drawing's units.
+    let mut gap = 0.0;
+    if keep.gaps {
+        let t = std::time::Instant::now();
+        let turn = surface::turn_of(affine);
+        gap = surface::gap_points(&mut data, turn.as_ref()) * if turn.is_none() { affine[0].abs() } else { 1.0 };
+        shade_ms += t.elapsed().as_secs_f64() * 1000.0;
+    }
+    (Points { centre, radius, colours: ix.has_rgb, shaded: keep.shade, shade_ms, gap, data }, taken)
 }
 
 /// The check's own picture: a ring of `n` points 100 across, coloured round
 /// it, with a dot of white ones in the middle, about `centre`.
 pub fn test_ring(n: usize, centre: [f64; 3]) -> Points {
     let mut data = Vec::with_capacity(n + n / 8);
-    let point = |x: f64, y: f64, z: f64, rgb: [u8; 3]| PointVertex { pos: [x as f32, y as f32, z as f32], rgb, class: 0, intensity: 0, setup: 0, shade: surface::plain() };
+    let point = |x: f64, y: f64, z: f64, rgb: [u8; 3]| PointVertex { pos: [x as f32, y as f32, z as f32], rgb, class: 0, intensity: 0, setup: 0, shade: surface::plain(), more: [0; 4] };
     for i in 0..n {
         let a = i as f64 / n as f64 * std::f64::consts::TAU;
         // Three rings close together, so it's a band a few points wide.
@@ -555,7 +571,7 @@ pub fn test_ring(n: usize, centre: [f64; 3]) -> Points {
         let r = 6.0 * (i as f64 / (n / 8).max(1) as f64).sqrt();
         data.push(point(r * a.cos(), r * a.sin(), 1.0, [255, 255, 255]));
     }
-    Points { centre, radius: 51.0, colours: true, shaded: false, shade_ms: 0.0, data }
+    Points { centre, radius: 51.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data }
 }
 
 #[cfg(test)]
@@ -606,11 +622,11 @@ mod tests {
     }
 
     #[test]
-    fn a_vertex_is_24_bytes_as_the_card_reads_it() {
-        assert_eq!(std::mem::size_of::<PointVertex>(), 24);
-        let v = PointVertex { pos: [1.0, 2.0, 3.0], rgb: [4, 5, 6], class: 7, intensity: 0x0908, setup: 0x0b0a, shade: [12, 13, 14, 15] };
+    fn a_vertex_is_28_bytes_as_the_card_reads_it() {
+        assert_eq!(std::mem::size_of::<PointVertex>(), 28);
+        let v = PointVertex { pos: [1.0, 2.0, 3.0], rgb: [4, 5, 6], class: 7, intensity: 0x0908, setup: 0x0b0a, shade: [12, 13, 14, 15], more: [16, 17, 18, 19] };
         let bytes: &[u8] = bytemuck::bytes_of(&v);
-        assert_eq!(&bytes[12..], &[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+        assert_eq!(&bytes[12..], &[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "cadp-engine"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 license = "MIT"
 description = "The scan engine as a Node add-on, for the desktop app's engine process."

@@ -347,36 +347,27 @@ fn sky_view<P: Fn(&PointVertex) -> [f32; 3] + Sync>(data: &[PointVertex], place:
     Some(sky)
 }
 
-/// Each point's shading worked out from where they all are, into its
-/// `shade` (light, relief, edge, sky). `turn`: the scan's file into the
-/// drawing's directions (the rows of its move there, without the shift),
-/// where the two aren't the same way round: the light is the drawing's
-/// north-west, and up is the drawing's.
-pub fn shade_points(data: &mut [PointVertex], turn: Option<&[f64; 9]>) {
-    let unknown = plain();
-    data.par_iter_mut().for_each(|v| v.shade = unknown);
-    let count = data.len();
-    if (count as f64) < NEED {
-        return;
-    }
-    // Where a point is, the drawing's way round (f32, as the page keeps its own).
-    let place = |v: &PointVertex| -> [f32; 3] {
-        match turn {
-            None => v.pos,
-            Some(t) => {
-                let (x, y, z) = (v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64);
-                [(t[0] * x + t[1] * y + t[2] * z) as f32, (t[3] * x + t[4] * y + t[5] * z) as f32, (t[6] * x + t[7] * y + t[8] * z) as f32]
-            }
+/// Where a point is, the drawing's way round (f32, as the page keeps its own).
+#[inline]
+fn placed(v: &PointVertex, turn: Option<&[f64; 9]>) -> [f32; 3] {
+    match turn {
+        None => v.pos,
+        Some(t) => {
+            let (x, y, z) = (v.pos[0] as f64, v.pos[1] as f64, v.pos[2] as f64);
+            [(t[0] * x + t[1] * y + t[2] * z) as f32, (t[3] * x + t[4] * y + t[5] * z) as f32, (t[6] * x + t[7] * y + t[8] * z) as f32]
         }
-    };
-    // Their box, and their average spacing over its largest face.
+    }
+}
+
+/// The points' box; none where a place isn't a number.
+fn bounds(data: &[PointVertex], turn: Option<&[f64; 9]>) -> Option<([f64; 3], [f64; 3])> {
     let (lo, hi) = data
         .par_chunks(1 << 16)
         .map(|part| {
             let mut lo = [f32::INFINITY; 3];
             let mut hi = [f32::NEG_INFINITY; 3];
             for v in part {
-                let p = place(v);
+                let p = placed(v, turn);
                 for a in 0..3 {
                     if p[a] < lo[a] {
                         lo[a] = p[a];
@@ -402,9 +393,96 @@ pub fn shade_points(data: &mut [PointVertex], turn: Option<&[f64; 9]>) {
         );
     let lo = [lo[0] as f64, lo[1] as f64, lo[2] as f64];
     let hi = [hi[0] as f64, hi[1] as f64, hi[2] as f64];
-    if !lo.iter().chain(&hi).all(|v| v.is_finite()) {
+    lo.iter().chain(&hi).all(|v| v.is_finite()).then_some((lo, hi))
+}
+
+/// Points a cube must hold for its points' spacing to be read from it (the page's cloud-gaps.ts NEED).
+pub const GAP_NEED: u32 = 6;
+/// The smallest cubes' side, in the points' average spacing; the next sizes are 4 and 16 of them across (the page's SIDES: 2, 8 and 32).
+pub const GAP_SIDE: f64 = 2.0;
+
+/// A spacing as a byte: sixteenths of a doubling over or under the average (128: the average; 0: none known).
+#[inline]
+pub fn gap_byte(over_average: f64) -> u8 {
+    if !(over_average > 0.0) || !over_average.is_finite() {
+        return 0;
+    }
+    ((16.0 * over_average.log2()).round() + 128.0).clamp(1.0, 255.0) as u8
+}
+
+/// Each point's spacing where it is (the page's Fill gaps, cloud-gaps.ts
+/// localSpacing): the points in its cube of space, at three sizes (2, 8
+/// and 32 times the points' average spacing), the smallest holding at
+/// least GAP_NEED; N points on a surface through a cube of side s are
+/// about s/√N apart. A point with fewer even in the largest (a stray
+/// point) isn't on a surface: none. Into each point's `more[0]`, as
+/// `gap_byte` of its spacing over the average; the average is given back
+/// (0 with no points), in the units the points are in.
+pub fn gap_points(data: &mut [PointVertex], turn: Option<&[f64; 9]>) -> f64 {
+    data.par_iter_mut().for_each(|v| v.more[0] = 0);
+    let count = data.len();
+    if count == 0 {
+        return 0.0;
+    }
+    let Some((lo, hi)) = bounds(data, turn) else { return 0.0 };
+    let place = |v: &PointVertex| placed(v, turn);
+    let (w, l, h) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
+    let area = (w * l).max(w * h).max(l * h).max(1e-12);
+    let average = (area / count as f64).sqrt();
+    let widest = w.max(l).max(h);
+    let side = (GAP_SIDE * average).max(widest / 1_048_576.0).max(1e-9);
+    let Ok(Grid { cell_of, keys, .. }) = patches(data, &place, lo, side, usize::MAX, Vec::new()) else { return average };
+    // How many points each smallest cube holds; then each bigger cube's, from the smaller ones in it.
+    let mut held = vec![0u32; keys.len()];
+    for &k in &cell_of {
+        held[k as usize] += 1;
+    }
+    let bigger = |shift: u32| -> Vec<u32> {
+        let mut sums = CellMap::default();
+        let of = |key: u64| {
+            let c = unpack(key);
+            pack(c[0] >> shift, c[1] >> shift, c[2] >> shift)
+        };
+        for (k, key) in keys.iter().enumerate() {
+            *sums.entry(of(*key)).or_insert(0) += held[k];
+        }
+        keys.iter().map(|key| sums[&of(*key)]).collect()
+    };
+    let (held4, held16) = (bigger(2), bigger(4));
+    let part = part_of(count);
+    data.par_chunks_mut(part).zip(cell_of.par_chunks(part)).for_each(|(points, cells)| {
+        for (v, &k) in points.iter_mut().zip(cells) {
+            let k = k as usize;
+            let (n, across) = if held[k] >= GAP_NEED {
+                (held[k], side)
+            } else if held4[k] >= GAP_NEED {
+                (held4[k], 4.0 * side)
+            } else if held16[k] >= GAP_NEED {
+                (held16[k], 16.0 * side)
+            } else {
+                continue;
+            };
+            v.more[0] = gap_byte(across / (n as f64).sqrt() / average);
+        }
+    });
+    average
+}
+
+/// Each point's shading worked out from where they all are, into its
+/// `shade` (light, relief, edge, sky). `turn`: the scan's file into the
+/// drawing's directions (the rows of its move there, without the shift),
+/// where the two aren't the same way round: the light is the drawing's
+/// north-west, and up is the drawing's.
+pub fn shade_points(data: &mut [PointVertex], turn: Option<&[f64; 9]>) {
+    let unknown = plain();
+    data.par_iter_mut().for_each(|v| v.shade = unknown);
+    let count = data.len();
+    if (count as f64) < NEED {
         return;
     }
+    let place = |v: &PointVertex| placed(v, turn);
+    // Their box, and their average spacing over its largest face.
+    let Some((lo, hi)) = bounds(data, turn) else { return };
     let (w, l, h) = (hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]);
     let area = (w * l).max(w * h).max(l * h).max(1e-12);
     let average = (area / count as f64).sqrt();
@@ -609,7 +687,7 @@ mod tests {
     use super::*;
 
     fn at(x: f64, y: f64, z: f64) -> PointVertex {
-        PointVertex { pos: [x as f32, y as f32, z as f32], rgb: [0; 3], class: 0, intensity: 0, setup: 0, shade: [0; 4] }
+        PointVertex { pos: [x as f32, y as f32, z as f32], rgb: [0; 3], class: 0, intensity: 0, setup: 0, shade: [0; 4], more: [0; 4] }
     }
 
     /// The page's own numbers for a made-up yard (below), from its cloud-surface.ts.
@@ -752,6 +830,36 @@ mod tests {
         let mut one = vec![at(3.0, 3.0, 3.0); 100];
         shade_points(&mut one, None);
         assert!(one.iter().all(|v| v.shade[3] == 255));
+    }
+
+    #[test]
+    fn a_point_s_spacing_is_read_from_the_points_round_it() {
+        let mut r = Lcg(21);
+        // Ground 10 by 10 with 40,000 points (0.05 apart), a patch of it 2 by 2 with 4,800 more (0.025 apart there, all told), and a stray point high over it.
+        let mut data: Vec<PointVertex> = (0..40_000).map(|_| at(r.next() * 10.0, r.next() * 10.0, (r.next() - 0.5) * 0.002)).collect();
+        data.extend((0..4_800).map(|_| at(4.0 + r.next() * 2.0, 4.0 + r.next() * 2.0, (r.next() - 0.5) * 0.002)));
+        data.push(at(5.0, 5.0, 40.0));
+        let average = gap_points(&mut data, None);
+        // Over the box's largest face (its side: 10 by 40).
+        assert!((average - (400.0f64 / 44_801.0).sqrt()).abs() < 1e-4, "{average}");
+        let spacing = |v: &PointVertex| average * 2f64.powf((v.more[0] as f64 - 128.0) / 16.0);
+        let mean = |of: &[&PointVertex]| of.iter().map(|v| spacing(v)).sum::<f64>() / of.len() as f64;
+        let open: Vec<&PointVertex> = data[..40_000].iter().filter(|v| v.pos[0] < 3.0 && v.pos[0] > 0.5 && v.pos[1] > 0.5 && v.pos[1] < 9.5).collect();
+        let dense: Vec<&PointVertex> = data[40_000..44_800].iter().filter(|v| v.pos[0] > 4.3 && v.pos[0] < 5.7 && v.pos[1] > 4.3 && v.pos[1] < 5.7).collect();
+        assert!(open.iter().all(|v| v.more[0] > 0) && dense.iter().all(|v| v.more[0] > 0));
+        assert!((mean(&open) - 0.05).abs() < 0.008, "the ground's spacing: {}", mean(&open));
+        assert!((mean(&dense) - 0.025).abs() < 0.004, "the dense patch's (the ground's points and its own, 1600 to a unit square): {}", mean(&dense));
+        // The stray point: on no surface.
+        assert_eq!(data[44_800].more[0], 0);
+        // The byte: sixteenths of a doubling about the average.
+        assert_eq!(gap_byte(1.0), 128);
+        assert_eq!(gap_byte(2.0), 144);
+        assert_eq!(gap_byte(0.5), 112);
+        assert_eq!(gap_byte(0.0), 0);
+        assert_eq!(gap_byte(1e-9), 1);
+        assert_eq!(gap_byte(1e9), 255);
+        // None: none.
+        assert_eq!(gap_points(&mut [], None), 0.0);
     }
 
     #[test]

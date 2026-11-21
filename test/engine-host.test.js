@@ -558,7 +558,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
           most: 7,
           map: new Uint8Array(256).fill(3),
           borrow: "its classes",
-          look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50], junk: "left out" },
+          look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50], fill: 12, junk: "left out" },
         },
         { token: "t1", affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { by: -1, px: 0, classes: [1, 2], shade: [60, 55] }, map: [1, 2] },
       ],
@@ -573,7 +573,8 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
     map: new Array(256).fill(3),
     borrow: "its classes",
     // 1.37: its shading from the shape of its surface (lighting, detail, hollows).
-    look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50] },
+    // And Fill gaps: the most a point grows, pixels.
+    look: { by: 1, px: 3, round: true, one: [1, 0.5, 0], heights: [10, 20], intensity: [5, 900], mix: [8, 800, 0.6], classes, shade: [60, 55, 50], fill: 12 },
   });
   // What isn't as the engine reads it is left out (it draws by what it's given, or as 1.35 did).
   assert.deepEqual(looked.scans[1], { handle: 7, affine: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], look: { round: false } });
@@ -599,9 +600,11 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   const clipped = calls.at(-1)[1];
   assert.deepEqual(clipped.boxes, [{ min: [0, 0, 0], max: [10, 4, 3], centre: [5, 2], cos: 1, sin: 0, turned: false, outside: false, slack: [1e-6, 1e-6, 1e-6] }]);
   assert.deepEqual(clipped.slice, slab);
+  assert.equal("strength" in clipped, false);
   assert.equal(clipped.isolate, "its shapes");
-  // None: none said.
-  page.emit("message", { data: { kind: "view", id: 31, scans: [], ask: { ...boxed, boxes: [] } } });
+  // None: none said. Scans shown faint: at 0.3 of their strength.
+  page.emit("message", { data: { kind: "view", id: 31, scans: [], ask: { ...boxed, boxes: [], strength: 0.3 } } });
+  assert.equal(calls.at(-1)[1].strength, 0.3);
   assert.equal("boxes" in calls.at(-1)[1] || "slice" in calls.at(-1)[1] || "isolate" in calls.at(-1)[1], false);
   // A box not as the engine reads it: said, and nothing shown without it.
   const shows = calls.filter((c) => c[0] === "show").length;

@@ -62,7 +62,7 @@ fn plan(size: f64) -> Camera {
 }
 
 fn point(x: f32, y: f32, z: f32, rgb: [u8; 3], class: u8, intensity: u16) -> PointVertex {
-    PointVertex { pos: [x, y, z], rgb, class, intensity, setup: 0, shade: cadp_engine_view::surface::plain() }
+    PointVertex { pos: [x, y, z], rgb, class, intensity, setup: 0, shade: cadp_engine_view::surface::plain(), more: [0; 4] }
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn points_are_coloured_as_the_page_colours_them() {
         point(20.0, 0.0, 20.0, [10, 10, 200], 7, 2000),
         point(60.0, 0.0, 30.0, [200, 200, 10], 2, 4000),
     ];
-    let cloud = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: true, shaded: false, shade_ms: 0.0, data: data.clone() });
+    let cloud = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data: data.clone() });
     let cam = Camera { target: [1000.0, 2000.0, 50.0], ..plan(200.0) };
     let at = |k: usize| 100 + [-60i32, -20, 20, 60][k];
     let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
@@ -171,7 +171,7 @@ fn points_are_coloured_as_the_page_colours_them() {
     // A third of the way: between the third and fourth colours (35, 136, 142).
     assert!(near(pixel(&p, 200, at(1) as u32, 100), [35, 136, 142], 2), "{:?}", pixel(&p, 200, at(1) as u32, 100));
     // A scan with no colours of its own, asked for them: by height.
-    let plain = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: false, shaded: false, shade_ms: 0.0, data: data.clone() });
+    let plain = gpu.upload(&Points { centre: [1000.0, 2000.0, 50.0], radius: 80.0, colours: false, shaded: false, shade_ms: 0.0, gap: 0.0, data: data.clone() });
     let p = shot(&mut gpu, &plain, &Look { heights: [50.0, 80.0], ..base });
     assert!(near(pixel(&p, 200, at(3) as u32, 100), [189, 223, 38], 2));
     // By intensity, read on 100 to 2000: 40 at the weakest, 255 at and past the strongest.
@@ -209,7 +209,7 @@ fn eye_dome_lighting_darkens_where_the_ground_steps_as_the_pages_does() {
             data.push(point(i as f32 + 0.5, j as f32 + 0.5, if i >= 0 { 10.0 } else { 0.0 }, [200, 200, 200], 2, 0));
         }
     }
-    let cloud = gpu.upload(&Points { centre: [0.0, 0.0, 0.0], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, data });
+    let cloud = gpu.upload(&Points { centre: [0.0, 0.0, 0.0], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data });
     let cam = plan(200.0);
     let look = Look { px: 2.0, ..Look::own() };
     let shot = |gpu: &mut Gpu, edl: &Edl| gpu.picture([200, 200], Some(&cam), &[(&cloud, IDENTITY, &look)], edl, &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
@@ -258,7 +258,7 @@ fn points_are_brightened_and_darkened_by_the_shape_of_their_surface_as_the_page_
     let shades: [[u8; 4]; 6] = [cadp_engine_view::surface::plain(), [255, 0, 0, 255], [214, (-127i8) as u8, 0, 255], [214, 0, 255, 255], [214, 0, 0, 128], [214, (-127i8) as u8, 0, 255]];
     let colour = |k: usize| if k == 5 { [8, 8, 8] } else { [180, 120, 60] };
     let data: Vec<PointVertex> = shades.iter().enumerate().map(|(k, s)| PointVertex { shade: *s, ..point(k as f32 * 30.0 - 75.0, 0.0, 0.0, colour(k), 2, 0) }).collect();
-    let shaded = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: true, shade_ms: 0.0, data: data.clone() });
+    let shaded = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: true, shade_ms: 0.0, gap: 0.0, data: data.clone() });
     let cam = plan(200.0);
     let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look| gpu.picture([200, 200], Some(&cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
     let at = |p: &[u8], k: usize| pixel(p, 200, (100.0 + k as f32 * 30.0 - 75.0) as u32, 100);
@@ -293,7 +293,7 @@ fn points_are_brightened_and_darkened_by_the_shape_of_their_surface_as_the_page_
     let p = shot(&mut gpu, &shaded, &Look { shade: [0.6, 0.0, 0.0], ..base });
     assert!(near(at(&p, 3), [180, 120, 60], 1) && near(at(&p, 4), [180, 120, 60], 1) && at(&p, 1)[0] > 185);
     // Points whose shading wasn't worked out are drawn as they are, whatever's asked.
-    let plain = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, data });
+    let plain = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data });
     let p = shot(&mut gpu, &plain, &look);
     for k in 0..6 {
         assert!(near(at(&p, k), colour(k), 1), "{k}: {:?}", at(&p, k));
@@ -309,7 +309,7 @@ fn ground(height: impl Fn(f32, f32) -> f32) -> Points {
             data.push(point(x, y, height(x, y), [200, 200, 200], 2, 0));
         }
     }
-    Points { centre: [0.0, 0.0, 0.0], radius: 400.0, colours: true, shaded: false, shade_ms: 0.0, data }
+    Points { centre: [0.0, 0.0, 0.0], radius: 400.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data }
 }
 
 #[test]
@@ -334,6 +334,11 @@ fn depth_shading_darkens_a_fold_and_leaves_a_slope_as_the_pages_does() {
     for x in [70, 100, 110, 118, 122, 135, 149, 150, 151, 160, 175] {
         assert_eq!(grey(&on, x), 200, "at {x}");
     }
+    // Shown faint (the page's Show switches: 0.3 of their strength): the background through the rest, the fold still darker than the ground.
+    let faint = shot(&mut gpu, &Shading { depth: 0.7, fade: 0.7, ..Shading::default() });
+    let bg = clear_bytes()[0] as f64;
+    assert!((grey(&faint, 100) as f64 - (bg + (200.0 - bg) * 0.3)).abs() <= 1.5, "faint ground: {}", grey(&faint, 100));
+    assert!((grey(&faint, 120) as f64 - (bg + (foot as f64 - bg) * 0.3)).abs() <= 1.5, "the faint fold's foot: {}", grey(&faint, 120));
     // Weaker (the page's start, 20: 0.14): lighter than the strongest, darker than none.
     let soft = shot(&mut gpu, &Shading { depth: 0.14, ..Shading::default() });
     let want = (200.0 * (-0.14f64 * 0.5).exp()).round() as i32;
@@ -450,4 +455,44 @@ fn the_card_leaves_out_what_the_limit_boxes_and_the_slice_don_t_show() {
     let quarter = [0.0, -1.0, 0.0, far[0] + far[1], 1.0, 0.0, 0.0, far[1] - far[0] + 30.0, 0.0, 0.0, 1.0, 0.0];
     let p = shot(&mut gpu, &quarter, &clip(vec![boxed([40.0, -10.0], [60.0, 30.0], 0.0, false)], None));
     assert!(on(&p, 150, 100) && on(&p, 141, 72) && off(&p, 138, 100) && off(&p, 150, 112) && off(&p, 100, 100), "the same place in the drawing");
+}
+
+#[test]
+fn fill_gaps_draws_each_point_as_big_as_its_spacing() {
+    let Some(mut gpu) = card() else { return };
+    // Points 6 apart along a row (a pixel a unit): their spacing 6 (the byte's 128: the average, 6); one with none known; one twice as far from its neighbours.
+    let mut data: Vec<PointVertex> = (-5..=5).map(|i| PointVertex { more: [128, 0, 0, 0], ..point(i as f32 * 6.0 + 0.5, 0.5, 0.0, [200, 200, 200], 2, 0) }).collect();
+    data.push(point(0.5, 30.5, 0.0, [200, 200, 200], 2, 0));
+    data.push(PointVertex { more: [144, 0, 0, 0], ..point(0.5, -30.5, 0.0, [200, 200, 200], 2, 0) });
+    let measured = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, gap: 6.0, data: data.clone() });
+    let cam = plan(200.0);
+    let shot = |gpu: &mut Gpu, cloud: &cadp_engine_view::Cloud, look: &Look, cam: &Camera| gpu.picture([200, 200], Some(cam), &[(cloud, IDENTITY, look)], &Edl::default(), &Shading::default(), &Clip::default(), CLEAR).expect("a picture");
+    let on = |p: &[u8], x: u32, y: u32| pixel(p, 200, x, y) == [200, 200, 200];
+    let run = |p: &[u8], y: u32| (60..140).filter(|x| on(p, *x, y)).count();
+    // Off: a pixel each, 5 of background between them.
+    let base = Look { px: 1.0, ..Look::own() };
+    let p = shot(&mut gpu, &measured, &base, &cam);
+    assert_eq!(run(&p, 99), 11);
+    // On: each 6 px, the row closed up; the one with no spacing known stays the size set; the sparser one is 12.
+    let fill = Look { fill: 12.0, ..base };
+    let p = shot(&mut gpu, &measured, &fill, &cam);
+    assert_eq!(run(&p, 99), 66, "the row, closed up");
+    assert_eq!((90..110).filter(|x| on(&p, *x, 69)).count(), 1, "no spacing known: the size set");
+    assert_eq!((85..115).filter(|x| on(&p, *x, 130)).count(), 12, "twice the spacing: twice as big");
+    // Never over the most: at 5, the row's points are 5 and the sparse one too.
+    let p = shot(&mut gpu, &measured, &Look { fill: 5.0, ..base }, &cam);
+    assert_eq!(run(&p, 99), 55);
+    assert_eq!((85..115).filter(|x| on(&p, *x, 130)).count(), 5);
+    // Never under the size set: zoomed out to 3 units a pixel the spacing is 2 px, the size set of 4 stays.
+    let far = Camera { units_per_pixel: 3.0, ..cam };
+    let p = shot(&mut gpu, &measured, &Look { px: 4.0, fill: 12.0, ..base }, &far);
+    assert_eq!((85..115).filter(|x| on(&p, *x, 90)).count(), 4, "the lone point up the screen");
+    // Closer (half a unit a pixel): 12 px of spacing, 12 px points.
+    let near_by = Camera { units_per_pixel: 0.5, ..cam };
+    let p = shot(&mut gpu, &measured, &fill, &near_by);
+    assert_eq!((95..107).filter(|x| on(&p, *x, 99)).count(), 12);
+    // Not measured (its points read with Fill gaps off): the size set, whatever's asked.
+    let plain = gpu.upload(&Points { centre: [0.0; 3], radius: 100.0, colours: true, shaded: false, shade_ms: 0.0, gap: 0.0, data });
+    let p = shot(&mut gpu, &plain, &fill, &cam);
+    assert_eq!(run(&p, 99), 11);
 }

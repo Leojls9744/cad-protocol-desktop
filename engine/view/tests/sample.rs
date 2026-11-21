@@ -88,6 +88,20 @@ fn every_point_when_there_s_room_and_an_even_share_when_there_isn_t() {
     assert!(lit_right * 100 >= n * 97 && light.1 <= level + 8, "a plane's light: {light:?} about {level}, {lit_right} of {n}");
     assert!(relief.0 >= -8 && relief.1 <= 8, "a plane's relief: {relief:?}");
     assert!(sky.0 >= 240, "a plane's sky: {sky:?}");
+    // Fill gaps asked for (`gaps`): each point's spacing measured from the points round it. The floor's are 0.1 apart.
+    let gaps = Keep { gaps: true, ..Keep::all() }.keyed();
+    assert_ne!(gaps.key, Keep::all().keyed().key);
+    assert_ne!(gaps.key, shade.key);
+    let (spaced, _) = sample(&ix, 10_000_000, &gaps, &IDENTITY, None, None);
+    assert!(all.gap == 0.0 && all.data.iter().all(|v| v.more == [0; 4]));
+    assert!(spaced.gap > 0.0);
+    let own = |v: &cadp_engine_view::PointVertex| spaced.gap * 2f64.powf((v.more[0] as f64 - 128.0) / 16.0);
+    let mean = spaced.data.iter().map(own).sum::<f64>() / n as f64;
+    assert!((mean - 0.1).abs() < 0.02 && spaced.data.iter().all(|v| v.more[0] > 0), "the floor's spacing: {mean}");
+    // A scan moved and scaled in the drawing (feet to metres, say): its spacing in the drawing's units.
+    let metres = [0.3048, 0.0, 0.0, 0.0, 0.0, 0.3048, 0.0, 0.0, 0.0, 0.0, 0.3048, 0.0];
+    let (scaled, _) = sample(&ix, 10_000_000, &gaps, &metres, None, None);
+    assert!((scaled.gap / spaced.gap - 0.3048).abs() < 1e-6);
     // A tenth: about a tenth, from every part of the floor (each cell's first share).
     let (some, taken) = sample(&ix, n / 10, &Keep::all(), &IDENTITY, None, None);
     assert!(some.data.len() >= n / 10 && some.data.len() <= n / 10 + ix.cells * 2, "{} of {n}, {} cells", some.data.len(), ix.cells);

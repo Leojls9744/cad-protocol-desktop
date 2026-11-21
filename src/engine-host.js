@@ -269,6 +269,7 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
       ...(nums(l.mix, 3) ? { mix: nums(l.mix, 3) } : {}),
       ...(table(l.classes) ? { classes: table(l.classes) } : {}),
       ...(nums(l.shade, 3) ? { shade: nums(l.shade, 3) } : {}),
+      ...(typeof l.fill === "number" && l.fill > 0 ? { fill: l.fill } : {}),
     };
   }
 
@@ -386,6 +387,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           holdMs: typeof a.holdMs === "number" && a.holdMs > 0 ? a.holdMs : undefined,
           // 1.37: depth shading, relief and face shading, each as the page's own factor.
           shade: nums(a.shade, 3),
+          // 1.37: scans shown faint (the page's Show switches): how much of their strength they're drawn at.
+          ...(typeof a.strength === "number" && a.strength >= 0 && a.strength < 1 ? { strength: a.strength } : {}),
           // 1.37: the limit boxes on and the slice's slab (only what they show is drawn), and the key of the shapes isolating points.
           ...(Array.isArray(a.boxes) && a.boxes.length ? { boxes: a.boxes.map(boxOf) } : {}),
           ...(a.slice != null ? { slice: boxOf(a.slice) } : {}),

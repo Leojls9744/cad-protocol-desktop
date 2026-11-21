@@ -408,7 +408,7 @@ const CLASS_FLOOR = [200, 120, 40];
  * overhead: by height (its post's top the high colour at the middle, its
  * floor the low one beside it), by class with the post's layer off, with
  * eye-dome lighting, shaded as the page shades (1.37), by a limit box and
- * by a slice (1.37), and kept undrawn;
+ * by a slice, faint, and with its gaps filled (1.37), and kept undrawn;
  * and how it went (frames drawn, the card's name).
  */
 async function checkEngineView({ engine, frame, inside, k, look, png, wait, log = () => {} }) {
@@ -531,8 +531,25 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
       const c = out.clipPixels;
       out.clipDrawn = near(c.inside, CLASS_FLOOR, 12) && near(c.outside, SCAN_CLEAR, 12) && near(c.postBoxed, SCAN_CLEAR, 12) && near(c.postSliced, [175, 175, 175], 12) && near(c.floorSliced, SCAN_CLEAR, 12);
     }
+    // Shown faint (1.37; the page's Show switches): the floor at 0.3 of its strength, the page's background through the rest.
+    const faint = await showAndLook(14, byClass, { strength: 0.3 }, null);
+    // Fill gaps (1.37): points a pixel each leave the page's background between them (they're 3.3 px apart here); filled, the floor closes up.
+    const small = { by: 1, px: 1, classes: postOn };
+    const open = await showAndLook(15, { look: small }, {}, null);
+    const filled = await showAndLook(16, { look: { ...small, fill: 12 * k } }, {}, null);
+    out.filled = filled.stats;
+    if (faint.picture && open.picture && filled.picture) {
+      const block = (picture) => {
+        let floor = 0;
+        for (let dy = 0; dy < 4; dy += 1) for (let dx = 0; dx < 4; dx += 1) if (near(picture.at(cx - 100 + dx, cy + 30 + dy), CLASS_FLOOR, 12)) floor += 1;
+        return floor;
+      };
+      const want = CLASS_FLOOR.map((v, i) => Math.round(SCAN_CLEAR[i] + (v - SCAN_CLEAR[i]) * 0.3));
+      out.fillPixels = { faint: faint.picture.at(cx - 100, cy + 30), want, open: block(open.picture), filled: block(filled.picture) };
+      out.fillDrawn = near(out.fillPixels.faint, want, 12) && out.fillPixels.open < 16 && out.fillPixels.open > 0 && out.fillPixels.filled === 16;
+    }
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
-    const hidden = await showAndLook(14, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
+    const hidden = await showAndLook(17, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;
     if (hidden.picture) {
       out.hiddenPixels = { post: hidden.picture.at(cx, cy), floor: hidden.picture.at(cx - 100, cy + 30) };
