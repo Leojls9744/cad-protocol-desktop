@@ -769,6 +769,8 @@ struct Frame {
     size: [u32; 2],
     color: wgpu::TextureView,
     depth: wgpu::TextureView,
+    /// Which pixels a filled shape of the page's covers, as it's worked out (1.44: lines.rs, the areas).
+    stencil: wgpu::TextureView,
     /// Each view's own reading of them (its shading's numbers).
     bind: [wgpu::BindGroup; VIEWS],
 }
@@ -1018,6 +1020,19 @@ impl Gpu {
         };
         let color = make("cadp points picture", PICTURE);
         let depth = make("cadp depth", DEPTH);
+        let stencil = self
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("cadp areas"),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::lines::STENCIL,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let bind: [wgpu::BindGroup; VIEWS] = std::array::from_fn(|k| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("cadp shade"),
@@ -1029,7 +1044,7 @@ impl Gpu {
                 ],
             })
         });
-        self.frame = Some(Frame { size, color, depth, bind });
+        self.frame = Some(Frame { size, color, depth, stencil, bind });
     }
 
     /// A frame of one view: each scan through it, as its look has it, into
@@ -1122,7 +1137,36 @@ impl Gpu {
                 pass.set_bind_group(0, &frame.bind[view.slot], &[]);
                 pass.draw(0..3, 0..1);
             }
-            // Then each view's linework over its scans (1.41), in the same part of the window.
+        }
+        // Then each view's linework over its scans (1.41), in the same part of the window: the page's filled shapes
+        // first (1.44: hatches, worked out through the stencil), then its lines.
+        if views.iter().any(|v| v.lines.is_some_and(|l| l.list.items.iter().any(|i| i.area))) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cadp areas"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &frame.stencil,
+                    depth_ops: None,
+                    stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Discard }),
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            for view in &views {
+                let Some(lines) = view.lines else { continue };
+                let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };
+                pass.set_scissor_rect(x, y, w, h);
+                self.lines.draw_areas(&mut pass, view.slot, lines);
+            }
+        }
+        if views.iter().any(|v| v.lines.is_some()) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cadp lines"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
             for view in &views {
                 let Some(lines) = view.lines else { continue };
                 let Some([x, y, w, h]) = view.camera.scissor(size) else { continue };

@@ -764,6 +764,9 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.deepEqual(calls.at(-1), ["lines", ["lines 6", [{ id: 7, rgba: [1, 1, 1, 1], thin: true }, { id: 9, rgba: [1, 1, 1, 0.6], world: true, thin: true, lettered: true }]]]);
   page.emit("message", { data: { kind: "view", id: 74, scans: [], ask: { ...boxed, lines: { key: "lines 6", place: [2, 10, 20], half: 0.625, ratio: 1, thin: 0.5 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 6", place: [2, 10, 20], half: 0.625, ratio: 1, thin: 0.5 });
+  // 1.44: the page's filled shapes: an area, even-odd or nonzero (nonzero alone means nothing).
+  page.emit("message", { data: { kind: "view-lines", id: 75, key: "lines 7", items: [{ id: 7, rgba: [1, 0, 0, 0.5], area: true }, { id: 9, rgba: [0, 1, 0, 1], area: true, nonzero: true }, { id: 7, rgba: [1, 1, 1, 1], nonzero: true }] } });
+  assert.deepEqual(calls.at(-1), ["lines", ["lines 7", [{ id: 7, rgba: [1, 0, 0, 0.5], area: true }, { id: 9, rgba: [0, 1, 0, 1], area: true, nonzero: true }, { id: 7, rgba: [1, 1, 1, 1] }]]]);
   page.emit("message", { data: { kind: "view", id: 66, scans: [], ask: { ...boxed, lines: { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5, junk: 1 } } } });
   assert.deepEqual(calls.at(-1)[1].lines, { key: "lines 1", place: [2, 10, 20], world: [1, 0, 0, 0, 1, 0, 30, 40], half: 0.625, ratio: 1.5 });
   // No right and up for the drawing's own: only the plane's are placed. Not whole, or the split view's other side: none.

@@ -26,6 +26,17 @@
 //! beneath the lines. `dash_here` is the shader's pattern worked on the
 //! processor, as the page's own `dashHereOnCpu` is.
 //!
+//! 1.44 (build 4): the page's filled shapes (a hatch's fill, a tapered
+//! polyline's widths). An `area` is its outline's loops as triangle fans
+//! (three corners of three floats each: across and up the plane, and 0),
+//! filled by the page's rule through the stencil: each fan's triangles
+//! flip (even-odd) or count (nonzero) the pixels they cover, then the same
+//! triangles are drawn in the shape's colour where the stencil says
+//! inside, clearing it as they go. So a shape with holes, or one that
+//! folds over itself, fills as the page's canvas fills it, with nothing
+//! worked out by the page but the fans. They're drawn before everything
+//! else of the page's: under its lines, as the page paints them.
+//!
 //! 1.43 (build 3): text. A batch may be `thin` (text's letters: a
 //! hairline, the view's `thin` half-width) and `lettered` (a turning
 //! view's letters: each strip a run's anchor in the drawing, its two ends
@@ -81,14 +92,20 @@ pub struct LineItem {
     pub fill: bool,
     pub thin: bool,
     pub lettered: bool,
+    /// A filled shape of the page's (1.44): its floats are its loops as triangle fans, filled even-odd, or `nonzero`.
+    pub area: bool,
+    pub nonzero: bool,
 }
 
 impl LineItem {
     /// A solid batch of lines.
     pub fn solid(strips: Arc<Strips>, rgba: [f32; 4], world: bool) -> LineItem {
-        LineItem { strips, rgba, world, dash: Vec::new(), fill: false, thin: false, lettered: false }
+        LineItem { strips, rgba, world, dash: Vec::new(), fill: false, thin: false, lettered: false, area: false, nonzero: false }
     }
 }
+
+/// The stencil the areas are worked out in.
+pub(crate) const STENCIL: wgpu::TextureFormat = wgpu::TextureFormat::Stencil8;
 
 /// Where `along` a line falls in a dash pattern, as the page's shader
 /// works it out (gl-lines.ts dashHere; its dashHereOnCpu is the same on
@@ -463,6 +480,10 @@ pub(crate) struct LineCard {
     pipeline: wgpu::RenderPipeline,
     /// Filled batches' (triangles).
     fills: wgpu::RenderPipeline,
+    /// The areas': their fans marked in the stencil (even-odd, nonzero), then covered in their colour.
+    mark_evenodd: wgpu::RenderPipeline,
+    mark_nonzero: wgpu::RenderPipeline,
+    cover: wgpu::RenderPipeline,
     batch_layout: wgpu::BindGroupLayout,
     views: [wgpu::Buffer; VIEWS],
     view_binds: [wgpu::BindGroup; VIEWS],
@@ -543,6 +564,43 @@ impl LineCard {
             multiview: None,
             cache: None,
         });
+        // The areas: a fan's triangles through the stencil. Marking writes no colour; covering writes it where the
+        // stencil isn't 0, and puts it back to 0 (so a pixel under several of the fan's triangles is coloured once).
+        let face = |pass_op: wgpu::StencilOperation, compare: wgpu::CompareFunction| wgpu::StencilFaceState { compare, fail_op: wgpu::StencilOperation::Keep, depth_fail_op: wgpu::StencilOperation::Keep, pass_op };
+        let stenciled = |label: &str, front: wgpu::StencilFaceState, back: wgpu::StencilFaceState, colour: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_fill"),
+                    buffers: &[wgpu::VertexBufferLayout { array_stride: 12, step_mode: wgpu::VertexStepMode::Vertex, attributes: &attributes[..1] }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_fill"),
+                    targets: &[Some(wgpu::ColorTargetState { format, blend: Some(blend), write_mask: if colour { wgpu::ColorWrites::ALL } else { wgpu::ColorWrites::empty() } })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: STENCIL,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState { front, back, read_mask: 0xff, write_mask: 0xff },
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            })
+        };
+        let always = wgpu::CompareFunction::Always;
+        let mark_evenodd = stenciled("cadp areas even-odd", face(wgpu::StencilOperation::Invert, always), face(wgpu::StencilOperation::Invert, always), false);
+        let mark_nonzero = stenciled("cadp areas nonzero", face(wgpu::StencilOperation::IncrementWrap, always), face(wgpu::StencilOperation::DecrementWrap, always), false);
+        let inside = face(wgpu::StencilOperation::Zero, wgpu::CompareFunction::NotEqual);
+        let cover = stenciled("cadp areas cover", inside, inside, true);
         let views: [wgpu::Buffer; VIEWS] = std::array::from_fn(|_| {
             device.create_buffer(&wgpu::BufferDescriptor { label: Some("cadp lines view"), size: std::mem::size_of::<ViewUniforms>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
         });
@@ -550,7 +608,7 @@ impl LineCard {
             device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("cadp lines view"), layout: &view_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: views[k].as_entire_binding() }] })
         });
         let step = (device.limits().min_uniform_buffer_offset_alignment as u64).max(std::mem::size_of::<BatchUniforms>() as u64);
-        LineCard { pipeline, fills, batch_layout, views, view_binds, listed: std::array::from_fn(|_| None), strips: HashMap::new(), step }
+        LineCard { pipeline, fills, mark_evenodd, mark_nonzero, cover, batch_layout, views, view_binds, listed: std::array::from_fn(|_| None), strips: HashMap::new(), step }
     }
 
     /// A view's lines made ready for its frame: strips the card hasn't
@@ -564,7 +622,7 @@ impl LineCard {
         }
         for item in &lines.list.items {
             let s = &item.strips;
-            let used = if item.fill { s.corners() as usize * 3 } else { s.count() as usize * STRIP_FLOATS };
+            let used = if item.fill || item.area { s.corners() as usize * 3 } else { s.count() as usize * STRIP_FLOATS };
             if used == 0 {
                 continue;
             }
@@ -637,6 +695,32 @@ impl LineCard {
         self.strips.len()
     }
 
+    /// A view's filled shapes drawn into its part of the window, in their turn (a pass with the stencil; its scissor
+    /// is the view's): each one's fans marked in the stencil, then covered in its colour.
+    pub(crate) fn draw_areas(&self, pass: &mut wgpu::RenderPass<'_>, slot: usize, lines: &Lines) {
+        let Some(listed) = self.listed.get(slot).and_then(Option::as_ref) else { return };
+        if listed.of != at(&lines.list) || listed.key != lines.list.key {
+            return;
+        }
+        pass.set_bind_group(0, &self.view_binds[slot], &[]);
+        pass.set_stencil_reference(0);
+        for (k, item) in lines.list.items.iter().enumerate() {
+            if !item.area {
+                continue;
+            }
+            let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };
+            if s.corners() == 0 || !Arc::ptr_eq(s, &item.strips) {
+                continue;
+            }
+            pass.set_bind_group(1, &listed.bind, &[(k as u64 * self.step) as u32]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.set_pipeline(if item.nonzero { &self.mark_nonzero } else { &self.mark_evenodd });
+            pass.draw(0..s.corners(), 0..1);
+            pass.set_pipeline(&self.cover);
+            pass.draw(0..s.corners(), 0..1);
+        }
+    }
+
     /// A view's lines drawn into its part of the window (the pass's scissor is the view's): each batch in turn, its segments as strips.
     pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, slot: usize, lines: &Lines) {
         let Some(listed) = self.listed.get(slot).and_then(Option::as_ref) else { return };
@@ -644,11 +728,11 @@ impl LineCard {
             return;
         }
         // The filled batches first, beneath the lines (a wide dashed polyline's dashes).
-        if lines.list.items.iter().any(|i| i.fill) {
+        if lines.list.items.iter().any(|i| i.fill && !i.area) {
             pass.set_pipeline(&self.fills);
             pass.set_bind_group(0, &self.view_binds[slot], &[]);
             for (k, item) in lines.list.items.iter().enumerate() {
-                if !item.fill {
+                if !item.fill || item.area {
                     continue;
                 }
                 let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };
@@ -664,7 +748,7 @@ impl LineCard {
         pass.set_bind_group(0, &self.view_binds[slot], &[]);
         for (k, item) in lines.list.items.iter().enumerate() {
             // In the drawing's own places: none without the view's right and up.
-            if item.fill || ((item.world || item.lettered) && lines.world.is_none()) {
+            if item.fill || item.area || ((item.world || item.lettered) && lines.world.is_none()) {
                 continue;
             }
             let Some((s, buffer)) = self.strips.get(&item.strips.id) else { continue };

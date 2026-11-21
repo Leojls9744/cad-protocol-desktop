@@ -421,7 +421,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
         const dash = Array.isArray(it.dash) && it.dash.length > 0 ? it.dash : null;
         if (dash && !(dash.length <= 12 && dash.every((d) => typeof d === "number" && Number.isFinite(d)))) return { error: "The lines weren't as the engine reads them." };
         // 1.43: drawn a hairline wide (text's letters), and a world batch whose strips are letters'.
-        items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}), ...(dash ? { dash: dash.map(Number) } : {}), ...(it.fill === true ? { fill: true } : {}), ...(it.thin === true ? { thin: true } : {}), ...(it.lettered === true ? { lettered: true } : {}) });
+        // 1.44: a filled shape of the page's (a hatch's fill): its floats are its loops as triangle fans, filled even-odd or nonzero.
+        items.push({ id: it.id, rgba: nums(it.rgba, 4), ...(it.world === true ? { world: true } : {}), ...(dash ? { dash: dash.map(Number) } : {}), ...(it.fill === true ? { fill: true } : {}), ...(it.thin === true ? { thin: true } : {}), ...(it.lettered === true ? { lettered: true } : {}), ...(it.area === true ? { area: true } : {}), ...(it.area === true && it.nonzero === true ? { nonzero: true } : {}) });
       }
       const took = engine.viewLines(String(msg.key), items);
       return took && took.ok ? { ok: true } : { missing: took && Array.isArray(took.missing) ? took.missing : [] };

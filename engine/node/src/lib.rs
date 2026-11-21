@@ -1374,6 +1374,9 @@ pub struct ViewLineJs {
     /// 1.43: drawn a hairline wide (text's letters), and a world batch whose strips are letters' (the page's letterStrip).
     pub thin: Option<bool>,
     pub lettered: Option<bool>,
+    /// 1.44: a filled shape of the page's (a hatch's fill): its floats are its loops as triangle fans, filled even-odd, or `nonzero`.
+    pub area: Option<bool>,
+    pub nonzero: Option<bool>,
 }
 
 /// Whether a list was taken; the batches it names that the engine hasn't (given again, then the list again).
@@ -1405,6 +1408,8 @@ pub fn view_lines(key: String, items: Vec<ViewLineJs>) -> Result<ViewLinesTakenJ
                 fill: item.fill.unwrap_or(false),
                 thin: item.thin.unwrap_or(false),
                 lettered: item.lettered.unwrap_or(false),
+                area: item.area.unwrap_or(false),
+                nonzero: item.nonzero.unwrap_or(false),
             }),
             None => missing.push(item.id),
         }

@@ -327,7 +327,7 @@ fn a_filled_batch_is_under_the_lines() {
     let clear = clear_bytes();
     // Two triangles (a wide dashed polyline's dash: a band from 20 to 80 across, 10 either side of the origin's height), half solid blue.
     let band: Vec<f32> = vec![20.0, -10.0, 0.0, 80.0, -10.0, 0.0, 80.0, 10.0, 0.0, 20.0, -10.0, 0.0, 80.0, 10.0, 0.0, 20.0, 10.0, 0.0];
-    let fill = LineItem { strips: Arc::new(Strips { id: 9, floats: band }), rgba: [0.0, 0.0, 1.0, 0.5], world: false, dash: Vec::new(), fill: true, thin: false, lettered: false };
+    let fill = LineItem { strips: Arc::new(Strips { id: 9, floats: band }), rgba: [0.0, 0.0, 1.0, 0.5], world: false, dash: Vec::new(), fill: true, thin: false, lettered: false, area: false, nonzero: false };
     let line = batch(1, &[strip([10.0, 0.0, 0.0], [90.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 0.0, 0.0, 1.0], false);
     // The line listed FIRST: the fill's still beneath it.
     let l = Lines { list: list("a", vec![line, fill]), scale: 1.0, e: 0.0, f: 50.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
@@ -401,4 +401,92 @@ fn text_s_letters_are_a_hairline_and_a_turning_view_s_face_the_screen_along_thei
     // No right and up: letters aren't drawn.
     let p = shot(gpu, [200, 120], &cam, &[], Some(&Lines { world: None, ..l }));
     assert!((0..120).all(|y| (0..200).all(|x| pixel(&p, 200, x, y) == clear)));
+}
+
+/// A loop's triangle fan from its first corner, as the page gives an area's loops (three floats a corner: across, up, 0).
+fn fan(corners: &[[f32; 2]]) -> Vec<f32> {
+    let mut out = Vec::new();
+    for k in 1..corners.len().saturating_sub(1) {
+        for p in [corners[0], corners[k], corners[k + 1]] {
+            out.extend_from_slice(&[p[0], p[1], 0.0]);
+        }
+    }
+    out
+}
+
+fn area(id: u64, loops: &[&[[f32; 2]]], rgba: [f32; 4], nonzero: bool) -> LineItem {
+    let floats: Vec<f32> = loops.iter().flat_map(|l| fan(l)).collect();
+    LineItem { area: true, nonzero, ..LineItem::solid(Arc::new(Strips { id, floats }), rgba, false) }
+}
+
+#[test]
+fn the_page_s_filled_shapes_fill_by_its_rule_under_its_lines() {
+    let Some(mut card) = card() else { return };
+    let gpu = &mut card.gpu;
+    let cam = plan(200.0, 120.0);
+    let clear = clear_bytes();
+    // The plane's origin 60.5 px down the view: up 20 is row 40, down 20 row 80.
+    let lines_of = |items: Vec<LineItem>, key: &str| Lines { list: list(key, items), scale: 1.0, e: 0.0, f: 60.5, world: None, half: HALF, ratio: 1.0, dot: 0.0, thin: 0.0 };
+    // A square 20 to 100 across, 30 either side of the origin's height, with a square hole (50 to 70, 10 either side), both wound the same way.
+    let outer: &[[f32; 2]] = &[[20.0, -30.0], [100.0, -30.0], [100.0, 30.0], [20.0, 30.0]];
+    let hole: &[[f32; 2]] = &[[50.0, -10.0], [70.0, -10.0], [70.0, 10.0], [50.0, 10.0]];
+    let green = [0.0f32, 1.0, 0.0];
+    // Even-odd (a hatch): the hole's a hole. Half solid: each pixel covered once, where the fans' triangles overlap too.
+    let l = lines_of(vec![area(1, &[outer, hole], [0.0, 1.0, 0.0, 0.5], false)], "a");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    let once = over(green, clear, 0.5);
+    for (x, y) in [(30, 40), (90, 40), (30, 80), (90, 80), (40, 60), (80, 60), (60, 45), (60, 75), (25, 60), (95, 60)] {
+        assert!(near(at(x, y), once, 2), "inside at {x}, {y}: {:?}", at(x, y));
+    }
+    for (x, y) in [(60, 60), (55, 55), (65, 65)] {
+        assert_eq!(at(x, y), clear, "the hole at {x}, {y}");
+    }
+    for (x, y) in [(15, 60), (105, 60), (60, 25), (60, 95)] {
+        assert_eq!(at(x, y), clear, "outside at {x}, {y}");
+    }
+    // Nonzero (a tapered polyline's widths, wound the same way): the inner square's filled too.
+    let l = lines_of(vec![area(2, &[outer, hole], [0.0, 1.0, 0.0, 0.5], true)], "b");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert!(near(pixel(&p, 200, 60, 60), once, 2));
+    assert!(near(pixel(&p, 200, 30, 40), once, 2));
+    // Nonzero with the inner one wound the other way: a hole again.
+    let back: Vec<[f32; 2]> = hole.iter().rev().copied().collect();
+    let l = lines_of(vec![area(3, &[outer, &back], [0.0, 1.0, 0.0, 0.5], true)], "c");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    assert_eq!(pixel(&p, 200, 60, 60), clear);
+    assert!(near(pixel(&p, 200, 30, 40), once, 2));
+    // A shape that folds in (a U: its fan from one corner runs over the notch and back): the notch stays empty.
+    let u_shape: &[[f32; 2]] = &[[20.0, -30.0], [100.0, -30.0], [100.0, 30.0], [80.0, 30.0], [80.0, -10.0], [40.0, -10.0], [40.0, 30.0], [20.0, 30.0]];
+    let l = lines_of(vec![area(4, &[u_shape], [0.0, 1.0, 0.0, 1.0], false)], "d");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    // (Up 30 is row 30: the U opens upward on screen, its notch between 40 and 80 across above the origin's height + 10.)
+    assert_eq!(at(60, 40), clear, "the notch");
+    assert_eq!(at(60, 49), clear);
+    assert_eq!(at(60, 80), [0, 255, 0], "its bottom");
+    assert_eq!(at(30, 40), [0, 255, 0], "its left arm");
+    assert_eq!(at(90, 40), [0, 255, 0], "its right arm");
+    // Two shapes that overlap, each filled on its own (the later over the earlier), and a line over both; listed in
+    // any order, the shapes are under the lines.
+    let left: &[[f32; 2]] = &[[20.0, -20.0], [70.0, -20.0], [70.0, 20.0], [20.0, 20.0]];
+    let right: &[[f32; 2]] = &[[50.0, -20.0], [100.0, -20.0], [100.0, 20.0], [50.0, 20.0]];
+    let line = batch(9, &[strip([10.0, 0.0, 0.0], [110.0, 0.0, 0.0], [1.0, 1.0])], [1.0, 1.0, 1.0, 1.0], false);
+    let l = lines_of(vec![line, area(5, &[left], [1.0, 0.0, 0.0, 1.0], false), area(6, &[right], [0.0, 0.0, 1.0, 1.0], false)], "e");
+    let p = shot(gpu, [200, 120], &cam, &[], Some(&l));
+    let at = |x: u32, y: u32| pixel(&p, 200, x, y);
+    assert_eq!(at(30, 50), [255, 0, 0]);
+    assert_eq!(at(60, 50), [0, 0, 255], "where they overlap: the later one's (not cancelled out)");
+    assert_eq!(at(90, 50), [0, 0, 255]);
+    assert_eq!(at(60, 60), [255, 255, 255], "the line over them");
+    assert_eq!(at(15, 60), [255, 255, 255]);
+    // In a view offset in the window: placed from the view's corner, and not outside it.
+    let offset = Camera { rect: [100.0, 0.0, 200.0, 120.0], ..plan(200.0, 120.0) };
+    let wide: &[[f32; 2]] = &[[-50.0, -20.0], [60.0, -20.0], [60.0, 20.0], [-50.0, 20.0]];
+    let l = lines_of(vec![area(7, &[wide], [1.0, 0.0, 0.0, 1.0], false)], "f");
+    let p = shot(gpu, [300, 120], &offset, &[], Some(&l));
+    assert_eq!(pixel(&p, 300, 130, 60), [255, 0, 0]);
+    assert_eq!(pixel(&p, 300, 159, 60), [255, 0, 0]);
+    assert_eq!(pixel(&p, 300, 165, 60), clear);
+    assert_eq!(pixel(&p, 300, 80, 60), clear, "not outside its view's part of the window");
 }
