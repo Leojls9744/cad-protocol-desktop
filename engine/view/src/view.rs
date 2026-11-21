@@ -318,6 +318,12 @@ struct Held {
     seq: u64,
     /// Asked for by a view at the last step (one kept beside the reading asked for, or a spare base, isn't).
     asked: bool,
+    /// How it was last asked to be drawn.
+    look: Option<Look>,
+    /// For each view, how it's drawn while it stands in for the reading asked for now (`Older::TillBase`): as the
+    /// scan's asked to be drawn now, but coloured, shaded and its gaps filled as it was itself (what it was read for:
+    /// its own colours aren't the new colouring's, and it has no shading or spacing it wasn't read with).
+    as_was: [Option<Look>; VIEWS],
 }
 
 impl Held {
@@ -398,7 +404,7 @@ impl Stage {
             let at = match self.held.iter().position(|h| h.key == done.key) {
                 Some(k) => k,
                 None => {
-                    self.held.push(Held { key: done.key.clone(), who: done.who.clone(), base: None, detail: std::array::from_fn(|_| None), ready: [false; VIEWS], seq: 0, asked: asked(&done.key) });
+                    self.held.push(Held { key: done.key.clone(), who: done.who.clone(), base: None, detail: std::array::from_fn(|_| None), ready: [false; VIEWS], seq: 0, asked: asked(&done.key), look: None, as_was: [None; VIEWS] });
                     self.held.len() - 1
                 }
             };
@@ -456,6 +462,20 @@ impl Stage {
         if again {
             for w in &mut self.watch {
                 w.looked = None;
+            }
+        }
+        // How each reading's asked to be drawn; and one kept beside the reading asked for, in its place.
+        for (slot, ask) in asks.iter().enumerate() {
+            for s in &ask.scans {
+                let key = key_of(s);
+                let who = who_of(s);
+                for h in &mut self.held {
+                    if h.key == key {
+                        h.look = Some(s.look);
+                    } else if h.who == who && !h.asked {
+                        h.as_was[slot] = h.look.map(|own| Look { by: own.by, shade: own.shade, fill: own.fill, ..s.look });
+                    }
+                }
             }
         }
         for h in &mut self.held {
@@ -553,12 +573,18 @@ impl Stage {
             return out;
         }
         for s in &ask.scans {
-            let Some((h, _)) = self.pick(slot, ask, s) else { continue };
+            let Some((h, older)) = self.pick(slot, ask, s) else { continue };
+            // An older reading standing in till the new one's first sample is in: drawn as it was (the change isn't one
+            // the page's strokes show over it); one standing in under the brush's strokes, as the scan's asked for now.
+            let look = match (older && ask.stale == Older::TillBase).then(|| h.as_was.get(slot).and_then(Option::as_ref)).flatten() {
+                Some(was) => was,
+                None => &s.look,
+            };
             if let Some(base) = &h.base {
                 if let Some((detail, _)) = h.detail.get(slot).and_then(Option::as_ref) {
-                    out.push((detail, s.affine, &s.look));
+                    out.push((detail, s.affine, look));
                 }
-                out.push((base, s.affine, &s.look));
+                out.push((base, s.affine, look));
             }
         }
         out

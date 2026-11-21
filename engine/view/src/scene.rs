@@ -348,9 +348,11 @@ impl Keep {
         self
     }
 
-    /// Which scan this is whatever its classes, colours, shading or isolated points are: its setups. A reading of it under another key is the same scan read another way.
+    /// Which scan this is whatever its classes, colours, shading or isolated points are, and whichever of its setups
+    /// are off (1.40): the one setup it's of, if it's of one alone. A reading of it under another key is the same scan
+    /// read another way.
     pub fn who(&self) -> String {
-        format!("{:?}|{:?}", self.setup, self.off)
+        format!("{:?}", self.setup)
     }
 
     #[inline]

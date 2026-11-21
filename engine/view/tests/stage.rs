@@ -3,7 +3,7 @@
 //! on, drawn into a picture.
 
 use cadp_engine_core::{build_or_open, Progress};
-use cadp_engine_view::{Ask, Camera, Clip, Edl, Gpu, Keep, Look, Older, Op, ScanAsk, Shading, ShapeIn, Shapes, Stage, CLEAR, IDENTITY};
+use cadp_engine_view::{Ask, Camera, Clip, Edl, Gpu, Keep, Look, Older, Op, ScanAsk, Shading, ShapeIn, Shapes, Stage, BY_CLASS, BY_OWN, CLEAR, IDENTITY};
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -222,15 +222,23 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     // Asked for a third way with its older reading drawn only till the new one's base is in (a change no stroke stands
     // in for: the older reading is another state of the scan): the older one, then the new one's base as soon as
     // there's any of it, then its detail.
-    let third = ScanAsk { keep: Keep { gaps: true, ..Keep::all() }.keyed(), ..scan.clone() };
+    // Meanwhile the older one's drawn as it was read to be (its own colouring, no gaps filled: it has no spacing), at
+    // the size of point asked for now; the new one, as asked.
+    let third = ScanAsk { keep: Keep { gaps: true, ..Keep::all() }.keyed(), look: Look { by: BY_CLASS, px: 3.0, fill: 9.0, ..Look::own() }, ..scan.clone() };
     let soon = Ask { camera: ask.camera, scans: vec![third.clone()], stale: Older::TillBase, serial: 24, ..Ask::default() };
     stage.step(&soon).expect("a step");
     assert_eq!((stage.held(&soon), stage.stale_in(0, &soon)), ((0, 0), 1));
+    let looks = |stage: &Stage, ask: &Ask| stage.list(ask).iter().map(|(_, _, l)| (l.by, l.px, l.fill)).collect::<Vec<_>>();
+    assert!(looks(&stage, &soon).iter().all(|l| *l == (BY_OWN, 3.0, 0.0)), "{:?}", looks(&stage, &soon));
+    // (Under the brush's strokes, `TillWhole`, an older reading is drawn as the scan's asked for now.)
+    let under = Ask { stale: Older::TillWhole, ..soon.clone() };
+    assert!(!looks(&stage, &under).is_empty() && looks(&stage, &under).iter().all(|l| *l == (BY_CLASS, 3.0, 9.0)));
     let mut base_alone = false;
     for _ in 0..4000 {
         stage.step(&soon).expect("a step");
         let (on, detail) = stage.held(&soon);
         assert_eq!(on + stage.stale_in(0, &soon), 1, "never neither");
+        assert!(looks(&stage, &soon).iter().all(|l| *l == if on == 1 { (BY_CLASS, 3.0, 9.0) } else { (BY_OWN, 3.0, 0.0) }));
         if on == 1 {
             base_alone |= detail == 0;
             if detail == 1 {
