@@ -34,7 +34,10 @@ use std::time::{Duration, Instant};
 
 /// A scan to show: its index (by the engine's handle), where its file's
 /// coordinates are in the drawing, about how many points at most, which of
-/// them (`keep`) and how they look.
+/// them (`keep`) and how they look. `pending`: what it's to be read by
+/// isn't in the engine yet (the page's classes or colours for it, still
+/// being filed): it can't be read for now, and is drawn from the reading
+/// it had where the view allows an older one (`Ask::stale`).
 #[derive(Clone)]
 pub struct ScanAsk {
     pub handle: u32,
@@ -43,6 +46,7 @@ pub struct ScanAsk {
     pub most: usize,
     pub keep: Keep,
     pub look: Look,
+    pub pending: bool,
 }
 
 /// What to show.
@@ -424,9 +428,9 @@ impl Stage {
         if self.loader.busy() {
             return Ok(changed);
         }
-        // A scan with no base yet: that first.
+        // A scan with no base yet: that first (but one that can't be read yet).
         for ask in asks {
-            for s in &ask.scans {
+            for s in ask.scans.iter().filter(|s| !s.pending) {
                 let key = key_of(s);
                 if !self.held.iter().any(|h| h.key == key && h.base.is_some()) {
                     self.loader.give(Job { key, who: who_of(s), index: s.index.clone(), affine: s.affine, keep: s.keep.clone(), most: s.most, camera: None, slot: 0, clip: Clip::default() });

@@ -1199,11 +1199,16 @@ fn keep_borrow_points(handle: u32, points: Arc<cadp_engine_view::BorrowPoints>) 
     }
 }
 
-/// A scan's classes kept for its handle, in place of the classes its points had before.
+/// A scan's classes kept for its handle, with the classes its points had just before (1.39: a view may still name
+/// those while the page hears these were taken, and what's on the card under them is what's drawn meanwhile); older ones go.
 fn keep_borrow(handle: u32, borrow: Arc<cadp_engine_view::Borrow>) {
     let mut held = BORROWS.lock().unwrap();
     let list = held.entry(handle).or_default();
-    list.retain(|b| b.points.key != borrow.points.key);
+    list.retain(|b| b.key != borrow.key);
+    let same: Vec<usize> = (0..list.len()).filter(|k| list[*k].points.key == borrow.points.key).collect();
+    for k in same.iter().rev().skip(1) {
+        list.remove(*k);
+    }
     list.push(borrow);
     if list.len() > BORROWS_KEPT {
         list.remove(0);
@@ -1213,11 +1218,15 @@ fn keep_borrow(handle: u32, borrow: Arc<cadp_engine_view::Borrow>) {
 /// The page's own colouring of a scan's points (1.39), by the scan's handle: the newest for each of its lists of points.
 static TINTS: LazyLock<Mutex<HashMap<u32, Vec<Arc<cadp_engine_view::Tint>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// A scan's colouring kept for its handle, in place of the one its points had before.
+/// A scan's colouring kept for its handle, with the one its points had just before (a view may still name it); older ones go.
 fn keep_tint(handle: u32, tint: Arc<cadp_engine_view::Tint>) {
     let mut held = TINTS.lock().unwrap();
     let list = held.entry(handle).or_default();
-    list.retain(|t| t.points.key != tint.points.key);
+    list.retain(|t| t.key != tint.key);
+    let same: Vec<usize> = (0..list.len()).filter(|k| list[*k].points.key == tint.points.key).collect();
+    for k in same.iter().rev().skip(1) {
+        list.remove(*k);
+    }
     list.push(tint);
     if list.len() > BORROWS_KEPT {
         list.remove(0);
@@ -1656,20 +1665,22 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         Some(key) => STROKES.lock().unwrap().iter().find(|s| &s.key == key).cloned(),
         None => Some(Arc::new(cadp_engine_view::Strokes::default())),
     };
-    // The points isolated: by the shapes the page gave under this key (none in yet: no scan drawn till they are).
-    let isolate = match &ask.isolate {
+    // The points isolated: by the shapes the page gave under this key. None in yet: no scan can be read till they
+    // are (1.39: each is asked for as one that can't be read yet, so a view that allows it is drawn from the
+    // reading it had; before, the scans were left out).
+    let (isolate, isolate_missing) = match &ask.isolate {
         Some(key) => match SHAPES.lock().unwrap().iter().find(|s| &s.key == key) {
-            Some(s) => Some(Some(s.clone())),
-            None => None,
+            Some(s) => (Some(s.clone()), false),
+            None => (None, true),
         },
-        None => Some(None),
+        None => (None, false),
     };
     let mut scans = Vec::new();
     for s in ask.scans.unwrap_or_default() {
-        let Some(isolate) = &isolate else { break };
         if strokes.is_none() {
             break;
         }
+        let mut pending = isolate_missing;
         let Some(index) = indexes.get(&s.handle) else { continue };
         if s.affine.len() != 12 || s.affine.iter().any(|x| !x.is_finite()) {
             continue;
@@ -1688,14 +1699,18 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
             keep.map = Some(Arc::new(table));
         }
         if let Some(key) = &s.borrow {
-            // Its own classes aren't in yet (still being filed, or never sent): not drawn till they are.
-            let Some(b) = borrows.get(&s.handle).and_then(|list| list.iter().find(|b| &b.key == key)) else { continue };
-            keep.borrow = Some(b.clone());
+            // Its own classes aren't in yet (still being filed, or never sent): it can't be read till they are.
+            match borrows.get(&s.handle).and_then(|list| list.iter().find(|b| &b.key == key)) {
+                Some(b) => keep.borrow = Some(b.clone()),
+                None => pending = true,
+            }
         }
         if let Some(key) = &s.tint {
-            // Its colouring isn't in yet: not drawn till it is.
-            let Some(t) = tints.get(&s.handle).and_then(|list| list.iter().find(|t| &t.key == key)) else { continue };
-            keep.tint = Some(t.clone());
+            // Its colouring isn't in yet: it can't be read till it is.
+            match tints.get(&s.handle).and_then(|list| list.iter().find(|t| &t.key == key)) {
+                Some(t) => keep.tint = Some(t.clone()),
+                None => pending = true,
+            }
         }
         let mut look = view_look(&s.look, &s.allow, ask.px);
         // No look given (1.35's page): a scan with no colours of its own by its own heights, as 1.35 drew it.
@@ -1709,9 +1724,15 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
         // Gaps filled: each point's spacing is measured as they're read.
         keep.gaps = look.fill > 0.0;
         keep.isolate = isolate.clone();
-        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep: keep.keyed(), look });
+        let mut keep = keep.keyed();
+        if pending {
+            // A reading there's none of: told from every real one by what it waits on.
+            keep.key = format!("pending|{}|{}|{}|{}", keep.key, s.borrow.as_deref().unwrap_or(""), s.tint.as_deref().unwrap_or(""), ask.isolate.as_deref().unwrap_or(""));
+        }
+        scans.push(cadp_engine_view::ScanAsk { handle: s.handle, index: index.clone(), affine, most, keep, look, pending });
     }
-    let shown = scans.len() as u32;
+    // How many of them it can read (the rest wait on the page's classes, colours or isolated shapes).
+    let shown = scans.iter().filter(|s| !s.pending).count() as u32;
     let serial = ask.serial.filter(|n| n.is_finite() && *n >= 0.0).unwrap_or(0.0) as u64;
     let edl = match ask.edl.as_ref().filter(|e| e.len() == 4 && e.iter().all(|v| v.is_finite())) {
         Some(e) => cadp_engine_view::Edl { strength: e[0], radius: e[1], eye: e[2], noise: e[3] },

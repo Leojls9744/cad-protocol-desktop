@@ -23,8 +23,9 @@
 //! page tests its own points (scan-edits.ts: the shapes isolated are
 //! tested by a point's class as it is now).
 
-/// The most strokes the card tests at once (more: the page draws the scans till the engine has read them).
-pub const STROKES: usize = 4;
+/// The most strokes the card tests at once (more: the page draws the scans till the engine has read them). Presses that hide or give the
+/// same class one after another are one stroke; each press that keeps only what's inside it is its own (Hold-to-Drag's are two: its click, then its drag).
+pub const STROKES: usize = 8;
 /// The most of its latest dabs a preview shows painted (the page's PREVIEW_DABS).
 pub const PREVIEW_DABS: usize = 16;
 /// The most dabs a stroke holds for the card.
@@ -143,6 +144,8 @@ pub struct Packed {
 const THROUGH: f32 = -3.0e38;
 /// A dab painted over nothing on the front surface: no point.
 const NOWHERE: f32 = 3.0e38;
+/// A cut this far off is no place in a drawing: the page's word for a dab painted over nothing (its NOTHING_NEAR, 1e12), or for none.
+const CUT_FAR: f64 = 1e11;
 
 pub fn pack(strokes: &[Stroke]) -> Packed {
     let mut out = Packed::default();
@@ -191,7 +194,7 @@ pub fn pack(strokes: &[Stroke]) -> Packed {
         let nx = (((hi[0] - lo[0]) / cell).ceil() as usize).clamp(1, 256);
         let ny = (((hi[1] - lo[1]) / cell).ceil() as usize).clamp(1, 256);
         // The origin: the middle of its dabs, and the first cut there is along the line of sight.
-        let origin = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, cuts.and_then(|c| c.iter().take(n).copied().find(|v| v.is_finite() && v.abs() < 1e29)).unwrap_or(0.0)];
+        let origin = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, cuts.and_then(|c| c.iter().take(n).copied().find(|v| v.is_finite() && v.abs() < CUT_FAR)).unwrap_or(0.0)];
         let col = |u: f64| (((u - lo[0]) / cell).floor().max(0.0) as usize).min(nx - 1);
         let row = |v: f64| (((v - lo[1]) / cell).floor().max(0.0) as usize).min(ny - 1);
         let mut counts = vec![0u32; nx * ny + 1];
@@ -218,8 +221,8 @@ pub fn pack(strokes: &[Stroke]) -> Packed {
         each(&mut |c, k| {
             let cut = match cuts.map(|c| c[k]) {
                 None => THROUGH,
-                Some(v) if !v.is_finite() || v >= 1e29 => NOWHERE,
-                Some(v) if v <= -1e29 => THROUGH,
+                Some(v) if !v.is_finite() || v >= CUT_FAR => NOWHERE,
+                Some(v) if v <= -CUT_FAR => THROUGH,
                 Some(v) => (v - origin[2]) as f32,
             };
             out.dabs[(base + fill[c]) as usize] = [(s.dabs[3 * k] - origin[0]) as f32, (s.dabs[3 * k + 1] - origin[1]) as f32, s.dabs[3 * k + 2].abs() as f32, cut];
@@ -319,6 +322,11 @@ mod tests {
         assert!(p.holds(0, [far[0], far[1], 10.0], 0) && !p.holds(0, [far[0], far[1], 9.99], 0));
         assert!(p.holds(0, [far[0] + 1.5, far[1] + 0.9, 20.5], 0) && !p.holds(0, [far[0] + 2.4, far[1], 15.0], 0));
         assert!(!p.holds(0, [far[0] + 3.5, far[1], 1e6], 0));
+        // The page's own word for a dab over nothing (1e12), first of them: the others' cuts keep their places (they're not told from it).
+        let nothing = Stroke { near: Some(vec![1e12, 4321.5, 4321.5]), ..s.clone() };
+        let p = pack(std::slice::from_ref(&nothing));
+        assert!(!p.holds(0, [far[0] - 0.5, far[1], 9e6], 0), "over nothing: no point");
+        assert!(p.holds(0, [far[0] + 3.5, far[1], 4321.6], 0) && !p.holds(0, [far[0] + 3.5, far[1], 4321.4], 0), "a cut a tenth either side");
     }
 
     #[test]

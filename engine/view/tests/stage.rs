@@ -84,7 +84,7 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     let mut stage = Stage::new(gpu.sender()).expect("a stage");
     // A budget of a twelfth of its points: the base a sixth of that (the least it can be is all of it here, so: all of the budget).
     let most = n / 12;
-    let scan = ScanAsk { handle: 1, index: ix.clone(), affine: IDENTITY, most, keep: Keep::all().keyed(), look: Look { px: 1.0, ..Look::own() } };
+    let scan = ScanAsk { handle: 1, index: ix.clone(), affine: IDENTITY, most, keep: Keep::all().keyed(), look: Look { px: 1.0, ..Look::own() }, pending: false };
     // The whole floor in a drawing area 400 × 300 px: half a unit a pixel.
     let whole = Camera {
         target: [6_000_100.0, 2_000_075.0, 100.0],
@@ -207,6 +207,26 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     // The older reading's off the card now: asked for again, it's read again.
     stage.step(&kept).expect("a step");
     assert_eq!(stage.held(&ask), (0, 0));
+    // Asked for by classes the engine hasn't yet (still being filed: it can't be read): drawn from the reading it had
+    // all the while, nothing read; and left out where no older reading is allowed.
+    let mut unread = Keep { shade: true, ..Keep::all() }.keyed();
+    unread.key = "pending its classes".into();
+    let waits = Ask { camera: ask.camera, scans: vec![ScanAsk { keep: unread, pending: true, ..scan.clone() }], stale: true, serial: 23, ..Ask::default() };
+    let before: Vec<u32> = stage.list(&kept).iter().map(|(c, _, _)| c.count).collect();
+    for _ in 0..40 {
+        stage.step(&waits).expect("a step");
+        assert!(!stage.loading(), "nothing's read for a scan that can't be yet");
+        assert_eq!((stage.held(&waits), stage.stale_in(0, &waits)), ((0, 0), 1));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(stage.list(&waits).iter().map(|(c, _, _)| c.count).collect::<Vec<u32>>(), before);
+    // Its classes in: asked for as it was read before, the same reading again, nothing lost meanwhile.
+    stage.step(&kept).expect("a step");
+    assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((1, 1), 0));
+    let unasked = Ask { stale: false, ..waits.clone() };
+    stage.step(&unasked).expect("a step");
+    assert_eq!((stage.held(&unasked), stage.stale_in(0, &unasked)), ((0, 0), 0));
+    assert!(stage.list(&unasked).is_empty());
     // A scan it never had another reading of: nothing to keep, its base as soon as it's read.
     let fresh = Ask { camera: ask.camera, scans: vec![ScanAsk { handle: 7, ..again.clone() }], stale: true, serial: 22, ..Ask::default() };
     stage.step(&fresh).expect("a step");

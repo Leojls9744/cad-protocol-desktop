@@ -502,7 +502,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
     viewStrokes: (...args) => {
       calls.push(["strokes", args]);
       // No more than the card tests at once.
-      return args[1].length <= 4;
+      return args[1].length <= 8;
     },
   };
   createHost({ engine, parentPort: parent, every: () => 0, stop: () => {} });
@@ -694,7 +694,7 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   ]);
   // More than the card tests: said, so the page draws the scans itself meanwhile.
   const one = { op: "out", right: [1, 0, 0], up: [0, 1, 0], dabs: [0, 0, 1] };
-  page.emit("message", { data: { kind: "view-strokes", id: 45, key: "many", strokes: [one, one, one, one, one] } });
+  page.emit("message", { data: { kind: "view-strokes", id: 45, key: "many", strokes: new Array(9).fill(one) } });
   assert.deepEqual(page.out.at(-1), { kind: "view-strokes", id: 45, key: "many", tooMany: true });
   // Not as the engine reads them: a class stroke with no class, a way of two numbers.
   page.emit("message", { data: { kind: "view-strokes", id: 46, key: "k", strokes: [{ op: "class", right: [1, 0, 0], up: [0, 1, 0], dabs: [] }] } });
