@@ -467,6 +467,8 @@ function createHost({ engine, parentPort, log = () => {}, every = setInterval, s
           ...(brushOf(a.brush) ? { brush: brushOf(a.brush) } : {}),
           ...(typeof a.strokes === "string" && a.strokes ? { strokes: a.strokes } : {}),
           ...(a.stale === true ? { stale: true } : {}),
+          // 1.40: an older reading drawn only till the new one's first sample is in.
+          ...(a.staleBase === true && a.stale !== true ? { staleBase: true } : {}),
         });
       }
       return { ...(shown !== undefined ? { shown } : {}), stats: engine.viewStats() };

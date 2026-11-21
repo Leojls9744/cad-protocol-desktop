@@ -3,7 +3,7 @@
 //! on, drawn into a picture.
 
 use cadp_engine_core::{build_or_open, Progress};
-use cadp_engine_view::{Ask, Camera, Clip, Edl, Gpu, Keep, Look, ScanAsk, Shading, Stage, CLEAR, IDENTITY};
+use cadp_engine_view::{Ask, Camera, Clip, Edl, Gpu, Keep, Look, Older, Op, ScanAsk, Shading, ShapeIn, Shapes, Stage, CLEAR, IDENTITY};
 use las::{point::Classification, Builder, Point, Writer};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -171,20 +171,23 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     assert_eq!(stage.held_in(1, &other), (1, 0));
     assert_eq!(stage.held_in(0, &ask), (1, 1));
     // The scan asked for another way (here with its shading worked out: the brush's presses, its classes or its
-    // isolated points are others), the view where it was. Asked for plainly, the reading it had goes at once and
-    // the new one's base shows as soon as it's read.
+    // isolated points are others), the view where it was. Asked for plainly, the reading it had isn't drawn, and the
+    // new one's base shows as soon as it's read.
     let again = ScanAsk { keep: Keep { shade: true, ..Keep::all() }.keyed(), ..scan.clone() };
     let plain = Ask { camera: ask.camera, scans: vec![again.clone()], serial: 20, ..Ask::default() };
     stage.step(&plain).expect("a step");
     assert_eq!((stage.held(&plain), stage.stale_in(0, &plain)), ((0, 0), 0));
     assert!(stage.list(&plain).is_empty());
-    // Back as it was, whole again.
+    // Back as it was: the reading it had was kept on the card, so it's whole at once, nothing read for it.
+    stage.step(&ask).expect("a step");
+    assert_eq!(stage.held(&ask), (1, 1));
     settle(&mut stage, &ask);
     assert_eq!(stage.held(&ask), (1, 1));
     let was: Vec<u32> = stage.list(&ask).iter().map(|(c, _, _)| c.count).collect();
-    // Asked for with its older reading kept meanwhile (`stale`): that's what's drawn, every point of it, until the new
-    // one is whole (its base and this view's detail), though the view never moves.
-    let kept = Ask { stale: true, serial: 21, ..plain.clone() };
+    // Asked for with its older reading drawn till the new one is whole (the brush's strokes on the card make the two
+    // look alike): that's what's drawn, every point of it, until the new one has its base and this view's detail,
+    // though the view never moves.
+    let kept = Ask { stale: Older::TillWhole, serial: 21, ..plain.clone() };
     stage.step(&kept).expect("a step");
     assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((0, 0), 1));
     assert_eq!(stage.list(&kept).iter().map(|(c, _, _)| c.count).collect::<Vec<u32>>(), was);
@@ -204,15 +207,51 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     }
     assert!(seen_stale > 0);
     assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((1, 1), 0));
-    // The older reading's off the card now: asked for again, it's read again.
+    // The reading before it stays on the card beside it: asked for again (an undo), it's there whole at once; and so
+    // is this one, asked for after that (a redo).
+    stage.step(&ask).expect("a step");
+    assert_eq!(stage.held(&ask), (1, 1));
+    assert!(!stage.loading(), "nothing's read to go back");
     stage.step(&kept).expect("a step");
-    assert_eq!(stage.held(&ask), (0, 0));
+    assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((1, 1), 0));
+    assert!(!stage.loading());
+    // Undone once more: the first reading is the one showing as the scan's asked for a third way below.
+    stage.step(&ask).expect("a step");
+    assert_eq!(stage.held(&ask), (1, 1));
+    assert!(!stage.loading());
+    // Asked for a third way with its older reading drawn only till the new one's base is in (a change no stroke stands
+    // in for: the older reading is another state of the scan): the older one, then the new one's base as soon as
+    // there's any of it, then its detail.
+    let third = ScanAsk { keep: Keep { gaps: true, ..Keep::all() }.keyed(), ..scan.clone() };
+    let soon = Ask { camera: ask.camera, scans: vec![third.clone()], stale: Older::TillBase, serial: 24, ..Ask::default() };
+    stage.step(&soon).expect("a step");
+    assert_eq!((stage.held(&soon), stage.stale_in(0, &soon)), ((0, 0), 1));
+    let mut base_alone = false;
+    for _ in 0..4000 {
+        stage.step(&soon).expect("a step");
+        let (on, detail) = stage.held(&soon);
+        assert_eq!(on + stage.stale_in(0, &soon), 1, "never neither");
+        if on == 1 {
+            base_alone |= detail == 0;
+            if detail == 1 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(base_alone, "its base showed before its detail was in");
+    assert_eq!((stage.held(&soon), stage.stale_in(0, &soon)), ((1, 1), 0));
+    // Only the one reading before is kept, the one that was showing (not the one read last): the other is off the
+    // card (asked for again, it's read again).
+    stage.step(&soon).expect("a step");
+    assert_eq!(stage.held(&ask), (1, 1), "the reading that was showing just before");
+    assert_eq!(stage.held(&kept), (0, 0), "the one it was undone from");
     // Asked for by classes the engine hasn't yet (still being filed: it can't be read): drawn from the reading it had
     // all the while, nothing read; and left out where no older reading is allowed.
     let mut unread = Keep { shade: true, ..Keep::all() }.keyed();
     unread.key = "pending its classes".into();
-    let waits = Ask { camera: ask.camera, scans: vec![ScanAsk { keep: unread, pending: true, ..scan.clone() }], stale: true, serial: 23, ..Ask::default() };
-    let before: Vec<u32> = stage.list(&kept).iter().map(|(c, _, _)| c.count).collect();
+    let waits = Ask { camera: ask.camera, scans: vec![ScanAsk { keep: unread, pending: true, ..scan.clone() }], stale: Older::TillWhole, serial: 23, ..Ask::default() };
+    let before: Vec<u32> = stage.list(&soon).iter().map(|(c, _, _)| c.count).collect();
     for _ in 0..40 {
         stage.step(&waits).expect("a step");
         assert!(!stage.loading(), "nothing's read for a scan that can't be yet");
@@ -221,18 +260,38 @@ fn a_scans_base_comes_first_then_the_detail_for_the_view() {
     }
     assert_eq!(stage.list(&waits).iter().map(|(c, _, _)| c.count).collect::<Vec<u32>>(), before);
     // Its classes in: asked for as it was read before, the same reading again, nothing lost meanwhile.
-    stage.step(&kept).expect("a step");
-    assert_eq!((stage.held(&kept), stage.stale_in(0, &kept)), ((1, 1), 0));
-    let unasked = Ask { stale: false, ..waits.clone() };
+    stage.step(&soon).expect("a step");
+    assert_eq!((stage.held(&soon), stage.stale_in(0, &soon)), ((1, 1), 0));
+    let unasked = Ask { stale: Older::No, ..waits.clone() };
     stage.step(&unasked).expect("a step");
     assert_eq!((stage.held(&unasked), stage.stale_in(0, &unasked)), ((0, 0), 0));
     assert!(stage.list(&unasked).is_empty());
     // A scan it never had another reading of: nothing to keep, its base as soon as it's read.
-    let fresh = Ask { camera: ask.camera, scans: vec![ScanAsk { handle: 7, ..again.clone() }], stale: true, serial: 22, ..Ask::default() };
+    let fresh = Ask { camera: ask.camera, scans: vec![ScanAsk { handle: 7, ..again.clone() }], stale: Older::TillWhole, serial: 22, ..Ask::default() };
     stage.step(&fresh).expect("a step");
     assert_eq!((stage.held(&fresh), stage.stale_in(0, &fresh)), ((0, 0), 0));
     settle(&mut stage, &fresh);
     assert_eq!((stage.held(&fresh), stage.stale_in(0, &fresh)), ((1, 1), 0));
+    // With points isolated (here its west half, and its setup 77 left out so it's a scan the card has no reading of):
+    // once what's asked for is read, a base of it with none isolated is read too, and kept ready. Every point shown
+    // again: that base at once, then its detail.
+    let west = ShapeIn { right: [1.0, 0.0, 0.0], up: [0.0, 1.0, 0.0], poly: vec![5_999_990.0, 1_999_990.0, 6_000_100.0, 1_999_990.0, 6_000_100.0, 2_000_160.0, 5_999_990.0, 2_000_160.0], op: Op::Add, dabs: Vec::new(), near: None, off: Vec::new() };
+    let shapes = Arc::new(Shapes::new("west".into(), vec![west]));
+    let isolated = ScanAsk { keep: Keep { off: vec![77], isolate: Some(shapes), ..Keep::all() }.keyed(), ..scan.clone() };
+    let bare = ScanAsk { keep: Keep { off: vec![77], ..Keep::all() }.keyed(), ..scan.clone() };
+    let iso = Ask { camera: ask.camera, scans: vec![isolated], serial: 30, ..Ask::default() };
+    let all = Ask { camera: ask.camera, scans: vec![bare], serial: 31, ..Ask::default() };
+    assert_eq!(stage.held(&all), (0, 0));
+    settle(&mut stage, &iso);
+    assert_eq!(stage.held(&iso), (1, 1));
+    // (Its west half: about half its points.)
+    let half: u64 = stage.list(&iso).iter().map(|(c, _, _)| c.count as u64).sum();
+    stage.step(&all).expect("a step");
+    assert_eq!(stage.held(&all), (1, 0), "the spare base, there at once");
+    let thin: u64 = stage.list(&all).iter().map(|(c, _, _)| c.count as u64).sum();
+    assert!(thin as usize >= most.min(n) && half < thin * 2, "{thin} of the whole scan at once, {half} were isolated");
+    settle(&mut stage, &all);
+    assert_eq!(stage.held(&all), (1, 1));
     // As it was for what follows.
     settle(&mut stage, &ask);
     assert_eq!(stage.held(&ask), (1, 1));

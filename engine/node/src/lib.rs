@@ -1445,6 +1445,8 @@ pub struct ViewAskJs {
     pub strokes: Option<String>,
     /// A scan whose reading as asked for isn't whole yet is drawn from the reading it had meanwhile (1.39).
     pub stale: Option<bool>,
+    /// That, but only till the new reading's base is in (1.40): for a change the brush's strokes don't stand in for.
+    pub stale_base: Option<bool>,
 }
 
 #[napi(object)]
@@ -1775,7 +1777,13 @@ pub fn view_show(ask: ViewAskJs) -> Result<u32> {
             }
         }),
         strokes: strokes.unwrap_or_default(),
-        stale: ask.stale.unwrap_or(false),
+        stale: if ask.stale.unwrap_or(false) {
+            cadp_engine_view::Older::TillWhole
+        } else if ask.stale_base.unwrap_or(false) {
+            cadp_engine_view::Older::TillBase
+        } else {
+            cadp_engine_view::Older::No
+        },
     });
     Ok(shown)
 }

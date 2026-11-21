@@ -37,6 +37,13 @@
 //! card while it's read again. `scene::Tint`: the page's own colouring for
 //! the ones the engine hasn't (each point its nearest's colour). And 64
 //! limit boxes on the card.
+//!
+//! 1.40: no change of a scan sends it back to the page (Leo, 2026-11-20
+//! 20:37: "can we finalize this now or do we need to wait"). `view`: the
+//! reading a scan had before its last change is kept on the card (an undo
+//! is at once), a spare base with no points isolated is kept while some
+//! are (Unisolate is at once), and an older reading may stand in till the
+//! new one's base is in (`Older::TillBase`).
 
 pub mod brush;
 pub mod camera;
@@ -51,4 +58,4 @@ pub use camera::{Affine, Camera, IDENTITY};
 pub use gpu::{shading_reach, Cloud, Edl, Gpu, Look, Sender, Shading, ViewDraw, VIEWS, BY_CLASS, BY_HEIGHT, BY_INTENSITY, BY_ONE, BY_OWN, CLEAR, EDL_DARKEST, NO_STROKES};
 pub use scene::{drawn_box, ramp, sample, test_ring, wanted, Borrow, BorrowPoints, Clip, Keep, PointVertex, Points, Sight, Taken, Tint, CLIP_BOXES, RAMP, TINT_NONE};
 pub use shapes::{Op, ShapeIn, Shapes};
-pub use view::{Ask, ScanAsk, Stage, Stats, View};
+pub use view::{Ask, Older, ScanAsk, Stage, Stats, View};

@@ -665,6 +665,40 @@ async function checkEngineView({ engine, frame, inside, k, look, png, wait, log 
     }
     out.keptOlder = { seenOlder, leftOut, stats: kept };
     out.olderKept = Boolean(kept && kept.drawn === 60 && kept.scans >= 1 && leftOut === 0 && Array.isArray(kept.stale));
+    // 1.40: the reading the scan had before that one (in the page's colouring) is kept on the card beside it. Asked
+    // for again (an undo), it's the first frame of the ask that draws it, itself, with nothing read.
+    /** The stats of the first frame that showed an ask. */
+    const firstOf = async (serial, said) => {
+      let stats = said.stats || null;
+      for (let i = 0; i < 200 && !(stats && stats.drawn === serial); i += 1) {
+        await wait(20);
+        stats = (await engine.ask({ kind: "view-stats" })).stats || null;
+      }
+      return stats;
+    };
+    const atOnce = (stats, serial) => Boolean(stats && stats.drawn === serial && stats.scans >= 1 && !(Array.isArray(stats.stale) && stats.stale[0]));
+    const back = await firstOf(61, await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, tint: "check colours", look: { by: 0, px: 5 * k } }], ask: { ...view, serial: 61, staleBase: true } }));
+    out.wentBack = back;
+    out.backAtOnce = atOnce(back, 61);
+    // With points isolated (the floor's west 3 units), a base of the scan with none isolated is read too and kept
+    // ready: every point shown again, the first frame of the ask draws it (the east floor's there).
+    const west = await engine.ask({ kind: "view-shapes", key: "check west", shapes: [{ right: [1, 0, 0], up: [0, 1, 0], poly: [5999990, 1999990, 6000003, 1999990, 6000003, 2000020, 5999990, 2000020] }] });
+    out.shapesTaken = west.ok === true;
+    if (west.ok) {
+      const isolated = await showAndLook(62, byClass, { isolate: "check west" }, null);
+      out.isolated = isolated.stats;
+      // The spare's read once there's nothing else to read.
+      await wait(1500);
+      const all = await firstOf(63, await engine.ask({ kind: "view", scans: [{ token: engine.token, affine, ...byClass }], ask: { ...view, serial: 63, staleBase: true } }));
+      out.shownAll = all;
+      await wait(600);
+      const shownAll = await look(null);
+      if (isolated.picture && shownAll) {
+        out.sparePixels = { west: isolated.picture.at(cx - 100, cy + 30), east: isolated.picture.at(cx + 100, cy + 30), westAll: shownAll.at(cx - 100, cy + 30), eastAll: shownAll.at(cx + 100, cy + 30) };
+        const c = out.sparePixels;
+        out.spareAtOnce = atOnce(all, 63) && near(c.west, CLASS_FLOOR, 12) && near(c.east, SCAN_CLEAR, 12) && near(c.westAll, CLASS_FLOOR, 12) && near(c.eastAll, CLASS_FLOOR, 12);
+      }
+    }
     // Kept on the card and not drawn (the page drawing its scans itself): the background where the post was.
     const hidden = await showAndLook(70, { look: { by: 2, px: 5 * k, heights: [100, 104] } }, { hide: true }, null);
     out.hidden = hidden.stats;

@@ -717,11 +717,18 @@ test("1.35: the engine's own window is started in the app's frame, shown a view 
   assert.equal(brushed.stale, true);
   // None of them: none said. A preview with no size: left out.
   page.emit("message", { data: { kind: "view", id: 49, scans: [], ask: { ...boxed, brush: { x: 1, y: 2, r: 0 } } } });
-  assert.equal("brush" in calls.at(-1)[1] || "strokes" in calls.at(-1)[1] || "stale" in calls.at(-1)[1], false);
+  assert.equal("brush" in calls.at(-1)[1] || "strokes" in calls.at(-1)[1] || "stale" in calls.at(-1)[1] || "staleBase" in calls.at(-1)[1], false);
+  // 1.40: an older reading only till the new one's first sample is in; asked for with `stale` too, `stale` alone.
+  page.emit("message", { data: { kind: "view", id: 50, scans: [], ask: { ...boxed, staleBase: true } } });
+  assert.equal(calls.at(-1)[1].staleBase, true);
+  assert.equal("stale" in calls.at(-1)[1], false);
+  page.emit("message", { data: { kind: "view", id: 51, scans: [], ask: { ...boxed, stale: true, staleBase: true } } });
+  assert.equal(calls.at(-1)[1].stale, true);
+  assert.equal("staleBase" in calls.at(-1)[1], false);
   // How it's going, with nothing changed.
   page.emit("message", { data: { kind: "view-stats", id: 3 } });
   assert.deepEqual(page.out.at(-1), { kind: "view-stats", id: 3, stats: { started: true, running: true, frames: 12, points: 10, adapter: "A card" } });
-  assert.equal(calls.filter((c) => c[0] === "show").length, 8);
+  assert.equal(calls.filter((c) => c[0] === "show").length, 10);
   parent.emit("message", { data: { kind: "view-stop" } });
   assert.deepEqual(calls.at(-1), ["stop"]);
   page.emit("message", { data: { kind: "view-stats", id: 4 } });

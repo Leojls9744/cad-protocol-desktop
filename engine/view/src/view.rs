@@ -21,7 +21,15 @@
 //! reading it had stays on the card and is drawn until the new one is
 //! whole (its base and the view's detail), with the brush's strokes tested
 //! on the card standing in for what's changed (brush.rs), so a press of the
-//! brush never blanks the scan or thins it.
+//! brush never blanks the scan or thins it; or (`Older::TillBase`, for a
+//! change no stroke stands in for) until the new one's base is in.
+//!
+//! The reading a scan had before its last change is kept on the card
+//! beside the one it has (one for each scan), so going back to it (an
+//! undo, a colouring changed back) is at once. And while points are
+//! isolated, a base of each scan as it would be with none isolated is read
+//! when there's nothing else to read, so showing every point again is at
+//! once too: thinly, then its detail.
 
 use crate::brush::{Preview, Strokes};
 use crate::camera::{Affine, Camera};
@@ -47,6 +55,20 @@ pub struct ScanAsk {
     pub keep: Keep,
     pub look: Look,
     pub pending: bool,
+}
+
+/// Whether a scan whose reading as asked for isn't on the card yet is drawn
+/// from the reading it had meanwhile: not at all (it shows once its base is
+/// read); till its base is in (the older reading is another state of the
+/// scan, so the new one shows as soon as there's any of it); or till it's
+/// whole there, its base and the view's detail (the brush's strokes on the
+/// card make the older reading look as the new one will).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Older {
+    #[default]
+    No,
+    TillBase,
+    TillWhole,
 }
 
 /// What to show.
@@ -77,8 +99,8 @@ pub struct Ask {
     pub brush: Option<Preview>,
     /// The brush's strokes the scans as asked for haven't been read with: tested on the card.
     pub strokes: Arc<Strokes>,
-    /// A scan whose reading as asked for isn't whole yet is drawn from the reading it had (the strokes standing in for what's changed), not left out or thin.
-    pub stale: bool,
+    /// Whether a scan whose reading as asked for isn't in yet is drawn from the reading it had, and till when.
+    pub stale: Older,
 }
 
 /// How it's going.
@@ -130,6 +152,15 @@ type Who = (u32, String);
 
 fn who_of(s: &ScanAsk) -> Who {
     (s.handle, s.keep.who())
+}
+
+/// A scan asked for with points isolated, as it would be asked for with none: its spare base's.
+fn bare_of(s: &ScanAsk) -> Option<(ScanKey, Keep)> {
+    if s.pending || s.keep.isolate.is_none() {
+        return None;
+    }
+    let keep = Keep { isolate: None, ..s.keep.clone() }.keyed();
+    Some((scan_key(s.handle, s.most, &keep, &s.affine), keep))
 }
 
 fn scan_key(handle: u32, most: usize, keep: &Keep, a: &Affine) -> ScanKey {
@@ -285,6 +316,8 @@ struct Held {
     ready: [bool; VIEWS],
     /// Counted up as readings become whole: the newest whole one of a scan is the one kept while it's read again.
     seq: u64,
+    /// Asked for by a view at the last step (one kept beside the reading asked for, or a spare base, isn't).
+    asked: bool,
 }
 
 impl Held {
@@ -351,10 +384,13 @@ impl Stage {
         }
         let asks = &asks[..asks.len().min(VIEWS)];
         let asked = |key: &ScanKey| asks.iter().any(|a| a.scans.iter().any(|s| key_of(s) == *key));
+        // With points isolated: each scan's base as it would be with none, kept ready (read when there's nothing else to).
+        let spares: Vec<(ScanKey, Keep, &ScanAsk)> = asks.iter().flat_map(|a| a.scans.iter()).filter_map(|s| bare_of(s).map(|(key, keep)| (key, keep, s))).collect();
+        let spare = |key: &ScanKey| spares.iter().any(|(k, _, _)| k == key);
         let mut changed = false;
         for done in std::mem::take(&mut *self.loader.shared.done.lock().unwrap_or_else(|e| e.into_inner())) {
             // Asked for no longer (the scans changed while it was read): dropped.
-            if !asked(&done.key) {
+            if !asked(&done.key) && !spare(&done.key) {
                 continue;
             }
             self.load_ms = done.ms;
@@ -362,7 +398,7 @@ impl Stage {
             let at = match self.held.iter().position(|h| h.key == done.key) {
                 Some(k) => k,
                 None => {
-                    self.held.push(Held { key: done.key.clone(), who: done.who.clone(), base: None, detail: std::array::from_fn(|_| None), ready: [false; VIEWS], seq: 0 });
+                    self.held.push(Held { key: done.key.clone(), who: done.who.clone(), base: None, detail: std::array::from_fn(|_| None), ready: [false; VIEWS], seq: 0, asked: asked(&done.key) });
                     self.held.len() - 1
                 }
             };
@@ -386,28 +422,44 @@ impl Stage {
             }
             changed = true;
         }
-        // No longer asked for by any view: off the card; but where a view asks for it (`stale`), the newest whole
-        // reading of a scan stays till the one asked for is whole in that view. By one view no longer: its detail off.
+        // No longer asked for by any view: off the card, but for the newest whole reading each scan shown had before
+        // the one asked for now (drawn meanwhile where a view asks for it, `stale`; and there at once if it's asked for
+        // again), and the spare bases. By one view no longer: its detail off.
         let mut stale: Vec<ScanKey> = Vec::new();
-        for (slot, ask) in asks.iter().enumerate().filter(|(_, a)| a.stale) {
-            for s in &ask.scans {
-                let key = key_of(s);
-                if self.held.iter().any(|h| h.key == key && h.whole_in(slot)) {
-                    continue;
-                }
-                let who = who_of(s);
-                if let Some(h) = self.held.iter().filter(|h| h.who == who && h.whole() && !asked(&h.key)).max_by_key(|h| h.seq) {
-                    if !stale.contains(&h.key) {
-                        stale.push(h.key.clone());
-                    }
+        for s in asks.iter().flat_map(|a| a.scans.iter()) {
+            let who = who_of(s);
+            if let Some(h) = self.held.iter().filter(|h| h.who == who && h.whole() && !asked(&h.key)).max_by_key(|h| h.seq) {
+                if !stale.contains(&h.key) {
+                    stale.push(h.key.clone());
                 }
             }
         }
         let before = self.held.len();
-        self.held.retain(|h| asked(&h.key) || stale.contains(&h.key));
+        self.held.retain(|h| asked(&h.key) || stale.contains(&h.key) || spare(&h.key));
         changed |= self.held.len() != before;
+        // A reading asked for again that was only kept (the one before, on an undo; a spare base, every point shown
+        // again): its detail is looked for now, though no view has moved (what it has is for the view it was last
+        // asked for in, or none).
+        let mut again = false;
         for h in &mut self.held {
-            if stale.contains(&h.key) {
+            let now = asked(&h.key);
+            if now && !h.asked {
+                again = true;
+                // The newest again: the one kept if the scan's asked for another way next (not the one it was undone from).
+                if h.seq != 0 {
+                    self.seq += 1;
+                    h.seq = self.seq;
+                }
+            }
+            h.asked = now;
+        }
+        if again {
+            for w in &mut self.watch {
+                w.looked = None;
+            }
+        }
+        for h in &mut self.held {
+            if !asked(&h.key) {
                 continue;
             }
             for (slot, detail) in h.detail.iter_mut().enumerate() {
@@ -474,6 +526,13 @@ impl Stage {
                 return Ok(changed);
             }
         }
+        // Nothing else to read: a spare base that isn't on the card yet.
+        for (key, keep, s) in &spares {
+            if !self.held.iter().any(|h| h.key == *key && h.base.is_some()) {
+                self.loader.give(Job { key: key.clone(), who: who_of(s), index: s.index.clone(), affine: s.affine, keep: keep.clone(), most: s.most, camera: None, slot: 0, clip: Clip::default() });
+                break;
+            }
+        }
         Ok(changed)
     }
 
@@ -508,11 +567,17 @@ impl Stage {
     /// The reading of a scan a view draws, and whether it's an older one
     /// than was asked for: the one asked for once its base is on the card;
     /// but where the view asks for it (`Ask::stale`), the newest whole
-    /// reading the scan had until the one asked for is whole there too.
+    /// reading the scan had, until the one asked for has its base
+    /// (`Older::TillBase`) or is whole there too (`Older::TillWhole`).
     fn pick(&self, slot: usize, ask: &Ask, s: &ScanAsk) -> Option<(&Held, bool)> {
         let key = key_of(s);
         let fresh = self.held.iter().find(|h| h.key == key && h.base.is_some());
-        if !ask.stale || fresh.is_some_and(|h| h.whole_in(slot)) {
+        let enough = match ask.stale {
+            Older::No => true,
+            Older::TillBase => fresh.is_some(),
+            Older::TillWhole => fresh.is_some_and(|h| h.whole_in(slot)),
+        };
+        if enough {
             return fresh.map(|h| (h, false));
         }
         let who = who_of(s);
