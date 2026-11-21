@@ -96,8 +96,9 @@ fn key_of(s: &ScanAsk) -> ScanKey {
 /// A scan's base is this share of its points' budget (the rest is for the view's detail), and never under BASE_LEAST where the budget's that much.
 pub const BASE_SHARE: usize = 6;
 pub const BASE_LEAST: usize = 1_000_000;
-/// How often a still-changing view is looked at for new detail, ms.
-pub const DETAIL_EVERY_MS: u64 = 90;
+/// A view that's stopped changing is looked at for new detail once it's rested this long, ms; one still changing, only this often (reading takes every core but two for a moment: a zoom or a pan isn't made to share them all the way through).
+pub const DETAIL_REST_MS: u64 = 120;
+pub const DETAIL_MOVING_MS: u64 = 600;
 
 fn base_most(most: usize) -> usize {
     (most / BASE_SHARE).max(BASE_LEAST.min(most)).max(1)
@@ -182,7 +183,15 @@ impl Drop for Loader {
     }
 }
 
+/// The cores a sample's read on: all but two (the page's own thread and the frames keep theirs), one at least.
+pub fn loader_threads(cores: usize) -> usize {
+    cores.saturating_sub(2).max(1)
+}
+
 fn loader_run(shared: &LoaderShared, sender: &Sender) {
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    // With no pool of its own it reads on the engine's shared one (every core).
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(loader_threads(cores)).thread_name(|k| format!("cadp-view-read-{k}")).build().ok();
     loop {
         let job = {
             let mut held = shared.job.lock().unwrap_or_else(|e| e.into_inner());
@@ -199,7 +208,11 @@ fn loader_run(shared: &LoaderShared, sender: &Sender) {
         let t = Instant::now();
         let sight = job.camera.as_ref().map(|c| Sight::new(c, &job.affine));
         let most = if job.camera.is_some() { job.most } else { base_most(job.most) };
-        let (points, taken) = sample(&job.index, most, &job.keep, &job.affine, sight.as_ref());
+        let read = || sample(&job.index, most, &job.keep, &job.affine, sight.as_ref());
+        let (points, taken) = match &pool {
+            Some(pool) => pool.install(read),
+            None => read(),
+        };
         let cloud = sender.upload(&points);
         drop(points);
         shared.done.lock().unwrap_or_else(|e| e.into_inner()).push(Done { key: job.key, detail: job.camera.is_some(), cloud, taken, ms: t.elapsed().as_secs_f64() * 1000.0 });
@@ -218,15 +231,20 @@ struct Held {
 pub struct Stage {
     loader: Loader,
     held: Vec<Held>,
-    /// The view last looked at for detail, and when.
-    looked: Option<(Camera, Instant)>,
+    /// The view last looked at for detail.
+    looked: Option<Camera>,
+    /// The view as it last was, and when it last changed; when detail was last looked for.
+    seen: Option<Camera>,
+    changed_at: Instant,
+    looked_at: Instant,
     /// The last sample's reading and sending, ms.
     pub load_ms: f64,
 }
 
 impl Stage {
     pub fn new(sender: Sender) -> Result<Stage, String> {
-        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), looked: None, load_ms: 0.0 })
+        let now = Instant::now();
+        Ok(Stage { loader: Loader::start(sender)?, held: Vec::new(), looked: None, seen: None, changed_at: now, looked_at: now, load_ms: 0.0 })
     }
 
     /// Whether a sample is being read now.
@@ -267,6 +285,11 @@ impl Stage {
             }
             changed = true;
         }
+        // When the view last changed (its detail waits for it to rest, or is looked for now and then while it moves).
+        if ask.camera != self.seen {
+            self.seen = ask.camera;
+            self.changed_at = Instant::now();
+        }
         if self.loader.busy() {
             return Ok(changed);
         }
@@ -282,12 +305,15 @@ impl Stage {
         let Some(cam) = ask.camera.filter(|_| !ask.hide && !ask.test) else {
             return Ok(changed);
         };
-        if let Some((seen, when)) = &self.looked {
-            if *seen == cam || when.elapsed() < Duration::from_millis(DETAIL_EVERY_MS) {
-                return Ok(changed);
-            }
+        if self.looked == Some(cam) {
+            return Ok(changed);
         }
-        self.looked = Some((cam, Instant::now()));
+        let rested = self.changed_at.elapsed() >= Duration::from_millis(DETAIL_REST_MS);
+        if !rested && self.looked_at.elapsed() < Duration::from_millis(DETAIL_MOVING_MS) {
+            return Ok(changed);
+        }
+        self.looked = Some(cam);
+        self.looked_at = Instant::now();
         for s in &ask.scans {
             let key = key_of(s);
             let Some(h) = self.held.iter().find(|h| h.key == key) else { continue };
@@ -816,6 +842,15 @@ mod tests {
         assert_eq!(pace.due(ms(400)).map(|a| a.serial), Some(8));
         pace.push(ms(500), ask(9, f64::NAN));
         assert_eq!(pace.due(ms(500)).map(|a| a.serial), Some(9));
+    }
+
+    #[test]
+    fn a_sample_is_read_on_all_cores_but_two() {
+        assert_eq!(loader_threads(16), 14);
+        assert_eq!(loader_threads(4), 2);
+        assert_eq!(loader_threads(2), 1);
+        assert_eq!(loader_threads(1), 1);
+        assert_eq!(loader_threads(0), 1);
     }
 
     #[test]
